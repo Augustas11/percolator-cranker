@@ -1,19 +1,16 @@
-# Radar — what to watch next week (as of 2026-08-18)
+# Radar — what to watch next (as of 2026-09-11)
 
-- **Engine `master` frozen @ `143e68c` for a 5th straight window.** The whole
-  codex bug-hunt loop (`scripts/loop.md` now in the wrapper repo) runs as
-  DRAFT PRs against master; watch for the first *merge* of any of them —
-  especially anything that lands a new `cfg_*_chunks` knob or crank outcome
-  enum, which would be the first real cranker signal in weeks.
-- **Wrapper (`percolator-prog`) is where the action is.** `main` moved +4 this
-  window (portfolio incarnation IDs, EWMA fee clamp). Re-check the wrapper
-  `main` each run — assumption drift now originates here, not the library.
-- **Portfolio incarnation-ID ripple:** watch for follow-up wrapper commits that
-  thread `portfolio_id` into crystallization/claim paths — that hardens the
-  indexer/distributor snapshot contract the operator role depends on.
-- **`scripts/loop.md` bug classes** explicitly name "keeper/cranker cannot
-  drive an account toward health/settlement/close" as a first-class LoF/DoS
-  target — the cranker liveness surface is being actively fuzzed. Watch which
-  of these fixes graduate from DRAFT to merged.
-- **Still-unfired launch triggers:** first release tag, non-null program-id
-  RPC, any crank-economics doc. All null this run. RPC re-check every run.
+- **Execute revised M2.i, not the 2026-07-13 plan.** Re-pin to wrapper
+  `origin/main` (`d5e2ec6f`) + engine pin `495a5590` (or master tip
+  `8eb7142a` with eyes open). Delete `close_q`, cover A6–A8 / layout 18.
+- **Engine `#197`–`#200`.** Post-`#195` LoF/DoS cluster (receipts, pending
+  obligations, latent source capacity, side OI). Master is buildable; not
+  yet "wrapper-safe forever."
+- **Wrapper invariant flood after `#135`.** Follow-ons around fee order,
+  terminal permissionless payouts, hybrid/oracle provenance — watch for
+  `declare_id!` change or non-null RPC.
+- **A6 lien drain.** `V16_SOURCE_LIEN_RELEASE_CHUNK_DOMAINS = 1` — cranker
+  must loop one domain per crank; class exists ≠ drained.
+- **Still-unfired launch triggers:** first release tag, non-null program id
+  on mainnet/devnet, non-zero cranker fee shares, funding apply/settle
+  symbols. All still dark as of 2026-09-11.

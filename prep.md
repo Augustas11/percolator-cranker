@@ -223,65 +223,76 @@ once-only fix-up in `scripts/m1_bringup.sh` if this persists.
 
 - [x] **M2.h — Re-pinned 2026-07-07.**
 
-- [ ] **M2.i — Re-pin required (drift inspection 2026-07-13).**
-      Wrapper at `origin/main` is `186e9c6` (6 commits ahead of our
-      `62c8abf`); engine at `origin/master` is `143e68c` (6 commits
-      ahead of `c8aab33`). Full window inspected against the
-      assumption block.
+- [ ] **M2.i — Re-pin required (drift refresh 2026-09-11; supersedes 2026-07-13 plan).**
+      The 2026-07-13 targets are **stale**. Do **not** re-pin to wrapper
+      `186e9c6` / engine `143e68c` — those tips are now **~716 / ~123**
+      commits behind current `origin/main` / `origin/master`.
 
-      **Actions required before this checkbox can be ticked:**
-      1. **Remove `close_q: 0` from three call sites** —
-         `client/src/main.rs`, `cranker/src/submit.rs`,
-         `cranker/src/setup.rs`. Mechanical delete of the field from
-         `Instruction::PermissionlessCrank { ... }` literals; the
-         wrapper's decoder no longer accepts a `close_q` slot.
-      2. **Bump wrapper path-dep** (`./repo-prog`) to `186e9c6` and
-         engine `Cargo.toml` rev in `client/` and `cranker/` to
-         `143e68c` (matches wrapper's own engine pin at `origin/main`).
-      3. **Re-apply the `Cargo.lock` v4→v3 patch** to
-         `./repo-prog/Cargo.lock` so `cargo build-sbf --tools-version
-         v1.52` reads it. Same one-line `sed` as the last re-pin,
-         since main is still format-v4.
-      4. **Rebuild SBF + redeploy** to test-validator; re-run
-         `scripts/m1_bringup.sh` and `cargo run --release` in
-         `cranker/` to confirm CU is still in the 42_817-ish range
-         (the two new proof-only engine commits shouldn't shift it
-         meaningfully) and the mirror-custody chain still shows the
-         `Ok(mut) → Ok(no-mut) → …` shape.
+      **Current upstream (fetched 2026-09-11):**
+      - Engine `origin/master` = `8eb7142aada316f6c476f5c4fa815d3a806706d5`
+        (merge `#195`, 2026-09-03). Thaw after weeks frozen at `143e68c4`.
+      - Wrapper `origin/main` = `d5e2ec6fa727a1049a62851c3be19c638815b4e2`
+        (merge `#135`, 2026-09-03). Cargo engine pin =
+        `495a5590c97055bd71c6f94d849ff0298f243145` (parent of `#195` merge;
+        one commit behind master tip).
+      - Our tree still at wrapper path-dep `62c8abf0` (2026-06-28) and
+        cranker Cargo engine rev `c8aab338…` — **will not compile** against
+        either current tip.
 
-      **New engine invariants inspected (no code impact, logged so
-      the next drift check knows we already considered them):**
-      - `7388645` "Invalidate health certificates when oracle
-        targets change" (PR #107) — engine advances `oracle_epoch`
-        when a raw target moves; cached health certs become stale.
-        Our cranker uses committed state, doesn't cache health
-        certs. No code impact.
-      - `75283b7` "Block fresh risk during side recovery" (PR #108)
-        — new `EngineLockActive`-shaped hard-reject path during
-        side recovery. Same `Custom(N)` code, new trigger. The
-        response-classifier's error-name table doesn't need
-        updating.
-      - `143e68c` "Prevent same-trade OI masking" (PR #109) —
-        trader-facing risk fix. Not cranker-facing.
-      - `876fa9f` + wrapper `e502653` "Terminal spent-domain
-        cleanup / restart" (PR #94 / #191) — enable `CloseResolved`
-        + `RestartAssetOracle` variants in more edge cases. Our
-        plan-classification gate delegates to the upstream
-        predicate → still correct.
-      - `2cbca3e` + wrapper `392a376` "Make resolved bound
-        refinement internal" (PR #89 / #184) — narrows public API
-        surface. Nothing we depend on.
+      **Still true from the 2026-07-13 finding (re-verified on `origin/main`):**
+      - `Instruction::PermissionlessCrank { now_slot, observations }` —
+        **`close_q` remains deleted**. Our `close_q: 0` literals in
+        `client/src/main.rs`, `cranker/src/submit.rs` (and any twin in
+        `setup.rs`) are still compile-breakers. Mechanical delete still
+        required.
 
-      **Unchanged (verified 2026-07-13):**
-      - `CrankObservationHint { asset_index: u16, oracle_accounts: u8 }`.
-      - `CRANK_OBSERVATION_DECODE_MAX = 16`.
-      - `liquidation_cranker_fee_share_bps` / `maintenance_cranker_fee_share_bps`.
-      - Account ordering.
-      - `declare_id!("Perco1ator111…")` — placeholder. **M3 no-go.**
-      - No new `msg!()` for `AutoCrankPlanV16` — **Q1 still open**.
-      - No tags, no releases.
-      - `auto_crank_plan_requires_caller_observation` predicate —
-        unchanged; `plan_gate.rs` still correct.
+      **New breakages / obligations since 2026-07-13 (must fold into re-pin):**
+      1. **Engine plan surface grew.** `AutoCrankPlanV16` on master now
+         includes `ReleaseSourceLiens`, `AdvanceClose`, `FinalizeRecovery`
+         (plus prior variants). Roster is **A1–A8** with
+         `source_liens_releasable` = A6 and `resolved_winner` = A8
+         (`ActionableSummaryV16`). `plan_gate` / any exhaustive match
+         must cover the new variants; A6 drain is
+         `V16_SOURCE_LIEN_RELEASE_CHUNK_DOMAINS = 1` (one domain/call).
+      2. **Layout discriminator = 18** (`V16_LAYOUT_DISCRIMINATOR`).
+         Account readers assuming 17 are wrong.
+      3. **Spec v16.9.1** — whole-account K/F order is normative
+         (negatives first; source domain + canonical slot). Crank firing
+         order is no longer a same-refresh K/F PnL lever.
+      4. **Wrapper `#135`:** `portfolio_id` / incarnation threading is on
+         `main` across many ix paths; `PORTFOLIO_ACCOUNT_LEN` formula
+         changed vs our June pin. Indexer/distributor and any fixed-len
+         portfolio decode must bind `(market, portfolio pubkey, portfolio_id)`.
+      5. **Public helpers on master:** `advance_terminal_slab_not_atomic`,
+         `advance_resolved_slot_not_atomic`,
+         `force_close_recovery_pair_not_atomic` — optional for M2 loop,
+         relevant for M-recovery / terminal paths.
+      6. **Open post-thaw risk (do not treat master as wrapper-safe yet):**
+         engine `#197`–`#200` still open (receipt/obligation/source-capacity
+         / side-OI). Prefer re-pin target = **wrapper `main` + its Cargo
+         engine pin (`495a5590`)** unless you explicitly want master tip
+         `8eb7142a` and accept the one-commit skew.
+
+      **Revised actions before this checkbox can be ticked:**
+      1. Delete `close_q: …` from all `PermissionlessCrank { … }` literals.
+      2. Bump `./repo-prog` to `origin/main` (`d5e2ec6f…`) and set
+         `percolator` git rev in `cranker/Cargo.toml` + `client/Cargo.toml`
+         to the wrapper's pin `495a5590…` (or document a deliberate
+         master-tip override).
+      3. Re-apply `Cargo.lock` v4→v3 patch on `./repo-prog` if SBF
+         tooling still requires it.
+      4. Extend plan coverage for A6–A8 / new plan variants; implement
+         one-domain lien-release loop; bump layout-18 decodes.
+      5. Rebuild SBF + redeploy test-validator; re-run
+         `scripts/m1_bringup.sh` and `cargo run --release` in `cranker/`;
+         expect CU band to move — re-baseline, do not assume ~42_817.
+      6. Keep M3 gated: placeholder `declare_id!`, RPC null (see Watcher
+         notes).
+
+      **Explicitly deferred (not part of M2.i):** funding apply/settle
+      crank (still absent), paid live service / fee-share defaults (still 0),
+      mainnet deploy.
+
 
 ---
 
@@ -787,23 +798,11 @@ Keep this section ≤20 lines per digest. It's a status line, not a re-pitch.
 
 ## Watcher notes
 
-_Last updated by watcher: 2026-08-18 (overwrites prior block; content above is user-owned)._
+_Last updated by watcher: 2026-09-11 (overwrites prior block; content above is user-owned)._
 
-- **M3 = NO-GO, still pre-deployment.** `getAccountInfo(Perco1ator1111…)` →
-  `null` on BOTH mainnet-beta (slot 439966332) and devnet (slot 484953943).
-  `declare_id!` unchanged placeholder. No release/tag/chain-target/economics.
-- **Engine `master` frozen @ `143e68c` for a 5th window** — zero landed
-  changes since 2026-08-06. No cranker-enabling knob/phase/entry-point landed.
-- **No cranker instruction-shape drift.** `PermissionlessCrank { now_slot,
-  observations }`, `close_q`-absent, `CRANK_OBSERVATION_DECODE_MAX=16`,
-  account ordering — all unchanged. Existing re-pin plan still valid.
-- **⚠ New indexer/distributor obligation (wrapper `main` +4 → `36fa587e`):**
-  commit `567c76c9` adds `portfolio_id` incarnation field. **Portfolio
-  account layout grew +8 bytes** (`PORTFOLIO_ACCOUNT_LEN`), and any counter
-  snapshot must now bind `(market, portfolio pubkey, portfolio_id)` — a
-  close+recreate at the same pubkey gets a new ID. Fold both into the indexer
-  design at next re-pin. Also `c8cf4de8` EWMA-clamp-to-collected-fees (#198,
-  fee accounting, operator-relevant, not a cranker-ix change).
-- **Signal of the week:** the deployment surface (`percolator-prog`) is where
-  all drift now originates while the library sits still — watch `main`, not
-  `master`, for the next assumption break.
+- **M3 = NO-GO.** `declare_id!("Perco1ator111111111111111111111111111111111")` still placeholder. `getAccountInfo` → **null** on mainnet-beta (slot 446093639) and devnet (slot 496543354) as of 2026-09-11.
+- **Engine thaw:** `origin/master` moved `143e68c4 → 8eb7142a` via merge `#195` (2026-09-03), **~123 commits** including the long off-master LoF/DoS cluster. Spec **v16.9.1**, layout **18**, plan enum adds `ReleaseSourceLiens` / `AdvanceClose` / `FinalizeRecovery`, roster **A1–A8**.
+- **Wrapper thaw:** `origin/main` at `d5e2ec6f` (merge `#135`, 2026-09-03), Cargo pin `495a5590` (one behind master tip). Local `./repo-prog` still `62c8abf0` (2026-06-28).
+- **2026-07-13 M2.i plan is stale.** `close_q` deletion still required and still correct on `main`, but re-pin targets `186e9c6`/`143e68c` are obsolete (~716 / ~123 commits behind). See revised **M2.i** above — **do not execute the old three-step re-pin.**
+- **Our code still broken vs tips:** `close_q: 0` remains in `client/src/main.rs` + `cranker/src/submit.rs`; Cargo engine pin `c8aab338…` predates the thaw.
+- **Signal of the week:** master is a real build target again, but treat `#197`–`#200` + wrapper invariant flood as residual risk before calling the surface "operator-stable." Funding settle / fee shares / tags still absent.
