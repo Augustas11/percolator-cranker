@@ -1,0 +1,21 @@
+[package]
+name = "percolator-m1-bringup"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "m1_bringup"
+path = "src/main.rs"
+
+[dependencies]
+solana-sdk = "1.18"
+solana-client = "1.18"
+solana-program = "1.18"
+solana-transaction-status = "1.18"
+spl-token = { version = "4.0", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "2.0", features = ["no-entrypoint"] }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "c8aab33814dd30878cf9b054eca89bcd6cf9f5e7" }
+# Reuse the wrapper's instruction encoder + state helpers.
+percolator-prog = { path = "../repo-prog" }
+anyhow = "1"

@@ -1,0 +1,28 @@
+[package]
+name = "percolator-cranker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "percolator_cranker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cranker"
+path = "src/main.rs"
+
+[dependencies]
+solana-sdk = "1.18"
+solana-client = "1.18"
+solana-program = "1.18"
+spl-token = { version = "4.0", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "2.0", features = ["no-entrypoint"] }
+# Match the wrapper's engine pin exactly — otherwise two `percolator` crates
+# get linked into the graph with mismatched types.
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "c8aab33814dd30878cf9b054eca89bcd6cf9f5e7" }
+percolator-prog = { path = "../repo-prog" }
+solana-transaction-status = "1.18"
+solana-account-decoder = "1.18"
+bytemuck = { version = "1.14", features = ["derive", "min_const_generics"] }
+anyhow = "1"

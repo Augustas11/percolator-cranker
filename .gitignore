@@ -1,0 +1,29 @@
+# --- Rust build artifacts ---
+target/
+**/target/
+# Cargo.lock IS committed for the client + cranker binaries (reproducible builds).
+
+# --- Solana local ledger + tooling scratch ---
+.solana-test-ledger/
+/tmp/solana-test-validator.*
+
+# --- Upstream clones (not ours to redistribute) ---
+# aeyakovenko/percolator + aeyakovenko/percolator-prog live at these paths locally.
+# They're pinned by rev in client/Cargo.toml and cranker/Cargo.toml; anyone
+# reproducing this repo re-clones them separately.
+/repo/
+/repo-prog/
+
+# --- OS junk ---
+.DS_Store
+._*
+Thumbs.db
+
+# --- editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- session scratch ---
+*.log
