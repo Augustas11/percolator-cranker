@@ -8,11 +8,18 @@ number of loop cycles, discovers portfolios, and submits
 ## Quick run
 
 ```
-# From /Users/augstar/percolator-watch:
-scripts/m1_bringup.sh                 # provisions a validator + program
+# From /Users/augstar/projects/percolator-cranker:
+FORCE_SBF_REBUILD=1 ./scripts/m1_bringup.sh   # reset validator, deploy, M1
 PERCOLATOR_PROGRAM_ID=<from bringup> CRANKER_CYCLES=3 \
-    cargo run --release -p percolator-cranker
+    cargo run --release --manifest-path cranker/Cargo.toml
 ```
+
+Reference / dry-run only. Not a paid live service. M3 is NO-GO until a
+non-null program id lands on a public cluster.
+
+**CU (2026-09-11 pin `495a5590` / wrapper `d5e2ec6f`):** a fresh no-op
+`PermissionlessCrank` consumes **17,975 program CU** (tx total 18,299).
+Do not assume the old ~42,817 band.
 
 Env vars:
 * `CRANKER_CYCLES` (default `3`) — number of loop iterations.
@@ -44,16 +51,13 @@ at the end.
 ## What's real
 
 * **Discovery.** `discovery.rs` reads the 11-byte header + provenance
-  `market_group_id` and `owner` at fixed byte offsets. Layout confirmed
-  against `PortfolioAccountV16Account` in `repo/src/v16.rs:15754` and
-  `ProvenanceHeaderV16Account` at `repo/src/v16.rs:5324`.
+  `market_group_id` / `owner`, requires layout discriminator **18**, and
+  surfaces wrapper `portfolio_id`.
 * **Plan-classification gate.** `plan_gate.rs` delegates to the upstream
   `percolator::auto_crank_plan_requires_caller_observation` predicate
-  (`repo/src/v16.rs:187`, exported at `repo/src/lib.rs:54`), pinned by
-  the proofs
-  `proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan`
-  and
-  `v16_auto_crank_progress_realizable_without_observation_for_every_class`.
+  (`repo/src/v16.rs:190`). Covers A6 `ReleaseSourceLiens`, `AdvanceClose`,
+  `FinalizeRecovery`, A8 `CloseResolved` without a hand-rolled match.
+  A6 drain is one domain per crank until `Ok(no-mut)`.
   Never hand-roll the match — see the module docstring.
 * **Three-way response classifier.** `submit.rs` distinguishes
   `Err(hard-reject)`, `Ok(no-mut)`, and `Ok(mut)` via (a) tx status,

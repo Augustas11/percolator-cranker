@@ -84,6 +84,9 @@ mod tests {
         assert!(!needs_observation(&AutoCrankPlanV16::DeclareRecovery {
             reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
         }));
+        assert!(!needs_observation(&AutoCrankPlanV16::ReleaseSourceLiens));
+        assert!(!needs_observation(&AutoCrankPlanV16::AdvanceClose));
+        assert!(!needs_observation(&AutoCrankPlanV16::FinalizeRecovery));
         assert!(!needs_observation(&AutoCrankPlanV16::CloseResolved));
         assert!(!needs_observation(&AutoCrankPlanV16::NoAction));
     }
@@ -95,6 +98,9 @@ mod tests {
             AutoCrankPlanV16::RefreshAccount { asset_index: Some(0) },
             AutoCrankPlanV16::SettleBChunk { asset_index: 0 },
             AutoCrankPlanV16::Liquidate { asset_index: 0 },
+            AutoCrankPlanV16::ReleaseSourceLiens,
+            AutoCrankPlanV16::AdvanceClose,
+            AutoCrankPlanV16::FinalizeRecovery,
             AutoCrankPlanV16::CloseResolved,
             AutoCrankPlanV16::NoAction,
         ] {

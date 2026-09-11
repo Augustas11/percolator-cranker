@@ -8,7 +8,7 @@
 //!
 //! For asset `i`, the wrapper's per-asset profile at
 //! `repo-prog/src/v16_program.rs:556` (struct `AssetOracleProfileV16`)
-//! carries:
+//! carries (`ASSET_ORACLE_PROFILE_LEN` = 424 bytes at the current pin):
 //! * `oracle_mode: u8` — dispatch discriminant:
 //!   * `ORACLE_MODE_MANUAL       = 0` — no oracle account; mark is stored.
 //!   * `ORACLE_MODE_HYBRID_AFTER_HOURS = 1` — external oracle path; the

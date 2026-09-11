@@ -19,8 +19,9 @@ solana-program = "1.18"
 spl-token = { version = "4.0", features = ["no-entrypoint"] }
 spl-associated-token-account = { version = "2.0", features = ["no-entrypoint"] }
 # Match the wrapper's engine pin exactly — otherwise two `percolator` crates
-# get linked into the graph with mismatched types.
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "c8aab33814dd30878cf9b054eca89bcd6cf9f5e7" }
+# get linked into the graph with mismatched types. Wrapper `d5e2ec6f` (#135)
+# pins engine `495a5590` (parent of master-tip merge #195 / `8eb7142a`).
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "495a5590c97055bd71c6f94d849ff0298f243145" }
 percolator-prog = { path = "../repo-prog" }
 solana-transaction-status = "1.18"
 solana-account-decoder = "1.18"

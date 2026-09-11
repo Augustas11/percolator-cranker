@@ -53,7 +53,7 @@ fn main() -> Result<()> {
     // Smoke-test the M2 plan-classification gate so a regression in the
     // upstream predicate trips this binary's build / first run.
     {
-        use percolator::AutoCrankPlanV16;
+        use percolator::{AutoCrankPlanV16, PermissionlessRecoveryReasonV16};
         let refresh_none = AutoCrankPlanV16::RefreshAccount { asset_index: None };
         let liquidate = AutoCrankPlanV16::Liquidate { asset_index: 0 };
         assert!(
@@ -65,8 +65,22 @@ fn main() -> Result<()> {
             "predicate regression: Liquidate must NOT require a caller observation \
              (upstream 3d250d2/f5d291e/8338726 made it dispatch from committed state)"
         );
+        for plan in [
+            AutoCrankPlanV16::ReleaseSourceLiens,
+            AutoCrankPlanV16::AdvanceClose,
+            AutoCrankPlanV16::FinalizeRecovery,
+            AutoCrankPlanV16::CloseResolved,
+            AutoCrankPlanV16::DeclareRecovery {
+                reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            },
+        ] {
+            assert!(
+                !plan_gate::needs_observation(&plan),
+                "predicate regression: {plan:?} must NOT require a caller observation"
+            );
+        }
         println!(
-            "plan-gate smoke OK (Refresh{{None}}=needs_obs, Liquidate=no_obs_needed)"
+            "plan-gate smoke OK (Refresh{{None}}=needs_obs; Liquidate/A6/A8/AdvanceClose=no_obs)"
         );
     }
 
@@ -179,11 +193,16 @@ fn main() -> Result<()> {
         .context("mint to user")?;
 
     let deposit_amount: u128 = 1_000_000;
+    let user_bind = portfolio_binding(&rpc.get_account_data(&user_portfolio)?)?;
     send_prog_ix(
         &rpc,
         program_id,
         &payer,
-        ProgInstruction::Deposit { amount: deposit_amount },
+        ProgInstruction::Deposit {
+            portfolio_id: user_bind.0,
+            expected_sequence: user_bind.1,
+            amount: deposit_amount,
+        },
         vec![
             AccountMeta::new(user.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -204,7 +223,6 @@ fn main() -> Result<()> {
     // refresh/no-action plan and the tx succeeds with no mutation of value.
     let crank_ix = ProgInstruction::PermissionlessCrank {
         now_slot: 1,
-        close_q: 0,
         observations: vec![CrankObservationHint {
             asset_index: 0,
             oracle_accounts: 0,
@@ -231,11 +249,16 @@ fn main() -> Result<()> {
     // -------- Step 5b: maintenance-fee crank with cranker reward portfolio --------
     // Set 50% cranker share so SyncMaintenanceFee routes a portion of the
     // accrued fee into the appended cranker portfolio.
+    let maint = market_authority_binding(&rpc.get_account_data(&market.pubkey())?)?;
     send_prog_ix(
         &rpc,
         program_id,
         &payer,
-        ProgInstruction::UpdateMaintenanceFeePolicy { cranker_share_bps: 5000 },
+        ProgInstruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 5000,
+            policy_sequence: maint.1.saturating_add(1),
+            authority_epoch: maint.0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -303,9 +326,25 @@ fn main() -> Result<()> {
         HEADER_LEN, wrapper_end, WRAPPER_CONFIG_LEN
     );
     println!("MARKET_GROUP_OFF = {MARKET_GROUP_OFF}");
+    println!("V16_LAYOUT_DISCRIMINATOR (expected) = 18");
 
     println!("== M1 bring-up OK ==");
     Ok(())
+}
+
+/// `(portfolio_id, expected_sequence)`.
+fn portfolio_binding(data: &[u8]) -> Result<(u64, u64)> {
+    let id = state::read_portfolio_id(data).map_err(|e| anyhow!("read_portfolio_id: {e}"))?;
+    let seq = state::read_portfolio_matcher_sequence(data)
+        .map_err(|e| anyhow!("read_portfolio_matcher_sequence: {e}"))?;
+    Ok((id, seq))
+}
+
+/// `(authority_epoch, maintenance_fee_seq)`.
+fn market_authority_binding(data: &[u8]) -> Result<(u64, u64)> {
+    let seqs = state::read_asset_control_sequences(data, 0)
+        .map_err(|e| anyhow!("read_asset_control_sequences: {e}"))?;
+    Ok((seqs.authority_epoch, seqs.maintenance_fee))
 }
 
 fn dirs_home() -> Result<std::path::PathBuf> {
@@ -546,7 +585,7 @@ fn send_prog_ix_capture_logs(
 fn fetch_tx_logs(
     rpc: &RpcClient,
     sig: &solana_sdk::signature::Signature,
-    _label: &str,
+    label: &str,
 ) -> Result<Vec<String>> {
     // Fetch logs for this transaction. JsonParsed encoding returns log messages
     // in the meta; default Json encoding doesn't.
@@ -561,7 +600,27 @@ fn fetch_tx_logs(
             .unwrap_or_default(),
         Err(_) => vec![],
     };
+    let cu = parse_consumed_cu(&logs);
+    if let Some(cu) = cu {
+        println!("  {label} consumed_cu = {cu}");
+    }
     Ok(logs)
+}
+
+fn parse_consumed_cu(logs: &[String]) -> Option<u64> {
+    // "Program <id> consumed 42817 of 1400000 compute units"
+    for line in logs {
+        let Some(rest) = line.split(" consumed ").nth(1) else {
+            continue;
+        };
+        let Some(num) = rest.split_whitespace().next() else {
+            continue;
+        };
+        if let Ok(cu) = num.parse::<u64>() {
+            return Some(cu);
+        }
+    }
+    None
 }
 
 fn byte_diff_count(a: &[u8], b: &[u8]) -> usize {

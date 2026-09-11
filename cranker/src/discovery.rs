@@ -15,6 +15,8 @@ use solana_client::{
 };
 use solana_sdk::{account::Account, commitment_config::CommitmentConfig, pubkey::Pubkey};
 
+use crate::binding::{self, V16_LAYOUT_DISCRIMINATOR};
+
 /// One portfolio row surfaced by discovery. The cranker ranks these before
 /// deciding whom to crank.
 #[derive(Debug, Clone)]
@@ -39,6 +41,18 @@ impl DiscoveredPortfolio {
     /// of `V16_MAX_PORTFOLIO_ASSETS_N`.
     pub fn owner(&self) -> Option<Pubkey> {
         read_pubkey_at(&self.account.data, HEADER_LEN + 64)
+    }
+
+    /// Engine layout discriminator from `ProvenanceHeaderV16Account`.
+    /// Current pin requires `V16_LAYOUT_DISCRIMINATOR = 18`.
+    pub fn layout_discriminator(&self) -> Option<u16> {
+        binding::layout_discriminator(&self.account.data)
+    }
+
+    /// Wrapper-assigned portfolio incarnation. Bind this (with market +
+    /// pubkey) on any ix that now takes `portfolio_id`.
+    pub fn portfolio_id(&self) -> Option<u64> {
+        binding::read_portfolio_id_bytes(&self.account.data)
     }
 }
 
@@ -119,6 +133,8 @@ pub fn rank_by_staleness(
         .filter(|p| p.market_group_id().as_ref() == Some(market))
         .filter(|p| p.pubkey != *self_reward_portfolio)
         .filter(|p| p.owner().map(|o| o != Pubkey::default()).unwrap_or(false))
+        .filter(|p| p.layout_discriminator() == Some(V16_LAYOUT_DISCRIMINATOR))
+        .filter(|p| p.portfolio_id().is_some())
         .collect();
     kept.sort_by_key(|p| p.pubkey.to_bytes());
     kept

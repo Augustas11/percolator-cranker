@@ -12,9 +12,12 @@
 //!   `RefreshAccount{None}` because no observation was attached. Safe
 //!   to retry once we have an observation to attach.
 //! * `Ok(mutation)` — engine dispatched a progress step (`Liquidate`,
-//!   `SettleBChunk`, `RefreshAccount{Some}`, `DeclareRecovery`,
+//!   `SettleBChunk`, `RefreshAccount{Some}`, `ReleaseSourceLiens`,
+//!   `AdvanceClose`, `DeclareRecovery`, `FinalizeRecovery`,
 //!   `CloseResolved`). NOT idempotent. Retry only after re-reading state
-//!   and confirming the goal isn't already achieved.
+//!   and confirming the goal isn't already achieved. A6
+//!   (`ReleaseSourceLiens`) progresses one domain per call
+//!   (`V16_SOURCE_LIEN_RELEASE_CHUNK_DOMAINS = 1`); drain in a loop.
 
 use anyhow::{anyhow, Context, Result};
 use percolator_prog::ix::{CrankObservationHint, Instruction as ProgInstruction};
@@ -28,6 +31,7 @@ use solana_sdk::{
     transaction::Transaction,
 };
 
+use crate::binding::{layout_is_current, V16_LAYOUT_DISCRIMINATOR};
 use crate::observation::FetchedObservation;
 
 /// Classification of a submission's outcome. Encapsulates the three-way
@@ -105,6 +109,8 @@ pub fn wrapper_error_name(msg: &str) -> Option<&'static str> {
         0x1B => "OracleStale",
         0x1C => "OracleConfTooWide",
         0x1D => "InvalidOracleKey",
+        0x1E => "AssetGenerationMismatch",
+        0x1F => "RentExemptRequired",
         _ => return None,
     })
 }
@@ -156,7 +162,6 @@ pub fn submit_crank(
 
     let ix = ProgInstruction::PermissionlessCrank {
         now_slot,
-        close_q: 0, // engine ignores caller size (see prep.md PENDING PR #92)
         observations: hints,
     };
     let instruction = Instruction {
@@ -165,10 +170,19 @@ pub fn submit_crank(
         data: ix.encode(),
     };
 
-    // Snapshot pre-state.
+    // Snapshot pre-state. Layout 18 is required on the decode path;
+    // a stale-layout account is a hard reject, not a crank.
     let pre_target = rpc
         .get_account_data(target_portfolio)
         .context("read target portfolio pre-state")?;
+    if !layout_is_current(&pre_target) {
+        return Ok(CrankOutcome::HardReject {
+            error: format!(
+                "target portfolio layout_discriminator != {V16_LAYOUT_DISCRIMINATOR}"
+            ),
+            error_name: Some("InvalidAccountLen"),
+        });
+    }
     let pre_reward = match reward_portfolio {
         Some(r) => Some(rpc.get_account_data(r).context("read reward portfolio pre-state")?),
         None => None,
@@ -261,4 +275,35 @@ fn fnv_hash(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use percolator_prog::ix::{CrankObservationHint, Instruction as ProgInstruction};
+
+    #[test]
+    fn permissionless_crank_wire_has_no_close_q() {
+        let ix = ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        };
+        let bytes = ix.encode();
+        // tag=5 (1) | now_slot (8) | n (1) | hint (asset_index 2 + oracle_accounts 1)
+        assert_eq!(bytes.len(), 1 + 8 + 1 + 3);
+        assert_eq!(bytes[0], 5);
+        let decoded = ProgInstruction::decode(&bytes).expect("round-trip");
+        match decoded {
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations,
+            } => {
+                assert_eq!(now_slot, 1);
+                assert_eq!(observations.len(), 1);
+            }
+            other => panic!("unexpected decode: {other:?}"),
+        }
+    }
 }

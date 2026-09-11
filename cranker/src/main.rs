@@ -26,6 +26,7 @@
 //!   * No exponential backoff on retries — per the mission brief, just
 //!     iterate on NonProgress cleanly.
 
+mod binding;
 mod discovery;
 mod observation;
 mod plan_gate;
@@ -42,6 +43,7 @@ use solana_sdk::{
 };
 use std::{env, str::FromStr, time::Duration};
 
+use crate::binding::{SOURCE_LIEN_DRAIN_MAX_STEPS, V16_LAYOUT_DISCRIMINATOR};
 use crate::submit::CrankOutcome;
 
 const RPC_URL: &str = "http://127.0.0.1:8899";
@@ -86,6 +88,32 @@ fn main() -> Result<()> {
     println!("program_id = {program_id}");
     println!("cycles = {cycles} (CRANKER_CYCLES to override)");
     println!("hint_budget = {HINT_BUDGET}");
+    println!(
+        "layout_discriminator = {V16_LAYOUT_DISCRIMINATOR} (A6 drain cap = {SOURCE_LIEN_DRAIN_MAX_STEPS})"
+    );
+
+    // Smoke-test the M2 plan-classification gate, including post-#195
+    // variants. Delegates to auto_crank_plan_requires_caller_observation.
+    {
+        use percolator::PermissionlessRecoveryReasonV16;
+        let refresh_none = AutoCrankPlanV16::RefreshAccount { asset_index: None };
+        assert!(plan_gate::needs_observation(&refresh_none));
+        for plan in [
+            AutoCrankPlanV16::ReleaseSourceLiens,
+            AutoCrankPlanV16::AdvanceClose,
+            AutoCrankPlanV16::FinalizeRecovery,
+            AutoCrankPlanV16::CloseResolved,
+            AutoCrankPlanV16::DeclareRecovery {
+                reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            },
+        ] {
+            assert!(
+                !plan_gate::needs_observation(&plan),
+                "predicate regression: {plan:?} must NOT require a caller observation"
+            );
+        }
+        println!("plan-gate smoke OK (Refresh{{None}}=needs_obs; A6/A7/A8/AdvanceClose=no_obs)");
+    }
 
     let rpc = RpcClient::new_with_commitment(RPC_URL.to_string(), CommitmentConfig::confirmed());
     let _ = rpc.get_version().context("connect to RPC")?;
@@ -168,11 +196,9 @@ fn main() -> Result<()> {
                 None => println!("  oracle-profile asset 0: unreadable (market slab too short)"),
             };
             // Consult the plan-classification gate against the one plan variant
-            // that would require an observation (`RefreshAccount{None}`). This
-            // tells the caller whether our discovered observation is sufficient
-            // for the worst-case plan the engine might select. In our
-            // synthetic MANUAL market, `oracle_leg_count == 0` so an empty
-            // observation is the CORRECT payload for every plan variant.
+            // that would require an observation (`RefreshAccount{None}`). A6–A8
+            // / AdvanceClose / FinalizeRecovery all dispatch without a caller
+            // observation (delegated; not hand-rolled).
             let hypothetical = AutoCrankPlanV16::RefreshAccount { asset_index: None };
             if plan_gate::needs_observation(&hypothetical) && observation.oracle_accounts.is_empty()
             {
@@ -189,21 +215,44 @@ fn main() -> Result<()> {
                      synthesize from committed state."
                 );
             }
+            println!(
+                "  plan-gate: A6 ReleaseSourceLiens / AdvanceClose / FinalizeRecovery / A8 CloseResolved \
+                 all needs_obs=false (chunk = {} domain/call)",
+                binding::SOURCE_LIEN_RELEASE_CHUNK_DOMAINS
+            );
 
             // ---- submit + classify (M2.b + M2.f) ----
-            let outcome = submit::submit_crank(
-                &rpc,
-                &program_id,
-                &env.payer,
-                &env.market,
-                &candidate.pubkey,
-                Some(&env.cranker_portfolio),
-                std::slice::from_ref(&observation),
-                now_slot,
-            )?;
+            // A6 drain: ReleaseSourceLiens progresses one domain per crank.
+            // Keep submitting the same candidate until Ok(no-mut) / HardReject
+            // or SOURCE_LIEN_DRAIN_MAX_STEPS. Order-canonical K/F (v16.9.1)
+            // means this loop is liveness, not a same-refresh PnL lever.
+            let mut inner_slot = now_slot;
+            for drain_step in 0..SOURCE_LIEN_DRAIN_MAX_STEPS {
+                let outcome = submit::submit_crank(
+                    &rpc,
+                    &program_id,
+                    &env.payer,
+                    &env.market,
+                    &candidate.pubkey,
+                    Some(&env.cranker_portfolio),
+                    std::slice::from_ref(&observation),
+                    inner_slot,
+                )?;
 
-            let row = classify_and_log(cycle, &candidate.pubkey, &outcome);
-            custody.push(row);
+                let stop = matches!(
+                    &outcome,
+                    CrankOutcome::Ok { mutated: false, .. } | CrankOutcome::HardReject { .. }
+                );
+                if drain_step > 0 {
+                    println!("  A6 drain step {drain_step}");
+                }
+                let row = classify_and_log(cycle, &candidate.pubkey, &outcome);
+                custody.push(row);
+                if stop {
+                    break;
+                }
+                inner_slot = rpc.get_slot()?;
+            }
         }
 
         if cycle + 1 < cycles {
@@ -365,7 +414,12 @@ fn run_q6_withdrawal_test(
     let withdraw_amount = cranker_capital.min(100);
     let (vault_authority, _bump) =
         Pubkey::find_program_address(&[b"vault", env.market.as_ref()], program_id);
-    let withdraw_ix = ProgInstruction::Withdraw { amount: withdraw_amount };
+    let cranker_bind = crate::binding::portfolio_binding(&cranker_data)?;
+    let withdraw_ix = ProgInstruction::Withdraw {
+        portfolio_id: cranker_bind.portfolio_id,
+        expected_sequence: cranker_bind.sequence,
+        amount: withdraw_amount,
+    };
     let withdraw_instr = Instruction {
         program_id: *program_id,
         accounts: vec![

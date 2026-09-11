@@ -11,6 +11,7 @@
 //! so each module compiles once instead of twice. Left as-is here to keep
 //! this change non-destructive to the working binary.
 
+pub mod binding;
 pub mod discovery;
 pub mod observation;
 pub mod plan_gate;

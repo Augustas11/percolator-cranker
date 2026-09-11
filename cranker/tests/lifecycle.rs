@@ -109,6 +109,9 @@ fn crank_lifecycle_preserves_conservation() -> Result<()> {
             }
 
             // ---- submit + classify ----
+            // A6 drain: one domain per crank until Ok(no-mut) / HardReject.
+            let mut inner_slot = now_slot;
+            for drain_step in 0..percolator_cranker::binding::SOURCE_LIEN_DRAIN_MAX_STEPS {
             let outcome = submit::submit_crank(
                 &rpc,
                 &program_id,
@@ -117,7 +120,7 @@ fn crank_lifecycle_preserves_conservation() -> Result<()> {
                 &candidate.pubkey,
                 Some(&env.cranker_portfolio),
                 std::slice::from_ref(&obs),
-                now_slot,
+                inner_slot,
             )?;
             submissions += 1;
 
@@ -149,6 +152,16 @@ fn crank_lifecycle_preserves_conservation() -> Result<()> {
             // the market must still conserve value. A hard reject rolls back
             // (state unchanged); a progressing crank must move state legally.
             common::assert_conservation_at(&rpc, &program_id, &env.market)?;
+            let stop = matches!(
+                &outcome,
+                CrankOutcome::Ok { mutated: false, .. } | CrankOutcome::HardReject { .. }
+            );
+            if stop {
+                break;
+            }
+            let _ = drain_step;
+            inner_slot = rpc.get_slot()?;
+            }
         }
     }
 

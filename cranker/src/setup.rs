@@ -14,6 +14,8 @@ use percolator_prog::{
     ix::Instruction as ProgInstruction,
     state,
 };
+
+use crate::binding;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
@@ -122,12 +124,19 @@ pub fn bootstrap_with_fee(
         &[&admin],
     )?;
 
-    // 50% cranker share of maintenance fees.
+    // 50% cranker share of maintenance fees. Wrapper `#135` binds
+    // policy_sequence (strictly newer than the current lane) and
+    // authority_epoch (exact match on asset 0).
+    let maint = binding::market_authority_binding(&rpc.get_account_data(&market.pubkey())?)?;
     send_prog_ix(
         rpc,
         program_id,
         &payer,
-        ProgInstruction::UpdateMaintenanceFeePolicy { cranker_share_bps: 5000 },
+        ProgInstruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 5000,
+            policy_sequence: maint.maintenance_fee_seq.saturating_add(1),
+            authority_epoch: maint.authority_epoch,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -143,11 +152,16 @@ pub fn bootstrap_with_fee(
     // tail account and rejects with InvalidInstruction. We still won't
     // see nonzero fee movement in M2 (no liquidations happen in the
     // synthetic market), but the ABI shape is now correctly exercised.
+    let liq = binding::market_authority_binding(&rpc.get_account_data(&market.pubkey())?)?;
     send_prog_ix(
         rpc,
         program_id,
         &payer,
-        ProgInstruction::UpdateLiquidationFeePolicy { cranker_share_bps: 5000 },
+        ProgInstruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 5000,
+            policy_sequence: liq.liquidation_fee_seq.saturating_add(1),
+            authority_epoch: liq.authority_epoch,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -164,11 +178,16 @@ pub fn bootstrap_with_fee(
         spl_associated_token_account::get_associated_token_address(&user.pubkey(), &mint.pubkey());
     create_ata(rpc, &payer, &user.pubkey(), &mint.pubkey())?;
     mint_to(rpc, &payer, &mint.pubkey(), &user_token, &payer, 1_000_000)?;
+    let user_bind = binding::portfolio_binding(&rpc.get_account_data(&user_portfolio)?)?;
     send_prog_ix(
         rpc,
         program_id,
         &payer,
-        ProgInstruction::Deposit { amount: 1_000_000 },
+        ProgInstruction::Deposit {
+            portfolio_id: user_bind.portfolio_id,
+            expected_sequence: user_bind.sequence,
+            amount: 1_000_000,
+        },
         vec![
             AccountMeta::new(user.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),

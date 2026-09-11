@@ -18,10 +18,10 @@ Local prototype work against [aeyakovenko/percolator](https://github.com/aeyakov
 
 ## Status
 
-- **M1**: end-to-end green. `PermissionlessCrank` round-trip lands at ~42,700 CU on a fresh no-op refresh.
-- **M2**: 5+ consecutive cycles green. Discovery → plan gate → submit → three-way classify → reconciliation.
-- **M3**: no-go. Program id `Perco1ator111…` still returns `null` on both mainnet-beta and devnet as of the last drift check (see `prep.md` header for the date).
-- **Outstanding**: one mechanical re-pin (drop `close_q` from three call sites, bump wrapper + engine pins) — see the M2.i entry in `prep.md`.
+- **M1**: end-to-end green on wrapper `d5e2ec6f` + engine `495a5590`. A fresh no-op `PermissionlessCrank` consumes **17,975 program CU** (tx total 18,299) — re-baselined 2026-09-11; do not assume ~42,817.
+- **M2**: loop green (discovery → plan gate including A6–A8 → submit → three-way classify → A6 one-domain drain). Fresh MANUAL deposit portfolios are already idle (`Ok(no-mut)`).
+- **M3**: no-go. Program id `Perco1ator111…` still returns `null` on both mainnet-beta and devnet. **This is a reference / dry-run cranker, not a paid live service.**
+- **Pins**: wrapper `d5e2ec6f` (`origin/main`, `#135`); engine `495a5590` (wrapper Cargo pin, one behind master tip `8eb7142a` / `#195`). Layout 18. Spec v16.9.1.
 
 ## Attribution
 

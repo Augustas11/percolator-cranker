@@ -18,6 +18,10 @@ use percolator::{auto_crank_plan_requires_caller_observation, AutoCrankPlanV16};
 ///           `asset_state` via `obs_or_current_asset` (funding_rate_e9: 0).
 ///           Submission may proceed without an oracle tail, but the call
 ///           **WILL** mutate state on retry — NOT idempotent.
+///
+/// New post-#195 variants (`ReleaseSourceLiens`, `AdvanceClose`,
+/// `FinalizeRecovery`, `CloseResolved`) all return `false`. Do not
+/// hand-roll that table — this function is the only pin.
 #[inline]
 pub fn needs_observation(plan: &AutoCrankPlanV16) -> bool {
     auto_crank_plan_requires_caller_observation(plan)
@@ -36,4 +40,53 @@ pub fn blind_retry_is_safe(plan: &AutoCrankPlanV16) -> bool {
     // NonProgress invariant only survives for one variant. Keeping a
     // separate accessor so call sites read at the right altitude.
     auto_crank_plan_requires_caller_observation(plan)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use percolator::PermissionlessRecoveryReasonV16;
+
+    fn all_plans() -> Vec<AutoCrankPlanV16> {
+        vec![
+            AutoCrankPlanV16::NoAction,
+            AutoCrankPlanV16::RefreshAccount { asset_index: None },
+            AutoCrankPlanV16::RefreshAccount { asset_index: Some(0) },
+            AutoCrankPlanV16::SettleBChunk { asset_index: 0 },
+            AutoCrankPlanV16::Liquidate { asset_index: 0 },
+            AutoCrankPlanV16::ReleaseSourceLiens,
+            AutoCrankPlanV16::AdvanceClose,
+            AutoCrankPlanV16::DeclareRecovery {
+                reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            },
+            AutoCrankPlanV16::FinalizeRecovery,
+            AutoCrankPlanV16::CloseResolved,
+        ]
+    }
+
+    #[test]
+    fn only_refresh_none_requires_caller_observation() {
+        for plan in all_plans() {
+            let needs = needs_observation(&plan);
+            match plan {
+                AutoCrankPlanV16::RefreshAccount { asset_index: None } => assert!(needs),
+                _ => assert!(!needs, "unexpected observation requirement for {plan:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a6_a8_and_terminal_plans_are_no_obs() {
+        assert!(!needs_observation(&AutoCrankPlanV16::ReleaseSourceLiens));
+        assert!(!needs_observation(&AutoCrankPlanV16::AdvanceClose));
+        assert!(!needs_observation(&AutoCrankPlanV16::FinalizeRecovery));
+        assert!(!needs_observation(&AutoCrankPlanV16::CloseResolved));
+    }
+
+    #[test]
+    fn blind_retry_safe_iff_needs_observation() {
+        for plan in all_plans() {
+            assert_eq!(needs_observation(&plan), blind_retry_is_safe(&plan));
+        }
+    }
 }

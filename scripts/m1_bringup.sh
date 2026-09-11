@@ -29,8 +29,8 @@ source "$SCRIPT_DIR/env.sh"
 PROG_KEYPAIR="$REPO_ROOT/repo-prog/target/deploy/percolator_prog-keypair.json"
 PROG_SO="$REPO_ROOT/repo-prog/target/deploy/percolator_prog.so"
 
-if [ ! -f "$PROG_SO" ]; then
-  echo "==> percolator_prog.so missing; running cargo build-sbf"
+if [ ! -f "$PROG_SO" ] || [ "${FORCE_SBF_REBUILD:-0}" = "1" ]; then
+  echo "==> building percolator_prog.so (cargo build-sbf --tools-version v1.52)"
   ( cd "$REPO_ROOT/repo-prog" && cargo build-sbf --tools-version v1.52 )
 fi
 

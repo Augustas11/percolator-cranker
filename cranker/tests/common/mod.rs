@@ -300,11 +300,16 @@ fn send_prog_tx(
 /// requires `accounts[0]` to be the market authority (the `admin` keypair set
 /// at `InitMarket`) as a signer, and `accounts[1]` the writable market.
 pub fn resolve_market(rpc: &RpcClient, program_id: &Pubkey, env: &CrankerEnv) -> Result<()> {
+    let market_data = rpc.get_account_data(&env.market).context("read market")?;
+    let bind = percolator_cranker::binding::market_authority_binding(&market_data)?;
     send_prog_tx(
         rpc,
         program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            asset_generation_frontier: bind.next_market_id,
+            authority_epoch: bind.authority_epoch,
+        },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -383,11 +388,17 @@ pub fn close_portfolio(
     portfolio: &Pubkey,
     closer: &Keypair,
 ) -> Result<()> {
+    let data = rpc.get_account_data(portfolio).context("read portfolio")?;
+    let bind = percolator_cranker::binding::portfolio_binding(&data)?;
     send_prog_tx(
         rpc,
         program_id,
         &env.payer,
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: bind.portfolio_id,
+            expected_sequence: bind.sequence,
+            position_epoch: bind.position_epoch,
+        },
         vec![
             AccountMeta::new(closer.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -418,11 +429,15 @@ pub fn close_slab(
 ) -> Result<()> {
     let (vault_authority, _bump) =
         Pubkey::find_program_address(&[b"vault", env.market.as_ref()], program_id);
+    let market_data = rpc.get_account_data(&env.market).context("read market")?;
+    let bind = percolator_cranker::binding::market_authority_binding(&market_data)?;
     send_prog_tx(
         rpc,
         program_id,
         &env.payer,
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab {
+            authority_epoch: bind.authority_epoch,
+        },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),
