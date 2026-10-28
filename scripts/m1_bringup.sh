@@ -26,12 +26,15 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/env.sh"
 
-PROG_KEYPAIR="$REPO_ROOT/repo-prog/target/deploy/percolator_prog-keypair.json"
-PROG_SO="$REPO_ROOT/repo-prog/target/deploy/percolator_prog.so"
+# Layout (env.sh may override): wrapper checkout and bring-up client crate.
+PROG_DIR="${PERCOLATOR_PROG_DIR:-$REPO_ROOT/repo-prog}"
+BRINGUP_DIR="${BRINGUP_DIR:-$REPO_ROOT/client}"
+PROG_KEYPAIR="$PROG_DIR/target/deploy/percolator_prog-keypair.json"
+PROG_SO="$PROG_DIR/target/deploy/percolator_prog.so"
 
 if [ ! -f "$PROG_SO" ] || [ "${FORCE_SBF_REBUILD:-0}" = "1" ]; then
   echo "==> building percolator_prog.so (cargo build-sbf --tools-version v1.52)"
-  ( cd "$REPO_ROOT/repo-prog" && cargo build-sbf --tools-version v1.52 )
+  ( cd "$PROG_DIR" && cargo build-sbf --tools-version v1.52 )
 fi
 
 PROG_ID="$(solana-keygen pubkey "$PROG_KEYPAIR")"
@@ -82,6 +85,6 @@ if ! solana program show "$PROG_ID" >/dev/null 2>&1; then
 fi
 
 echo "==> running client/m1_bringup"
-( cd "$REPO_ROOT/client" && cargo run --release --quiet )
+( cd "$BRINGUP_DIR" && cargo run --release --quiet )
 
 echo "==> M1 bringup complete"
