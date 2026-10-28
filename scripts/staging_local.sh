@@ -28,11 +28,11 @@ RUN_DIR="${STAGING_RUN_DIR:-$REPO_ROOT/.staging-runs/$(date +%Y%m%d-%H%M%S)}"
 export STAGING_HOURS="${STAGING_HOURS:-6}"
 export STAGING_RPC_URL="http://127.0.0.1:$PORT"
 
-if [ ! -f "$PROG_SO" ] || [ "${FORCE_SBF_REBUILD:-0}" = "1" ]; then
-  echo "==> building percolator_prog.so (cargo build-sbf --tools-version v1.52)"
-  mkdir -p "$HOME/.cache/solana"
-  ( cd "$PROG_DIR" && cargo build-sbf --tools-version v1.52 )
-fi
+# Always build: an existing .so may come from another wrapper revision
+# (incremental, so this is quick when nothing changed).
+echo "==> building percolator_prog.so (cargo build-sbf --tools-version v1.52)"
+mkdir -p "$HOME/.cache/solana"
+( cd "$PROG_DIR" && cargo build-sbf --tools-version v1.52 )
 export PERCOLATOR_PROGRAM_ID="$(solana-keygen pubkey "$PROG_KEYPAIR")"
 
 echo "==> building staging"

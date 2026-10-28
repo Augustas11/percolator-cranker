@@ -756,11 +756,18 @@ fn main() -> Result<()> {
                 keeper.progressed += s.progressed as u64;
                 keeper.idle += s.idle as u64;
                 keeper.failed += s.failed as u64;
-                // A failed crank inside an attempt that also progressed is
-                // classed Progress by the keeper; staging still counts it.
+                // A failed crank tx or an RPC error inside an attempt that
+                // also progressed is classed Progress by the keeper; staging
+                // still counts it as a keeper failure.
                 let failed_txs = records.iter().filter(|r| r.outcome.class() == OutcomeClass::Failed).count();
-                if s.failed > 0 || failed_txs > 0 || !s.unconfirmed.is_empty() {
-                    bail!("{} failed ({failed_txs} failed txs), {} unconfirmed: {:?}", s.failed, s.unconfirmed.len(), s.failures);
+                if s.failed > 0 || failed_txs > 0 || !s.unconfirmed.is_empty() || !s.drain_rpc_errors.is_empty() {
+                    bail!(
+                        "{} failed ({failed_txs} failed txs), {} unconfirmed, rpc after progress {:?}: {:?}",
+                        s.failed,
+                        s.unconfirmed.len(),
+                        s.drain_rpc_errors,
+                        s.failures
+                    );
                 }
                 Ok(Some(format!("p{}/i{}", s.progressed, s.idle)))
             }),

@@ -119,8 +119,9 @@ Every `STAGING_SUMMARY_EVERY` ticks, and at the end, one JSON line:
 - `fail` counts failed attempts per role; `max_consec_fail` is the longest
   run of failures in a row. `lifecycle.ok` is 3 after a full lifecycle.
 - `crank.failed` counts failed crank attempts inside the keeper cycles. Any
-  failed or unconfirmed crank transaction counts as a keeper failure, even
-  inside an attempt that also made progress.
+  failed or unconfirmed crank transaction, and any RPC error that ended a
+  drain, counts as a keeper failure (`keeper.fail`), even inside an attempt
+  that also made progress.
 - `insurance_balance` and `vault` are the current market's balances in USDC atoms.
 
 **Exit code.** 0 when the run reached its end normally and, unless

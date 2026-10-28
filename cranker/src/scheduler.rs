@@ -222,6 +222,9 @@ pub struct CycleSummary {
     pub progressed_accounts: Vec<Pubkey>,
     /// Accounts whose attempt was idle (including a no-tx owner-window skip).
     pub idle_accounts: Vec<Pubkey>,
+    /// RPC errors that ended a drain after it had already progressed (the
+    /// attempt still counts as progress): (account, error).
+    pub drain_rpc_errors: Vec<(Pubkey, String)>,
 }
 
 impl CycleSummary {
