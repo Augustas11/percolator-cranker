@@ -47,7 +47,11 @@ load-test results.
 - **Owner decisions:** the public repo's name, creating it, the license, and
   which repo is the code home after `v0.1.0`.
 
-### 2. A persistent staging market
+### 2. A persistent staging market = operator rehearsal
+
+No market operators exist yet, so **we are the first operator**. The staging
+market is run exactly as we would run a real one: our keys hold every market
+role, and every role has a bot or a written procedure.
 
 Run your own copy of the wrapper (own program ID) on devnet, 24/7, with the
 cranker and scripted traders: several assets, funding on, and at least one
@@ -85,17 +89,58 @@ The visible path to influence is posting bug reports with reproductions
 upstream. **Owner decision.** Until it's made, bugs found are written
 up in `prep.md` under "Found in load test" and nothing is posted.
 
-## At launch
+## At launch: we are the operator
 
-### 4. Crank-as-a-service for market operators
+There are no market operators today. Plan as the first one, and offer the
+stack to others only once they exist.
 
-Asset listing is becoming permissionless (prog #447), so there will be many
-markets that each need reliable cranking. Sell uptime guarantees and
-monitoring, not the crank itself. Pricing depends on the keeper-reward
-decision and the fee shares each market sets.
+### 4. Run our own market
 
-**Gate:** the keeper-reward policy decision and non-zero fee-share
-defaults, or operators willing to set them.
+The wrapper README's deployment flow has the signer of `InitMarket` become
+`marketauth`. On the published program, anyone appears able to open a
+market; *to verify* against the deployed program.
+
+Being the operator means filling every role ourselves:
+
+| Role | Our tool |
+|---|---|
+| `marketauth` and asset admins | key procedure (multisig and cold keys) |
+| Oracle authority for AuthMark assets | **price pusher** bot |
+| Insurance seed | capital plus `insurance_operator` procedure |
+| LP and matcher | matcher kit (oracle ± spread template) plus LP capital |
+| Backing provider | backing manager bot |
+| Keeper | cranker |
+| Watching | monitor |
+
+**Economics, to verify before committing capital:**
+- Trading fees and asset-creation fees go into insurance; a share is
+  redirected to asset-0 insurance.
+- Live insurance withdrawal is gated: the market must be flat or healthy, or
+  resolved.
+- So operator income may come mainly from:
+  - being the LP (spread and fees);
+  - backing fees;
+  - fee shares paid to our own cranker;
+
+  rather than from a withdrawable operator fee.
+
+**Gates:**
+- an official program ID, or a decision to deploy our own instance (we then
+  carry its security);
+- the audit status;
+- **legal review** of operating a perps market (jurisdiction, access
+  restrictions);
+- a capital budget for insurance, LP inventory and backing;
+- key custody for `marketauth`.
+
+**Start small:** one or two assets, tight OI caps, a conservative leverage
+setting, and our own LP as the only liquidity.
+
+### 4b. Offer the operator stack to others (later)
+
+Once other operators appear (permissionless listing, prog #447), package the
+cranker, price pusher and monitor as a service. The pricing depends on the
+keeper-reward decision and fee shares.
 
 ## Bigger scope (new products)
 
@@ -124,8 +169,10 @@ competition. Hold until launch and real flow.
 
 ## Order
 
-1 → 2 → 3 now, then 5. Decide 4 and 6 when crank economics and provider
-compensation are known.
+1 → 2 (operator rehearsal on devnet, including the price pusher and a
+basic matcher) → 3 now. Then the matcher kit and SDK (5), which our own market
+needs anyway. Decide 4 (mainnet market) when its gates clear; 4b only when
+other operators exist.
 
 ## Risks
 

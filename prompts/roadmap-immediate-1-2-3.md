@@ -10,8 +10,10 @@ Turn the re-pinned cranker into three things:
 1. **the first public reference cranker** for the current Percolator engine
    and wrapper, published as a **new, clean public repo**. This repo,
    `percolator-cranker`, stays private as the working, ops and strategy repo;
-2. **a staging market** that runs unattended, locally now and on devnet
-   when the owner deploys it;
+2. **a staging market run as an operator rehearsal**: the owner is the
+   first market operator, so every operator role (keeper, price pusher, LP
+   matcher, backing, insurance, keys) runs as a bot or a written procedure.
+   It runs unattended, locally now and on devnet when the owner deploys it;
 3. **a liveness and solvency monitor** built on the cranker's own reads.
 
 **Bottom line (non-negotiable):**
@@ -152,7 +154,12 @@ outside readers. The owner creates it; you prepare everything it needs.
    `prep.md` and the watcher outputs. Write down the sync direction in
    `docs/PUBLIC_REPO_PLAN.md` so code doesn't drift between the two.
 
-## Deliverable 2: staging market
+## Deliverable 2: staging market = operator rehearsal
+
+There are no market operators yet; **the owner is the first operator**. Run
+the staging market exactly as a real market: the owner's (staging) keys hold
+`marketauth`, every asset admin, oracle authority, insurance operator and
+backing authority, and every role gets a bot or a written procedure.
 
 1. **Local first.** Extend the `live_shaped` scenario into a long-running
    staging mode (`scripts/staging_local.sh`):
@@ -166,12 +173,35 @@ outside readers. The owner creates it; you prepare everything it needs.
 
    It must run unattended for at least 6 hours without operator action.
    Record the result in `prep.md`.
-2. **Trader bots**
+2. **Operator roles** (new modules under `staging/` or `crates/`):
+   - **Price pusher.** For AuthMark assets, a bot that reads Pyth (devnet or
+     a local mock) and signs `PushAuthMark` with sequence handling, a
+     staleness alarm and a max-move guard. Hybrid assets need no pusher;
+     include at least one of each.
+   - **LP matcher.** A minimal matcher program (oracle ± spread, ABI v3,
+     modelled on the wrapper's own test fixture semantics but written fresh),
+     configured with `SetMatcherConfig` on an operator LP portfolio. Traders
+     use `TradeCpi` against it. This becomes the seed of the matcher kit.
+   - **Backing manager.** It tops up and rolls counterparty backing before
+     expiry and withdraws resolved surplus. Document how backing providers
+     are compensated (backing fee on risk-increasing fills, split with
+     insurance), with source citations.
+   - **Insurance and keys.** Seed insurance and document the withdrawal
+     gates. Write `docs/OPERATOR_PLAYBOOK.md` covering:
+     - key layout (multisig for `marketauth`, cold asset admins);
+     - market parameters (margins, fees, fee shares, OI caps,
+       `force_close_delay_slots`, backing horizon), with the reasoning;
+     - listing and shutting down an asset;
+     - the incident runbook (oracle stale, stuck account, Recovery);
+     - **where operator income actually comes from**, with source citations.
+       Fees accrue to insurance, and live withdrawal is gated, so state
+       plainly what an operator can and cannot take out.
+3. **Trader bots**
    - A small binary or module, `staging/traders`, driving deposits, trades,
      withdrawals and closes through the same client code the cranker uses.
    - Configurable via TOML.
    - No hardcoded keys; generate them into an ignored directory.
-3. **Devnet readiness (scripts only)**
+4. **Devnet readiness (scripts only)**
    - `scripts/staging_devnet_deploy.sh` and `docs/STAGING.md`:
      - program keypair and upgrade authority handling;
      - market init;
@@ -183,7 +213,7 @@ outside readers. The owner creates it; you prepare everything it needs.
      cranker, the traders and the monitor 24/7.
    - **Don't deploy to devnet yourself**, and never ask for or commit private
      keys. The owner runs the deploy script.
-4. **Findings.** Anything that looks like an engine or wrapper bug goes into
+5. **Findings.** Anything that looks like an engine or wrapper bug goes into
    `prep.md` → "Found in load test", with a minimal repro, preferably a
    LiteSVM test. **Don't post upstream.** That's an owner decision listed in
    `ROADMAP.md`.
@@ -250,7 +280,9 @@ outside readers. The owner creates it; you prepare everything it needs.
       and CI ready; pushed as a single commit to the owner-created repo, and
       `v0.1.0` tagged there (created only after CI
       is green).
-- [ ] R2: local staging runs 6+ hours unattended; devnet scripts, STAGING
+- [ ] R2: local staging runs 6+ hours unattended with the operator roles
+      (price pusher, LP matcher, backing manager, insurance) running as bots;
+      `OPERATOR_PLAYBOOK.md` written, including operator income; devnet scripts, STAGING
       doc and hosting recipe exist; nothing deployed by you.
 - [ ] R3: monitor exports metrics, JSON, dashboard and alert rules;
       unowned-collateral formula documented with citations; two injected
