@@ -11,15 +11,17 @@ Fails (exit 1, every hit listed) on:
     UTF-16 content cannot hide);
   * secret-looking file names (.env*, id.json*, *keypair*.json,
     wallet*.json, *.pem, *.key), 64-element byte arrays (decimal or hex,
-    optional u8 suffix and trailing comma, across whitespace and comments),
+    optional u8 suffix and trailing comma, across whitespace; both the raw
+    text and the text with (nested) comments removed are scanned),
     and private-key / wallet-word-list markers, matched over the whole text;
   * absolute local paths (user home, root and volume directories, macOS
-    private temp dirs, Windows user profiles), case-insensitive;
+    private temp dirs, Windows user profiles on any drive, with / \ or
+    escaped separators), case-insensitive;
   * email addresses (except --allow-email ADDR, only in SECURITY.md);
-  * URLs whose parsed host/path is not on the allowlist (dot segments,
-    literal or percent-encoded, are rejected), and every GitHub
-    owner/repo mention that is not an allowed repository (Cargo.lock
-    included);
+  * URLs whose parsed host/path is not on the allowlist (backslashes and
+    dot segments, literal or percent-encoded, are rejected; Cargo.lock
+    sources are checked after their registry+/sparse+/git+ prefix), and
+    every GitHub owner/repo mention that is not an allowed repository;
   * operator-stack paths (private by owner decision), case-insensitive;
   * unreplaced template placeholders (unless --draft);
   * denylist patterns (case-insensitive fixed strings) in contents and in
@@ -57,12 +59,13 @@ KEY_MARKER = re.compile(
     + r"|(seed|recovery)[\s_-]*phr" + "ase"
     + r"|\bmnemo" + r"nic\b",
     re.I)
+_SEP = r"(/|\\\\|\\)"  # / or \ or \\ (source-escaped)
 ABS_PATH = re.compile(
-    "/" + "(us" + "ers|ho" + "me)/[a-z]"
+    "/" + "(us" + "ers|ho" + "me)/[A-Za-z0-9_.$@-]"
     + "|/" + "ro" + "ot/"
     + "|/" + "vol" + "umes/"
     + "|/" + "priv" + "ate/(var|tmp)/"
-    + r"|c:\\" + "us" + r"ers\\",
+    + r"|\b[a-z]:" + _SEP + "us" + "ers" + _SEP,
     re.I)
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s)\"'`<>]+", re.I)
@@ -74,7 +77,8 @@ ALLOWED_REPOS = {
     ("solana-foundation", "anchor"),  # upstream wrapper's git dependency (Cargo.lock)
 }
 ALLOWED_HOSTS = {
-    "release.anza.xyz", "docs.rs", "crates.io", "static.rust-lang.org", "sh.rustup.rs",
+    "release.anza.xyz", "docs.rs", "crates.io", "index.crates.io", "static.rust-lang.org",
+    "sh.rustup.rs",
 }
 OPERATOR = re.compile(
     r"(^|/)(staging|monitor|scenario|deploy|trader|matcher|backing[_-]?manager|"
@@ -85,6 +89,18 @@ OPERATOR = re.compile(
     re.I)
 PLACEHOLDER = re.compile("@" + "[A-Z][A-Z_]+" + "@")
 DOT_SEGMENT = re.compile(r"(^|/)(\.|%2e){1,2}(/|$)", re.I)
+
+
+INNER_BLOCK = re.compile(r"/\*(?:(?!/\*|\*/).)*\*/", re.S)
+
+
+def strip_comments(text):
+    """Remove // and (nested) /* */ comments. Approximate: // inside a string
+    also cuts the line, which is why the raw text is scanned as well."""
+    prev = None
+    while prev != text:
+        prev, text = text, INNER_BLOCK.sub("", text)
+    return re.sub(r"//[^\n]*", "", text)
 
 
 def norm_repo(r):
@@ -99,7 +115,7 @@ def url_ok(url):
         return False
     if u.scheme.lower() not in ("http", "https") or u.username or u.password:
         return False
-    if DOT_SEGMENT.search(u.path):
+    if "\\" in url or DOT_SEGMENT.search(u.path):  # browsers read \ as /
         return False
     host = (u.hostname or "").lower()
     if host in LOOPBACK:
@@ -222,9 +238,8 @@ def main(argv):
         lines = text.splitlines()
         if SECRET_NAME.match(base):
             hit(f"secret-looking file: {rel}")
-        flat = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-        flat = re.sub(r"//[^\n]*", "", flat)
-        if KEY_ARRAY.search(re.sub(r"\s+", "", flat)):
+        views = (text, strip_comments(text))  # raw view: commented-out arrays count too
+        if any(KEY_ARRAY.search(re.sub(r"\s+", "", v)) for v in views):
             hit(f"keypair-like 64-byte array: {rel}")
         for m in KEY_MARKER.finditer(text):
             n = text.count("\n", 0, m.start()) + 1
@@ -245,16 +260,18 @@ def main(argv):
                 if fixture or (allow_email and addr == allow_email and rel == "SECURITY.md"):
                     continue
                 hit(f"email: {loc}: {addr}")
-            if not is_lock and not fixture:
+            if not fixture:
                 for url in URL.findall(line):
                     url = url.rstrip(".,;:")
+                    if is_lock:  # cargo source kinds: registry+, sparse+, git+
+                        url = re.sub(r"^(registry|sparse|git)\+", "", url, flags=re.I)
                     if not url_ok(url):
                         hit(f"url not allowlisted: {loc}: {url}")
             if not fixture:  # GitHub mentions are checked everywhere, Cargo.lock included
                 for m in GITHUB.finditer(line):
-                    tail = line[m.end():]
-                    if DOT_SEGMENT.search(tail.split()[0] if tail.split() else ""):
-                        hit(f"github path traversal: {loc}: {m.group(0)}{tail.split()[0]}")
+                    word = (line[m.end():].split() or [""])[0]
+                    if "\\" in word or DOT_SEGMENT.search(word):
+                        hit(f"github path traversal: {loc}: {m.group(0)}{word}")
                         continue
                     owner, repo = m.group(1).lower(), norm_repo(m.group(2) or "").lower()
                     if (owner, repo) not in ALLOWED_REPOS:

@@ -6,8 +6,9 @@
 * <target-dir> must NOT exist. The tree is built in a fresh temporary
   directory next to it and published only after every check passes, by an
   atomic mkdir of <target-dir> (fails if anything exists there) and moving
-  the entries in. A failed export leaves nothing behind and never touches
-  existing files.
+  the entries in. A failed export, including one that fails while moving
+  entries into the directory it just created, leaves nothing behind and
+  never touches existing files.
 * HEAD is resolved once. Exactly the files in scripts/public_manifest.txt
   (as committed at that HEAD) are exported, read from that commit with
   `git cat-file`, never from the working tree.
@@ -106,7 +107,7 @@ def main(argv):
             "private by moving them): " + ", ".join(unlisted))
 
     tmp = tempfile.mkdtemp(prefix=".export-", dir=parent)
-    ok = False
+    ok = created = False
     try:
         for src, to in entries:
             mode_line = git("ls-tree", head, "--", src).strip()
@@ -125,6 +126,8 @@ def main(argv):
 
         for rel, a, b in REWRITES:
             p = os.path.join(tmp, rel)
+            if not os.path.isfile(p):
+                die(f"rewrite target not exported: {rel}")
             s = open(p, encoding="utf-8").read()
             if a not in s:
                 die(f"rewrite anchor missing in {rel}: {a}")
@@ -171,6 +174,7 @@ def main(argv):
             os.mkdir(dest)
         except FileExistsError:
             die(f"{dest} appeared during the export; not replacing it")
+        created = True  # dest is ours from here on; a failure below removes it
         for name in os.listdir(tmp):
             os.rename(os.path.join(tmp, name), os.path.join(dest, name))
         os.rmdir(tmp)
@@ -180,6 +184,8 @@ def main(argv):
     finally:
         if not ok:
             shutil.rmtree(tmp, ignore_errors=True)
+            if created:
+                shutil.rmtree(dest, ignore_errors=True)
 
 
 if __name__ == "__main__":

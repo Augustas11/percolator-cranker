@@ -278,5 +278,147 @@ class GateRound3(Gate):
         self.assertIn("not a regular file", out)
 
 
+class GateRound4(Gate):
+    """Round-4 audit bypasses. Each payload runs in its own fresh tree, so one
+    payload's diagnostics cannot satisfy another's assertion."""
+
+    def each_fails(self, cases, needle=None):
+        for rel, text in cases:
+            with self.subTest(payload=text):
+                self.tearDown()
+                self.setUp()
+                self.put(rel, text)
+                self.assertFails(needle)
+
+    def test_key_array_comment_tricks(self):
+        self.each_fails([
+            ("a.rs", f"// backup: {KEY64}\n"),
+            ("b.rs", f'const RPC: &str = "http://localhost:8899"; const K: [u8;64] = {KEY64};\n'),
+            ("c.rs", "const K = [0, /* a /* nested */ b */ "
+                     + ", ".join(str(i) for i in range(1, 64)) + "];\n"),
+        ], "keypair-like")
+
+    def test_github_backslash_traversal(self):
+        self.each_fails([
+            ("a.md", "https://github.com/aeyakovenko/percolator/..\\..\\other/private\n"),
+            ("b.md", "github.com/aeyakovenko/percolator/..\\..\\other/private\n"),
+            ("c.md", "https://github.com/aeyakovenko/percolator\\..\\..\\other\n"),
+        ])
+
+    def test_github_traversal_each_form(self):
+        self.each_fails([
+            ("a.md", "https://github.com/aeyakovenko/percolator/../../other/private\n"),
+            ("b.md", "https://github.com/aeyakovenko/percolator/%2e%2e/%2e%2e/other/private\n"),
+            ("c.md", "github.com/aeyakovenko/percolator/../../other/private\n"),
+            ("d.md", "github.com/aeyakovenko/percolator/%2E%2E/%2e%2e/other/private\n"),
+        ])
+
+    def test_cargo_lock_urls_checked(self):
+        self.each_fails([
+            ("Cargo.lock", 'source = "registry+https://packages.internal.example/index"\n'),
+            ("Cargo.lock", 'source = "git+https://git.internal.example/team/svc?rev=aa#aa"\n'),
+            ("Cargo.lock", 'source = "sparse+https://registry.internal.example/"\n'),
+        ], "url not allowlisted")
+
+    def test_cargo_lock_public_sources_pass(self):
+        self.put("Cargo.lock", "\n".join([
+            'source = "registry+https://github.com/rust-lang/crates.io-index"',
+            'source = "sparse+https://index.crates.io/"',
+            'source = "git+https://github.com/solana-foundation/anchor?rev=e3cf#e3cf"',
+        ]) + "\n")
+        rc, out = run_gate(self.root)
+        self.assertEqual(rc, 0, out)
+
+    def test_private_path_forms(self):
+        u, h = "/Us" + "ers/", "/ho" + "me/"
+        self.each_fails([
+            ("a.md", u + "_operator/private.txt\n"),
+            ("b.md", h + "1000/private.txt\n"),
+            ("c.rs", 'const P: &str = "C:\\\\' + 'Users\\\\alice\\\\private.txt";\n'),
+            ("d.md", "D:\\" + "Users\\bob\\x.txt\n"),
+            ("e.md", "c:/" + "users/carol/x.txt\n"),
+        ], "absolute path")
+
+
+class Exporter(unittest.TestCase):
+    """The exporter, run on a throwaway git repo holding a copy of the scripts."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix="export-probe-")
+        os.makedirs(os.path.join(self.repo, "scripts"))
+        for f in ("export_public.py", "check_public_tree.py"):
+            shutil.copy(os.path.join(HERE, f), os.path.join(self.repo, "scripts", f))
+        open(os.path.join(self.repo, "scripts", "public_denylist.txt"), "w").close()
+        for f in ("a.md", "b.md"):
+            with open(os.path.join(self.repo, f), "w") as fh:
+                fh.write("clean\n")
+        with open(os.path.join(self.repo, "dep.toml"), "w") as fh:
+            fh.write('[dependencies]\nx = { path = "../repo-prog" }\n')
+        self.dest = os.path.join(self.repo, "out", "tree")
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+
+    def commit(self, manifest):
+        manifest += "dep.toml crates/cranker/Cargo.toml\ndep.toml crates/bringup/Cargo.toml\n"
+        with open(os.path.join(self.repo, "scripts", "public_manifest.txt"), "w") as fh:
+            fh.write(manifest)
+        g = ["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@t.invalid"]
+        subprocess.run(g + ["init", "-q"], check=True)
+        subprocess.run(g + ["add", "-A"], check=True)
+        subprocess.run(g + ["commit", "-qm", "t"], check=True)
+
+    def export(self):
+        p = subprocess.run([sys.executable, "-I", os.path.join(self.repo, "scripts", "export_public.py"),
+                            self.dest], capture_output=True, text=True)
+        return p.returncode, p.stdout + p.stderr
+
+    def leftovers(self):
+        out = os.path.dirname(self.dest)
+        return sorted(os.listdir(out)) if os.path.isdir(out) else []
+
+    def test_clean_export(self):
+        self.commit("a.md README.md\nb.md docs/B.md\n")
+        rc, out = self.export()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.leftovers(), ["tree"])
+
+    def test_duplicate_destinations(self):
+        for manifest in ("a.md README.md\nb.md README.md\n", "a.md README.md\nb.md readme.md\n"):
+            with self.subTest(manifest=manifest):
+                self.commit(manifest)
+                rc, out = self.export()
+                self.assertEqual(rc, 1, out)
+                self.assertIn("duplicate manifest destination", out)
+                self.assertEqual(self.leftovers(), [])
+
+    def test_existing_destination_untouched(self):
+        self.commit("a.md README.md\n")
+        os.makedirs(self.dest)
+        rc, out = self.export()
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(os.listdir(self.dest), [])
+
+    def test_failure_while_publishing_removes_destination(self):
+        self.commit("a.md README.md\nb.md docs/B.md\n")
+        # Fail the second rename into dest, in-process.
+        driver = (
+            "import os, sys, runpy\n"
+            "real, n = os.rename, [0]\n"
+            "def flaky(a, b):\n"
+            "    n[0] += 1\n"
+            "    if n[0] == 2: raise OSError('injected')\n"
+            "    real(a, b)\n"
+            "os.rename = flaky\n"
+            "sys.argv = [sys.argv[1], sys.argv[2]]\n"
+            "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+        p = subprocess.run([sys.executable, "-I", "-c", driver,
+                            os.path.join(self.repo, "scripts", "export_public.py"), self.dest],
+                           capture_output=True, text=True)
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("injected", p.stderr)
+        self.assertEqual(self.leftovers(), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
