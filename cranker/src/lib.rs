@@ -2,8 +2,7 @@
 //!
 //! The binary (`src/main.rs`) and the integration tests under `tests/` link
 //! this library, so the crank cycle (`cycle::run_one_cycle`) is one piece of
-//! code everywhere. (The `live_shaped` load test lives on its own branch,
-//! `claude/live-shaped-scenario`, and links it too.)
+//! code everywhere.
 
 pub mod binding;
 pub mod cycle;
