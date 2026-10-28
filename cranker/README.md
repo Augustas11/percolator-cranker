@@ -15,14 +15,58 @@ PERCOLATOR_PROGRAM_ID=<from bringup> CRANKER_CYCLES=3 \
 ```
 
 Reference / dry-run only. Not a paid live service. M3 is NO-GO until a
-non-null program id lands on a public cluster.
+non-null program id lands on a public cluster. No bounty or mainnet path
+exists in this crate. **Fee paths are off by default:** the default
+bootstrap has no maintenance fee and zero cranker shares, and cranks attach
+no reward portfolio. `CRANKER_ENABLE_FEE_SHARES=1` opts in (maintenance
+fee plus 50% shares, so a share accrues into the keeper's own portfolio).
+Nothing withdraws it unless `CRANKER_WITHDRAWAL_TEST=1` is also set, which
+requires the opt-in.
 
-**CU (2026-09-11 pin `495a5590` / wrapper `d5e2ec6f`):** a fresh no-op
-`PermissionlessCrank` consumes **17,975 program CU** (tx total 18,299).
-Do not assume the old ~42,817 band.
+Pre-merge preview of the upstream launch fixes (not the default):
+
+```
+./scripts/preview_launch_fixes.sh   # prog #456 head + engine 68859b94 (path patch)
+```
+
+**CU (2026-10-28, wrapper `5cb331dd` / engine `4db11a8c`):** a fresh no-op
+`PermissionlessCrank` with the reward portfolio appended (fee opt-in, the
+shape of the old baseline) consumes **18,565 program CU** (tx total 18,889),
++590 over the 17,975 measured on `d5e2ec6f` / `495a5590`. Without the
+reward portfolio (the default since fees are opt-in): 18,363. Pre-merge preview
+(prog #456 head + engine `68859b94`): 18,820 (19,144). The run prints
+`cu: noop_min=… worst_ok=…` from the tx logs; set `CRANKER_MEASURE_CU=0`
+to skip the extra `getTransaction` per crank.
 
 Env vars:
 * `CRANKER_CYCLES` (default `3`) — number of loop iterations.
+* `CRANKER_CYCLE_MS` (default `30000`), `CRANKER_CYCLE_CU` (default
+  `24000000`), `CRANKER_CYCLE_MAX_TX` (default `64`): the per-cycle budget.
+  - **Wall clock** starts at cycle entry, so discovery and planning count.
+  - **Admission is checked before every tx**, retries included: each tx
+    reserves its full compute-unit limit (1.4M) up front, then is settled
+    to the whole-tx CU measured from its logs. A tx is counted once it
+    begins, whatever its outcome. The wall clock is an *admission*
+    deadline: no tx is sent after it. It does not bound RPC calls already in
+    progress: a tx already sent waits for the client's confirmation, which
+    normally ends at blockhash expiry (about a minute) but can last longer if
+    the validator stops advancing. A tx whose fate stays unknown is reported
+    as `unconfirmed`, never as a failure of the account.
+  - **When it runs out**, the rest of the queue is deferred, and rotation
+    reaches it first next cycle.
+* `CRANKER_ATTEMPT_MAX_TX` (default `4`): the most txs one account may use
+  in a cycle. This bounds an A6 lien drain, which continues next cycle.
+* `CRANKER_IDLE_STUCK_CYCLES` (default `10`): a Resolved claimant that still
+  holds value and has been idle this many cycles in a row is reported as
+  `idle_pending_stuck`, with one `idle_with_pending_work` JSON event.
+* `CRANKER_QUARANTINE_THRESHOLD` (default `3`),
+  `CRANKER_QUARANTINE_BASE_CYCLES` (default `2`),
+  `CRANKER_QUARANTINE_MAX_CYCLES` (default `64`) — same-error streak that
+  quarantines an account, and its backoff (doubles per re-quarantine, capped).
+* `CRANKER_ENABLE_FEE_SHARES=1` — opt in to fee paths (see the top of this
+  file). `CRANKER_WITHDRAWAL_TEST=1` additionally needs it.
+* `CRANKER_FAIL_ON_ERRORS=1` — exit nonzero if any attempt fails (CI sets
+  it for the dry run).
 * `CRANKER_PYTH_MODE=canonical` — enable Pyth canonical-PDA fallback
   in `PythFeedResolver`. Unset or `off` (default) means the resolver
   never hits, so hybrid+Pyth legs fall through to bytes-as-pubkey and
@@ -35,18 +79,70 @@ Env vars:
   portfolio's withdrawal path is byte-for-byte the same as a user
   portfolio's. See prep.md Q6 for the source-read side of the answer.
 
-Each cycle:
+Each cycle (`cycle::run_one_cycle`, shared by the binary and the validator tests):
 
 1. `getProgramAccounts` filtered by wrapper header
    `[MAGIC | VERSION | KIND_PORTFOLIO]` (11-byte memcmp @ offset 0).
 2. Locally filter to portfolios whose provenance `market_group_id` equals
    the cranker's target market (skip stale portfolios from prior bringups).
-3. For each ranked candidate, fetch a stub observation, consult the
-   plan-classification gate, submit a `PermissionlessCrank`, and classify
-   the response.
+3. Read the market once. **Live / Recovery:** one hint per active leg asset
+   (fallback asset 0), each with its oracle accounts. **Resolved:** at most
+   one oracle-less hint naming the asset whose backing bucket is due
+   (`resolved.rs`); the wrapper turns it into
+   `AutoCrankObservationV16 { asset_index, effective_price: 0, funding_rate_e9: 0 }`
+   and the engine advances one bucket or returns `EngineNonProgress`.
+   On Resolved the wrapper reads the accounts as `[owner, market, portfolio,
+   owner_ata, vault, vault_authority, token_program]` (`CrankRoute::Resolved`).
+   Account 0 must be the portfolio **owner** key, and it has to sign only
+   while `slot − resolved_slot < force_close_delay_slots`. Inside that
+   window, third-party candidates are counted idle (`resolved:owner-window`)
+   and not submitted. After it, the cranker pays the fee, and any payout
+   goes to the owner's ATA (created idempotently first, rent paid by the
+   cranker). There's no reward portfolio on this route. Only lapsed **Fresh**
+   buckets are hinted.
+4. Order candidates (`scheduler.rs`). Each class (liquidatable, pending,
+   quiet; see `work.rs`) is rotated every cycle, then the classes are
+   interleaved 2:1:1. A stream of liquidatable accounts can't starve the
+   others. Skip quarantined accounts. Spend the cycle budget.
+5. Submit, classify **Progress / Idle / Failed**. `Ok(no-mut)` and an
+   `EngineNonProgress` revert are idle. Any other revert, engine error or
+   RPC error is a failure of that account only. Three same-error failures
+   in a row quarantine it (`quarantine.rs`) and print one JSON line:
 
-Every cycle prints a per-submission line plus a mirror-custody summary
-at the end.
+   ```
+   {"event":"quarantine","account":"…","error":"EngineCounterUnderflow","cycle":12,"slot":…,"plan_class":"live:pending","strike":1,"backoff_cycles":2,"until_cycle":15}
+   ```
+
+Every cycle prints per-submission lines and a
+`cycle N summary: progressed= idle= failed= quarantined_skipped= deferred= …`
+line; the run ends with the mirror-custody table and CU stats.
+
+## Upstream changes absorbed (wrapper `5cb331dd`, engine `4db11a8c`)
+
+* **Resolved tag-5 hint** (above). `CloseResolved` is an alias for the same
+  crank. Wire unchanged: still `[5 | now_slot | n | (asset_index u16,
+  oracle_accounts u8)*]`; on Resolved the wrapper accepts `n ≤ 1` and
+  `oracle_accounts == 0`.
+* **Recovery crank bumps `position_epoch`** (prog `b40ffbd8`).
+  * **Keeper.** The production crank path takes no binding at all (tag 5
+    has no epoch field), so the keeper caches nothing that could go stale.
+    Every owner instruction the repo builds (tests, Q6 spot-check) reads the
+    binding from fresh account bytes right before sending.
+  * **Not exercised in this PR's tests.** The epoch bump itself was
+    observed in the separate load test (historical, see `../prep.md`); the
+    market-wide Recovery crank path that `b40ffbd8` changed was never
+    reached.
+* **Funding is exact** (engine #227: only in the `68859b94` **preview**, not
+  in the default pin `4db11a8c`): a leg whose F snapshot trails its target
+  by less than one atom is F-settled. `work::leg_f_settled`
+  is the only F test, so such legs never count as pending work. There is
+  still no standalone funding settle entry point.
+* **Provider surplus withdraw** (engine #223 / prog #454) reaches the
+  existing `WithdrawBackingBucket` tag; it is not a crank and the cranker
+  never calls it. No new tag to decode.
+* **OI symmetry**: no cranker code or test asserts `OI_long == OI_short`.
+  Any future check must exclude assets in Recovery.
+* Layout discriminator still 18; `AutoCrankPlanV16` variants unchanged.
 
 ## What's real
 
@@ -69,13 +165,21 @@ at the end.
   SettleBChunk, RefreshAccount{Some}).
 * **Instruction encoding.** Reuses `percolator_prog::ix::Instruction::encode()`
   from the wrapper crate; no hand-written wire format.
-* **Reward-portfolio append.** Enabled via `UpdateLiquidationFeePolicy
-  { cranker_share_bps: 5000 }` in `setup::bootstrap`. The wrapper's
+* **Reward-portfolio append.** Only with `CRANKER_ENABLE_FEE_SHARES=1`
+  (or the explicit `setup::bootstrap_with_fee` the integration tests use),
+  which sets `UpdateLiquidationFeePolicy { cranker_share_bps: 5000 }`. The wrapper's
   reward-append path only accepts a trailing writable portfolio when
   `liquidation_cranker_fee_share_bps != 0`
   (`repo-prog/src/v16_program.rs:10467`), and the tx signer must own it
   (`:10473`, `:10485`) — the cranker portfolio is created with `payer`
   as the owner for that reason.
+
+## Load test
+
+The `live_shaped` load test is not part of this crate any more; it is
+maintained separately. Its earlier 200-cycle results are kept in
+`../prep.md` and `scenario-findings.md` as findings (F1 is upstream as
+aeyakovenko/percolator#243).
 
 ## What's stubbed
 
@@ -101,14 +205,15 @@ Documented inline in the files, listed here for auditability:
   hard-reject at submit — the correct failure mode). Six unit tests
   in `observation::tests` pin the resolver contract.
 * **Hint budget.** Constant `HINT_BUDGET = 16` (= `CRANK_OBSERVATION_DECODE_MAX`);
-  we send at most one hint per submission today because the synthetic
-  market has one asset. Selection policy is: crank every ranked
-  candidate one asset at a time. A production cranker would batch
-  hints across assets per candidate.
-* **Ranking.** `discovery::rank_by_staleness` sorts by pubkey bytes
-  after filtering to the target market. In production this is where
-  we'd score by `(last_accrual_slot age) × capital` or by distance to
-  liquidation threshold.
+  one hint per active leg asset per candidate on Live markets, at most one
+  on Resolved markets.
+* **Ranking.** `work::assess` is an off-chain estimate (liquidation lock or
+  certified deficit → liquidatable; stale flags or K/F drift → pending). It
+  only orders the queue; it never skips an account. The engine selector is
+  the only authority on what a crank does.
+* **Plan class.** The `plan_class` in logs is the cranker's own label
+  (`live:liquidatable`, `resolved:backing-hint(2)`, …). The engine's chosen
+  plan is not visible from outside the tx (prep.md Q1).
 * **No priority-fee logic.** Every submission uses the same 1.4M CU
   limit and 128 KiB heap, no leader-slot prediction, no Jito bundles.
 * **No `SyncMaintenanceFee`.** M2 only exercises `PermissionlessCrank`
@@ -148,10 +253,16 @@ cycle  target_portfolio                              outcome      tgtΔ  rwdΔ
 
 | Path                       | Purpose                                             |
 | -------------------------- | --------------------------------------------------- |
-| `src/main.rs`              | Loop, cycle scheduling, mirror-custody summary      |
+| `src/main.rs`              | Bootstrap, cycle loop, mirror-custody summary       |
+| `src/cycle.rs`             | One discover → hint → schedule → submit cycle       |
+| `src/scheduler.rs`         | Budget, priority order, rotation, idle vs failed    |
+| `src/quarantine.rs`        | Per-account same-error quarantine + backoff         |
+| `src/resolved.rs`          | Resolved-mode backing-bucket hint                   |
+| `src/work.rs`              | Priority estimate, F-settled test                   |
+| `src/binding.rs`           | portfolio_id / sequence / position_epoch bindings   |
 | `src/setup.rs`             | Mint + market + user portfolio + reward portfolio   |
 | `src/discovery.rs`         | `getProgramAccounts` + market-scoped ranking        |
-| `src/observation.rs`       | Oracle-account fetch (STUB)                         |
+| `src/observation.rs`       | Oracle-profile walk + Pyth resolver                 |
 | `src/plan_gate.rs`         | Wrapper of upstream truth-table predicate           |
 | `src/submit.rs`            | Build tx, submit, classify three-way, wrapper-error lookup |
 

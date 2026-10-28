@@ -14,7 +14,8 @@ use percolator_prog::state::{
     read_portfolio_matcher_sequence, read_portfolio_position_epoch,
 };
 
-/// Engine `V16_LAYOUT_DISCRIMINATOR` at pin `495a5590`. Not re-exported
+/// Engine `V16_LAYOUT_DISCRIMINATOR` at pins `495a5590`, `4db11a8c` and
+/// `68859b94` (unchanged across the launch-fix batch). Not re-exported
 /// from `percolator`'s default `lib.rs` surface; keep in lockstep with
 /// `repo/src/v16.rs`.
 pub const V16_LAYOUT_DISCRIMINATOR: u16 = 18;

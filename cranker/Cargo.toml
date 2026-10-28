@@ -3,6 +3,7 @@ name = "percolator-cranker"
 version = "0.1.0"
 edition = "2021"
 publish = false
+default-run = "cranker"
 
 [lib]
 name = "percolator_cranker"
@@ -19,11 +20,13 @@ solana-program = "1.18"
 spl-token = { version = "4.0", features = ["no-entrypoint"] }
 spl-associated-token-account = { version = "2.0", features = ["no-entrypoint"] }
 # Match the wrapper's engine pin exactly — otherwise two `percolator` crates
-# get linked into the graph with mismatched types. Wrapper `d5e2ec6f` (#135)
-# pins engine `495a5590` (parent of master-tip merge #195 / `8eb7142a`).
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "495a5590c97055bd71c6f94d849ff0298f243145" }
+# get linked into the graph with mismatched types. Wrapper `5cb331dd`
+# (origin/main, 2026-09-22) pins engine `4db11a8c`. See prep.md "Pins" for the
+# optional #456 pre-merge preview against engine `68859b94`.
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "4db11a8cb0053815e23a35d3a7d3edc265d8d866" }
 percolator-prog = { path = "../repo-prog" }
 solana-transaction-status = "1.18"
 solana-account-decoder = "1.18"
 bytemuck = { version = "1.14", features = ["derive", "min_const_generics"] }
 anyhow = "1"
+serde_json = "1"

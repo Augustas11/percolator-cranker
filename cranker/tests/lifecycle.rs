@@ -37,11 +37,10 @@ const HINT_BUDGET: usize = 16;
 const ASSET_INDEX: u16 = 0;
 
 #[test]
+#[ignore = "needs a local validator: set PERCOLATOR_TEST_RPC + PERCOLATOR_PROGRAM_ID, run with --include-ignored"]
 fn crank_lifecycle_preserves_conservation() -> Result<()> {
-    let Some((rpc, program_id)) = common::rpc_and_program_from_env() else {
-        common::skip("crank_lifecycle_preserves_conservation");
-        return Ok(());
-    };
+    let (rpc, program_id) = common::rpc_and_program_from_env()
+        .ok_or_else(|| anyhow::anyhow!("PERCOLATOR_TEST_RPC / PERCOLATOR_PROGRAM_ID not set"))?;
     let payer = common::load_payer()?;
 
     // ---- one-shot bootstrap (main.rs analogue) ----
@@ -141,7 +140,7 @@ fn crank_lifecycle_preserves_conservation() -> Result<()> {
                         candidate.pubkey, mutated, target_bytes_diff, reward_bytes_diff
                     );
                 }
-                CrankOutcome::HardReject { error, error_name } => {
+                CrankOutcome::HardReject { error, error_name, .. } => {
                     hard_rejects += 1;
                     eprintln!("    {} -> HardReject({error_name:?}): {error}", candidate.pubkey);
                 }
@@ -211,12 +210,13 @@ fn crank_lifecycle_preserves_conservation() -> Result<()> {
     let admin_ata = common::ensure_ata(&rpc, &env.payer, &env.admin.pubkey(), &env.mint)?;
     common::close_slab(&rpc, &program_id, &env, &admin_ata)?;
 
-    // On-chain proof of retirement: the slab account is deallocated.
+    // On-chain proof of retirement: the slab is shrunk to a header-only
+    // tombstone (the wrapper keeps HEADER_LEN rent; it does not deallocate).
     assert!(
-        !common::market_account_exists(&rpc, &env.market)?,
-        "market slab must be deallocated after CloseSlab"
+        common::market_is_retired(&rpc, &env.market)?,
+        "market slab must be retired (header-only) after CloseSlab"
     );
-    eprintln!("market retired: slab deallocated");
+    eprintln!("market retired: slab is a header-only tombstone");
 
     Ok(())
 }

@@ -65,6 +65,7 @@ pub struct Live {
 ///   cargo test -p percolator-cranker --test lifecycle -- --nocapture
 pub fn live_from_env() -> Option<Live> {
     let url = std::env::var("PERCOLATOR_TEST_RPC").ok()?;
+    assert!(local_rpc(&url), "PERCOLATOR_TEST_RPC must be a local validator, got {url}");
     let program_id = std::env::var("PERCOLATOR_PROGRAM_ID")
         .ok()
         .and_then(|s| Pubkey::from_str(&s).ok())?;
@@ -72,7 +73,7 @@ pub fn live_from_env() -> Option<Live> {
         .ok()
         .and_then(|s| Pubkey::from_str(&s).ok())?;
     Some(Live {
-        rpc: RpcClient::new(url),
+        rpc: RpcClient::new_with_commitment(url, CommitmentConfig::confirmed()),
         program_id,
         market,
     })
@@ -89,12 +90,48 @@ pub fn skip(test: &str) {
 /// Lighter env read for tests that BOOTSTRAP their own market (lifecycle):
 /// they only need the RPC endpoint + program id, then create the market
 /// themselves. Returns `None` (skip) when either var is missing.
+/// Validator tests send transactions: refuse anything but a local RPC.
+/// Parses the authority and compares the exact host; userinfo (`a@b`) is
+/// rejected so `http://127.0.0.1@remote/` can't pass.
+fn local_rpc(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split(']').next().map(|h| format!("[{h}]")).unwrap_or_default()
+    } else {
+        authority.split(':').next().unwrap_or("").to_string()
+    };
+    matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]")
+}
+
+#[test]
+fn local_rpc_guard_parses_the_host() {
+    for ok in ["http://127.0.0.1:8899", "http://localhost:8899/", "http://[::1]:8899"] {
+        assert!(local_rpc(ok), "{ok}");
+    }
+    for bad in [
+        "http://localhost.example.com:8899",
+        "http://127.0.0.1@remote.example:8899",
+        "https://localhost@remote.example.invalid:8899",
+        "http://127.0.0.1.evil:8899",
+        "ftp://127.0.0.1",
+    ] {
+        assert!(!local_rpc(bad), "{bad}");
+    }
+}
+
 pub fn rpc_and_program_from_env() -> Option<(RpcClient, Pubkey)> {
     let url = std::env::var("PERCOLATOR_TEST_RPC").ok()?;
+    assert!(local_rpc(&url), "PERCOLATOR_TEST_RPC must be a local validator, got {url}");
     let program_id = std::env::var("PERCOLATOR_PROGRAM_ID")
         .ok()
         .and_then(|s| Pubkey::from_str(&s).ok())?;
-    Some((RpcClient::new(url), program_id))
+    Some((RpcClient::new_with_commitment(url, CommitmentConfig::confirmed()), program_id))
 }
 
 /// Load the funded validator payer, mirroring `main.rs`: `PERCOLATOR_TEST_PAYER`
@@ -481,10 +518,14 @@ pub fn ensure_ata(
 /// retirement (the slab is deleted, so there is no post-retire struct to
 /// decode; this replaces the harness's in-memory `lifecycle == Retired`
 /// check, which inspected a struct that on-chain no longer exists).
-pub fn market_account_exists(rpc: &RpcClient, market: &Pubkey) -> Result<bool> {
+/// `true` once CloseSlab has retired the market. The wrapper does not
+/// deallocate the slab: `handle_close_slab` reallocs it to `HEADER_LEN` and
+/// keeps that much rent (a tombstone), so "retired" means gone OR header-only.
+pub fn market_is_retired(rpc: &RpcClient, market: &Pubkey) -> Result<bool> {
     match rpc.get_account(market) {
-        Ok(acct) => Ok(acct.lamports > 0),
-        Err(_) => Ok(false),
+        Ok(acct) => Ok(acct.lamports == 0
+            || acct.data.len() <= percolator_prog::constants::HEADER_LEN),
+        Err(_) => Ok(true),
     }
 }
 

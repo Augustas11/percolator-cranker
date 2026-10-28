@@ -49,19 +49,50 @@ pub struct CrankerEnv {
     pub user: Keypair,
 }
 
+/// `CRANKER_ENABLE_FEE_SHARES=1` opts the default bootstrap into fee
+/// paths: a maintenance fee plus 50% liquidation and maintenance cranker
+/// shares, so the keeper's reward portfolio accrues. Off by default.
+pub fn fee_shares_enabled() -> bool {
+    std::env::var("CRANKER_ENABLE_FEE_SHARES").ok().as_deref() == Some("1")
+}
+
+/// Default bootstrap for the binary: **no fee paths** unless
+/// [`fee_shares_enabled`]. Off means maintenance fee 0, cranker shares left
+/// at the wrapper default 0, and (in `main.rs`) no reward portfolio
+/// attached to cranks.
 pub fn bootstrap(rpc: &RpcClient, program_id: &Pubkey, payer: Keypair) -> Result<CrankerEnv> {
-    bootstrap_with_fee(rpc, program_id, payer, 100)
+    if fee_shares_enabled() {
+        bootstrap_with_options(rpc, program_id, payer, 100, true)
+    } else {
+        bootstrap_with_options(rpc, program_id, payer, 0, false)
+    }
 }
 
 /// Like [`bootstrap`] but with a caller-chosen `maintenance_fee_per_slot`.
 /// Pass `0` for a market that accrues no maintenance fee — used by the
 /// drive-to-close test so `insurance`/`vault` stay zero after accounts are
 /// paid out, which is what lets `CloseSlab` retire the slab.
+///
+/// This explicit form keeps the 50% cranker shares **on**: callers that use
+/// it (the integration tests) exercise the reward-portfolio ABI on purpose.
 pub fn bootstrap_with_fee(
     rpc: &RpcClient,
     program_id: &Pubkey,
     payer: Keypair,
     maintenance_fee_per_slot: u128,
+) -> Result<CrankerEnv> {
+    bootstrap_with_options(rpc, program_id, payer, maintenance_fee_per_slot, true)
+}
+
+/// Full form: `enable_fee_shares` sets 50% liquidation and maintenance
+/// cranker shares (the wrapper accepts a trailing reward portfolio on a
+/// crank only when the liquidation share is non-zero).
+pub fn bootstrap_with_options(
+    rpc: &RpcClient,
+    program_id: &Pubkey,
+    payer: Keypair,
+    maintenance_fee_per_slot: u128,
+    enable_fee_shares: bool,
 ) -> Result<CrankerEnv> {
     let admin = Keypair::new();
     rpc_airdrop(rpc, &admin.pubkey(), 5_000_000_000)?;
@@ -124,50 +155,52 @@ pub fn bootstrap_with_fee(
         &[&admin],
     )?;
 
-    // 50% cranker share of maintenance fees. Wrapper `#135` binds
-    // policy_sequence (strictly newer than the current lane) and
-    // authority_epoch (exact match on asset 0).
-    let maint = binding::market_authority_binding(&rpc.get_account_data(&market.pubkey())?)?;
-    send_prog_ix(
-        rpc,
-        program_id,
-        &payer,
-        ProgInstruction::UpdateMaintenanceFeePolicy {
-            cranker_share_bps: 5000,
-            policy_sequence: maint.maintenance_fee_seq.saturating_add(1),
-            authority_epoch: maint.authority_epoch,
-        },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(market.pubkey(), false),
-        ],
-        &[&admin],
-    )?;
+    if enable_fee_shares {
+        // 50% cranker share of maintenance fees. Wrapper `#135` binds
+        // policy_sequence (strictly newer than the current lane) and
+        // authority_epoch (exact match on asset 0).
+        let maint = binding::market_authority_binding(&rpc.get_account_data(&market.pubkey())?)?;
+        send_prog_ix(
+            rpc,
+            program_id,
+            &payer,
+            ProgInstruction::UpdateMaintenanceFeePolicy {
+                cranker_share_bps: 5000,
+                policy_sequence: maint.maintenance_fee_seq.saturating_add(1),
+                authority_epoch: maint.authority_epoch,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(market.pubkey(), false),
+            ],
+            &[&admin],
+        )?;
 
-    // Enable the liquidation cranker reward path (50% share). This gates
-    // the reward-portfolio-append acceptance during PermissionlessCrank
-    // (`reward_enabled = liquidation_cranker_fee_share_bps != 0`, at
-    // repo-prog/src/v16_program.rs:10467). Without this the wrapper
-    // treats an appended reward portfolio as an unaccounted-for oracle
-    // tail account and rejects with InvalidInstruction. We still won't
-    // see nonzero fee movement in M2 (no liquidations happen in the
-    // synthetic market), but the ABI shape is now correctly exercised.
-    let liq = binding::market_authority_binding(&rpc.get_account_data(&market.pubkey())?)?;
-    send_prog_ix(
-        rpc,
-        program_id,
-        &payer,
-        ProgInstruction::UpdateLiquidationFeePolicy {
-            cranker_share_bps: 5000,
-            policy_sequence: liq.liquidation_fee_seq.saturating_add(1),
-            authority_epoch: liq.authority_epoch,
-        },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(market.pubkey(), false),
-        ],
-        &[&admin],
-    )?;
+        // Enable the liquidation cranker reward path (50% share). This gates
+        // the reward-portfolio-append acceptance during PermissionlessCrank
+        // (`reward_enabled = liquidation_cranker_fee_share_bps != 0`, at
+        // repo-prog/src/v16_program.rs:10467). Without this the wrapper
+        // treats an appended reward portfolio as an unaccounted-for oracle
+        // tail account and rejects with InvalidInstruction. We still won't
+        // see nonzero fee movement in M2 (no liquidations happen in the
+        // synthetic market), but the ABI shape is now correctly exercised.
+        let liq = binding::market_authority_binding(&rpc.get_account_data(&market.pubkey())?)?;
+        send_prog_ix(
+            rpc,
+            program_id,
+            &payer,
+            ProgInstruction::UpdateLiquidationFeePolicy {
+                cranker_share_bps: 5000,
+                policy_sequence: liq.liquidation_fee_seq.saturating_add(1),
+                authority_epoch: liq.authority_epoch,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(market.pubkey(), false),
+            ],
+            &[&admin],
+        )?;
+    }
 
     // User portfolio + a 1_000_000-atom deposit so maintenance fees can
     // accrue against real capital each slot.
@@ -221,7 +254,7 @@ pub fn bootstrap_with_fee(
 
 // -------- low-level helpers (mirror the client) --------
 
-fn rpc_airdrop(rpc: &RpcClient, to: &Pubkey, lamports: u64) -> Result<()> {
+pub fn rpc_airdrop(rpc: &RpcClient, to: &Pubkey, lamports: u64) -> Result<()> {
     let sig = rpc.request_airdrop(to, lamports)?;
     for _ in 0..40 {
         if let Ok(true) = rpc.confirm_transaction(&sig) {
@@ -232,7 +265,7 @@ fn rpc_airdrop(rpc: &RpcClient, to: &Pubkey, lamports: u64) -> Result<()> {
     bail!("airdrop {sig} not confirmed within timeout")
 }
 
-fn create_spl_mint(
+pub fn create_spl_mint(
     rpc: &RpcClient,
     payer: &Keypair,
     mint: &Keypair,
@@ -265,7 +298,7 @@ fn create_spl_mint(
     Ok(())
 }
 
-fn create_program_owned_account(
+pub fn create_program_owned_account(
     rpc: &RpcClient,
     payer: &Keypair,
     new_account: &Keypair,
@@ -291,7 +324,7 @@ fn create_program_owned_account(
     Ok(())
 }
 
-fn create_ata(rpc: &RpcClient, payer: &Keypair, owner: &Pubkey, mint: &Pubkey) -> Result<()> {
+pub fn create_ata(rpc: &RpcClient, payer: &Keypair, owner: &Pubkey, mint: &Pubkey) -> Result<()> {
     let ix = spl_associated_token_account::instruction::create_associated_token_account(
         &payer.pubkey(),
         owner,
@@ -305,7 +338,7 @@ fn create_ata(rpc: &RpcClient, payer: &Keypair, owner: &Pubkey, mint: &Pubkey) -
     Ok(())
 }
 
-fn mint_to(
+pub fn mint_to(
     rpc: &RpcClient,
     payer: &Keypair,
     mint: &Pubkey,

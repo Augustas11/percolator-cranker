@@ -1,40 +1,43 @@
-//! Minimal permissionless cranker for percolator-prog (M2).
+//! Minimal permissionless cranker for percolator-prog (M2, re-pinned to
+//! wrapper `5cb331dd` / engine `4db11a8c`).
+//!
+//! **Reference / dry-run only; not a paid live service.** M3 is NO-GO.
 //!
 //! Loop shape:
 //!   1. Boot a self-contained market environment (`setup::bootstrap`).
-//!   2. For N cycles:
-//!      a. Discover portfolios (`getProgramAccounts`, filtered by KIND).
-//!      b. Rank them (skip our own reward portfolio; require initialized owner).
-//!      c. For each ranked portfolio:
-//!         - Fetch observation for asset 0 (STUB for M2 — see observation.rs).
-//!         - Consult the plan-classification gate (upstream predicate) to
-//!           decide whether an observation IS needed. Log the decision.
-//!         - Submit `PermissionlessCrank` with the cranker's reward
-//!           portfolio appended as last writable account.
-//!         - Classify the response three-way (Err / Ok-no-mut / Ok-mut) and
-//!           record the mirror-custody row for reconciliation.
-//!      d. Sleep the cycle interval so maintenance fees accrue between
-//!         cycles.
-//!   3. Print a mirror-custody summary and exit 0.
+//!   2. For N cycles, `cycle::run_one_cycle`:
+//!      a. Discover portfolios (`getProgramAccounts`, filtered by KIND) and
+//!         rank them (market-scoped, skip our own reward portfolio).
+//!      b. Read the market once: Live/Recovery → one hint per active leg
+//!         asset; Resolved → at most one oracle-less backing hint.
+//!      c. Order by priority (liquidatable first), rotate within a class,
+//!         and spend a per-cycle wall/CU/tx budget (`scheduler`).
+//!      d. Submit `PermissionlessCrank`, classify Progress / Idle / Failed.
+//!         `EngineNonProgress` is idle. Repeated same-error failures put the
+//!         account in quarantine with capped exponential backoff.
+//!   3. Print the mirror-custody table, cycle summaries and CU stats.
 //!
 //! Deliberate omissions (see cranker/README.md for the full stub inventory):
-//!   * No real oracle account discovery — every hint has `oracle_accounts: 0`.
-//!   * No `SyncMaintenanceFee` submission — the cranker exercises the
-//!     `PermissionlessCrank` path only for M2. Fee-routing was already
-//!     proved by the M1 client via `SyncMaintenanceFee`.
+//!   * No `SyncMaintenanceFee` submission in the loop (M1 proved fee routing).
 //!   * No priority-fee logic. No leader-slot prediction. No jito-bundle.
-//!   * No exponential backoff on retries — per the mission brief, just
-//!     iterate on NonProgress cleanly.
-
-mod binding;
-mod discovery;
-mod observation;
-mod plan_gate;
-mod setup;
-mod submit;
+//!   * Fees are **off by default**: the bootstrap market has no maintenance
+//!     fee and zero cranker shares, and cranks attach no reward portfolio.
+//!     `CRANKER_ENABLE_FEE_SHARES=1` opts in (maintenance fee + 50% shares,
+//!     reward portfolio appended, so a share accrues into the keeper's own
+//!     portfolio). Nothing withdraws it unless `CRANKER_WITHDRAWAL_TEST=1`,
+//!     which also requires the opt-in. No bounty path, no mainnet path.
 
 use anyhow::{anyhow, Context, Result};
 use percolator::AutoCrankPlanV16;
+use percolator_cranker::{
+    binding::{self, SOURCE_LIEN_DRAIN_MAX_STEPS, V16_LAYOUT_DISCRIMINATOR},
+    cycle::{self, CrankCtx, CuStats, SubmissionRecord, HINT_BUDGET},
+    observation, plan_gate,
+    quarantine::{Quarantine, QuarantineConfig},
+    scheduler::CycleBudget,
+    setup,
+    submit::CrankOutcome,
+};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
@@ -43,34 +46,9 @@ use solana_sdk::{
 };
 use std::{env, str::FromStr, time::Duration};
 
-use crate::binding::{SOURCE_LIEN_DRAIN_MAX_STEPS, V16_LAYOUT_DISCRIMINATOR};
-use crate::submit::CrankOutcome;
-
 const RPC_URL: &str = "http://127.0.0.1:8899";
 const DEFAULT_CYCLES: usize = 3;
 const CYCLE_INTERVAL: Duration = Duration::from_secs(3);
-/// Hint budget per PermissionlessCrank tx. Wrapper cap is
-/// `CRANK_OBSERVATION_DECODE_MAX = 16`. Our synthetic market has 1 asset,
-/// so this is effectively 1 hint per tx, but the code path enforces the
-/// budget for when it matters.
-const HINT_BUDGET: usize = 16;
-
-/// Mirror-custody bookkeeping row: one per submission. Persisted in-memory
-/// only for M2; a production cranker would sink these to a real store.
-#[derive(Debug)]
-#[allow(dead_code)] // `signature`/`error` are captured for the Debug-derived
-                    // reconciliation dump; the summary table doesn't print them.
-struct CustodyRow {
-    cycle: usize,
-    target_portfolio: Pubkey,
-    signature: Option<String>,
-    outcome: &'static str,
-    target_bytes_diff: usize,
-    reward_bytes_diff: Option<usize>,
-    pre_state_hash: u64,
-    post_state_hash: u64,
-    error: Option<String>,
-}
 
 fn main() -> Result<()> {
     let program_id_str = env::var("PERCOLATOR_PROGRAM_ID").context(
@@ -133,128 +111,58 @@ fn main() -> Result<()> {
     println!("cranker_portfolio = {} (our reward acct)", env.cranker_portfolio);
 
     // ---- cycle loop ----
-    let mut custody: Vec<CustodyRow> = Vec::new();
+    let pyth_resolver = match env::var("CRANKER_PYTH_MODE").as_deref() {
+        Ok("canonical") => observation::PythFeedResolver::canonical_pda_only(),
+        _ => observation::empty_pyth_resolver(),
+    };
+    let budget = CycleBudget::from_env();
+    let mut quarantine = Quarantine::new(QuarantineConfig::from_env());
+    println!(
+        "budget: wall={:?} cu={} max_tx={} | quarantine: {:?}",
+        budget.max_wall,
+        budget.max_cu,
+        budget.max_submissions,
+        quarantine.config()
+    );
+    let ctx = CrankCtx {
+        rpc: &rpc,
+        program_id: &program_id,
+        payer: &env.payer,
+        market: &env.market,
+        // Fee paths are opt-in (CRANKER_ENABLE_FEE_SHARES=1); without them the
+        // wrapper would reject a trailing reward portfolio anyway.
+        reward_portfolio: setup::fee_shares_enabled().then_some(&env.cranker_portfolio),
+        pyth: &pyth_resolver,
+        exclude: &[],
+    };
+    let mut records: Vec<SubmissionRecord> = Vec::new();
+    let mut cu = CuStats::default();
+    let (mut progressed, mut idle, mut failed) = (0usize, 0usize, 0usize);
     for cycle in 0..cycles {
         println!("\n---- cycle {cycle} ----");
-        let all_portfolios = discovery::discover_portfolios(&rpc, &program_id)?;
-        println!("discovered {} portfolio account(s)", all_portfolios.len());
-        let ranked =
-            discovery::rank_by_staleness(all_portfolios, &env.market, &env.cranker_portfolio);
-        println!("ranked {} candidate(s) after pruning self + uninitialized", ranked.len());
-
-        // ---- hint-budget selection (M2.e) ----
-        // Naive: crank up to HINT_BUDGET candidates per cycle, one hint each,
-        // one asset (0). Documenting the policy explicitly so it's obvious
-        // when it drifts.
-        let batch: Vec<_> = ranked.into_iter().take(HINT_BUDGET).collect();
-
-        // Fresh slot for the observation freshness signal (wrapper still
-        // authenticates from Clock; we send the slot the RPC currently
-        // reports so a caller inspecting a captured tx sees a sane value).
-        let now_slot = rpc.get_slot()?;
-
-        // Snapshot the market slab once per cycle for oracle-profile
-        // discovery. In production this would be cached with an on-slot
-        // invalidation watcher; for M2 a per-cycle fetch is fine.
-        let market_data = rpc
-            .get_account_data(&env.market)
-            .context("read market slab for observation discovery")?;
-        // Pyth resolver policy (env override):
-        //   CRANKER_PYTH_MODE=off        → no Pyth resolution (SB/Chainlink only)
-        //   CRANKER_PYTH_MODE=canonical  → canonical shard-0 PDA fallback
-        //   (unset defaults to `off` — matches our synthetic MANUAL market)
-        let pyth_resolver = match env::var("CRANKER_PYTH_MODE").as_deref() {
-            Ok("canonical") => observation::PythFeedResolver::canonical_pda_only(),
-            _ => observation::empty_pyth_resolver(),
-        };
-
-        for candidate in batch {
-            println!("→ crank candidate = {}", candidate.pubkey);
-
-            // ---- observation pipeline (Q4 real walk, not a stub anymore) ----
-            // Reads AssetOracleProfileV16 for the target asset out of the
-            // market slab and returns oracle account pubkeys per the mode's
-            // dispatch table. For our synthetic ORACLE_MODE_MANUAL market
-            // this still returns empty — same effective behavior as the
-            // previous stub, but now via a real per-asset profile walk.
-            let observation = observation::fetch_observation_for_asset(
-                &market_data,
-                /* asset_index */ 0,
-                &pyth_resolver,
-            )?;
-            let hint_oracle_count = observation.oracle_account_count();
-
-            // ---- oracle-profile inspection + plan-classification gate ----
-            let profile_report = observation::read_asset_oracle_profile(&market_data, 0);
-            match profile_report {
-                Some(p) => println!(
-                    "  oracle-profile asset 0: mode={} leg_count={} (tail carries {} oracle account(s))",
-                    oracle_mode_name(p.oracle_mode),
-                    p.oracle_leg_count,
-                    hint_oracle_count,
-                ),
-                None => println!("  oracle-profile asset 0: unreadable (market slab too short)"),
-            };
-            // Consult the plan-classification gate against the one plan variant
-            // that would require an observation (`RefreshAccount{None}`). A6–A8
-            // / AdvanceClose / FinalizeRecovery all dispatch without a caller
-            // observation (delegated; not hand-rolled).
-            let hypothetical = AutoCrankPlanV16::RefreshAccount { asset_index: None };
-            if plan_gate::needs_observation(&hypothetical) && observation.oracle_accounts.is_empty()
-            {
-                println!(
-                    "  plan-gate: hypothetical RefreshAccount{{None}} requires an observation; \
-                     our walk returned {hint_oracle_count} oracle accounts. On MANUAL/EWMA/AUTH-MARK \
-                     markets that's correct (mark is committed); on HYBRID it means the pyth \
-                     resolver is missing entries — expect NonProgress or a hard-reject."
-                );
-            } else {
-                println!(
-                    "  plan-gate: hypothetical plan does not require a caller observation \
-                     ({hint_oracle_count} oracle accounts in the tail); engine will \
-                     synthesize from committed state."
-                );
-            }
-            println!(
-                "  plan-gate: A6 ReleaseSourceLiens / AdvanceClose / FinalizeRecovery / A8 CloseResolved \
-                 all needs_obs=false (chunk = {} domain/call)",
-                binding::SOURCE_LIEN_RELEASE_CHUNK_DOMAINS
-            );
-
-            // ---- submit + classify (M2.b + M2.f) ----
-            // A6 drain: ReleaseSourceLiens progresses one domain per crank.
-            // Keep submitting the same candidate until Ok(no-mut) / HardReject
-            // or SOURCE_LIEN_DRAIN_MAX_STEPS. Order-canonical K/F (v16.9.1)
-            // means this loop is liveness, not a same-refresh PnL lever.
-            let mut inner_slot = now_slot;
-            for drain_step in 0..SOURCE_LIEN_DRAIN_MAX_STEPS {
-                let outcome = submit::submit_crank(
-                    &rpc,
-                    &program_id,
-                    &env.payer,
-                    &env.market,
-                    &candidate.pubkey,
-                    Some(&env.cranker_portfolio),
-                    std::slice::from_ref(&observation),
-                    inner_slot,
-                )?;
-
-                let stop = matches!(
-                    &outcome,
-                    CrankOutcome::Ok { mutated: false, .. } | CrankOutcome::HardReject { .. }
-                );
-                if drain_step > 0 {
-                    println!("  A6 drain step {drain_step}");
-                }
-                let row = classify_and_log(cycle, &candidate.pubkey, &outcome);
-                custody.push(row);
-                if stop {
-                    break;
-                }
-                inner_slot = rpc.get_slot()?;
-            }
+        let first = records.len();
+        let summary =
+            cycle::run_one_cycle(&ctx, cycle as u64, &budget, &mut quarantine, &mut records, &mut cu)?;
+        for r in &records[first..] {
+            log_outcome(r);
         }
-
+        println!("{}", summary.line());
+        progressed += summary.progressed;
+        idle += summary.idle;
+        failed += summary.failed;
+        // CI sets CRANKER_FAIL_ON_ERRORS=1: on a fresh bootstrap market any
+        // failed attempt is a regression, so the dry run must not exit 0.
+        if (summary.failed > 0 || !summary.unconfirmed.is_empty())
+            && env::var("CRANKER_FAIL_ON_ERRORS").as_deref() == Ok("1")
+        {
+            anyhow::bail!(
+                "cycle {cycle}: {} failed, {} unconfirmed: {:?} {:?}",
+                summary.failed,
+                summary.unconfirmed.len(),
+                summary.failures,
+                summary.unconfirmed
+            );
+        }
         if cycle + 1 < cycles {
             println!("cycle {cycle} done; sleeping {:?}", CYCLE_INTERVAL);
             std::thread::sleep(CYCLE_INTERVAL);
@@ -264,43 +172,47 @@ fn main() -> Result<()> {
     // ---- summary (M2.g) ----
     println!("\n== mirror-custody summary ==");
     println!(
-        "{:<6} {:<45} {:<12} {:<7} {:<7} {:<20} {:<20}",
-        "cycle", "target_portfolio", "outcome", "tgtΔ", "rwdΔ", "pre_hash", "post_hash"
+        "{:<6} {:<45} {:<24} {:<12} {:<7} {:<7} {:<9}",
+        "cycle", "target_portfolio", "plan_class", "outcome", "tgtΔ", "rwdΔ", "prog_cu"
     );
-    let mut mutations = 0usize;
-    let mut nonprogress = 0usize;
-    let mut hard_rejects = 0usize;
-    for row in &custody {
-        let rwd = row
-            .reward_bytes_diff
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| "-".to_string());
+    for r in &records {
+        let (label, tgt, rwd) = match &r.outcome {
+            CrankOutcome::Ok { unreconciled: Some(_), .. } => {
+                ("Ok(unreconciled)", "?".into(), "?".into())
+            }
+            CrankOutcome::Ok {
+                mutated,
+                target_bytes_diff,
+                reward_bytes_diff,
+                ..
+            } => (
+                if *mutated { "Ok(mut)" } else { "Ok(no-mut)" },
+                target_bytes_diff.to_string(),
+                reward_bytes_diff.map(|d| d.to_string()).unwrap_or_else(|| "-".into()),
+            ),
+            CrankOutcome::HardReject { error_name, .. } => {
+                (error_name.unwrap_or("HardReject"), "0".into(), "-".into())
+            }
+        };
         println!(
-            "{:<6} {:<45} {:<12} {:<7} {:<7} {:<20x} {:<20x}",
-            row.cycle,
-            row.target_portfolio,
-            row.outcome,
-            row.target_bytes_diff,
+            "{:<6} {:<45} {:<24} {:<12} {:<7} {:<7} {:<9}",
+            r.cycle,
+            r.target,
+            r.plan_class,
+            label,
+            tgt,
             rwd,
-            row.pre_state_hash,
-            row.post_state_hash
+            r.outcome.program_cu().map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
         );
-        if let Some(err) = &row.error {
-            println!("       └── error: {err}");
-        }
-        match row.outcome {
-            "Ok(mut)" => mutations += 1,
-            "Ok(no-mut)" => nonprogress += 1,
-            "HardReject" => hard_rejects += 1,
-            _ => {}
-        }
     }
     println!(
-        "\ntotals: submissions={}, mutated={}, non-progress={}, hard-reject={}",
-        custody.len(),
-        mutations,
-        nonprogress,
-        hard_rejects
+        "\ntotals: submissions={} | per-attempt: progressed={progressed} idle={idle} failed={failed} | quarantine events={}",
+        records.len(),
+        quarantine.events().len()
+    );
+    println!(
+        "cu: noop_min={:?} (tx total {:?}) worst_ok={:?} worst_reject={:?} (program CU)",
+        cu.noop_min, cu.noop_tx, cu.worst_ok, cu.worst_reject
     );
 
     // Post-run reward portfolio snapshot for reconciliation.
@@ -321,6 +233,10 @@ fn main() -> Result<()> {
     //      portfolio is byte-for-byte the same withdrawal surface as a
     //      user portfolio.
     if env::var("CRANKER_WITHDRAWAL_TEST").ok().as_deref() == Some("1") {
+        anyhow::ensure!(
+            setup::fee_shares_enabled(),
+            "CRANKER_WITHDRAWAL_TEST=1 needs CRANKER_ENABLE_FEE_SHARES=1 (fee paths are opt-in)"
+        );
         run_q6_withdrawal_test(&rpc, &program_id, &env)?;
     }
 
@@ -414,7 +330,7 @@ fn run_q6_withdrawal_test(
     let withdraw_amount = cranker_capital.min(100);
     let (vault_authority, _bump) =
         Pubkey::find_program_address(&[b"vault", env.market.as_ref()], program_id);
-    let cranker_bind = crate::binding::portfolio_binding(&cranker_data)?;
+    let cranker_bind = binding::portfolio_binding(&cranker_data)?;
     let withdraw_ix = ProgInstruction::Withdraw {
         portfolio_id: cranker_bind.portfolio_id,
         expected_sequence: cranker_bind.sequence,
@@ -466,71 +382,37 @@ fn spl_token_amount(rpc: &RpcClient, ata: &Pubkey) -> Result<u64> {
     Ok(parsed.amount)
 }
 
-fn classify_and_log(
-    cycle: usize,
-    target: &Pubkey,
-    outcome: &CrankOutcome,
-) -> CustodyRow {
-    match outcome {
-        CrankOutcome::HardReject { error, error_name } => {
+fn log_outcome(r: &SubmissionRecord) {
+    match &r.outcome {
+        CrankOutcome::HardReject { error, error_name, .. } => {
             let named = error_name.unwrap_or("Unknown");
-            println!("  ← HardReject ({named}): {error}");
-            CustodyRow {
-                cycle,
-                target_portfolio: *target,
-                signature: None,
-                outcome: "HardReject",
-                target_bytes_diff: 0,
-                reward_bytes_diff: None,
-                pre_state_hash: 0,
-                post_state_hash: 0,
-                error: Some(format!("{named}: {error}")),
-            }
+            println!("  {} [{}] ← HardReject ({named}): {error}", r.target, r.plan_class);
         }
         CrankOutcome::Ok {
             signature,
-            pre_state_hash,
-            post_state_hash,
             mutated,
             target_bytes_diff,
             reward_bytes_diff,
+            program_cu,
+            ..
         } => {
-            let variant = if *mutated { "Ok(mut)" } else { "Ok(no-mut)" };
+            let variant = if r.outcome.class() == percolator_cranker::submit::OutcomeClass::Progress && !*mutated {
+                "Ok(unreconciled)"
+            } else if *mutated {
+                "Ok(mut)"
+            } else {
+                "Ok(no-mut)"
+            };
             println!(
-                "  ← {variant}: sig={signature} target_diff={target_bytes_diff} reward_diff={:?}",
-                reward_bytes_diff
+                "  {} [{}] ← {variant}: sig={signature} target_diff={target_bytes_diff} reward_diff={:?} program_cu={:?}",
+                r.target, r.plan_class, reward_bytes_diff, program_cu
             );
-            CustodyRow {
-                cycle,
-                target_portfolio: *target,
-                signature: Some(signature.to_string()),
-                outcome: variant,
-                target_bytes_diff: *target_bytes_diff,
-                reward_bytes_diff: *reward_bytes_diff,
-                pre_state_hash: *pre_state_hash,
-                post_state_hash: *post_state_hash,
-                error: None,
-            }
         }
     }
 }
 
 fn home_dir() -> Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(env::var("HOME").context("HOME unset")?))
-}
-
-fn oracle_mode_name(mode: u8) -> &'static str {
-    use percolator_prog::constants::{
-        ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK, ORACLE_MODE_HYBRID_AFTER_HOURS,
-        ORACLE_MODE_MANUAL,
-    };
-    match mode {
-        ORACLE_MODE_MANUAL => "MANUAL",
-        ORACLE_MODE_HYBRID_AFTER_HOURS => "HYBRID_AFTER_HOURS",
-        ORACLE_MODE_EWMA_MARK => "EWMA_MARK",
-        ORACLE_MODE_AUTH_MARK => "AUTH_MARK",
-        _ => "unknown",
-    }
 }
 
 fn fnv(bytes: &[u8]) -> u64 {
