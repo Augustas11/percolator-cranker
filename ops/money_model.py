@@ -26,12 +26,16 @@ def args():
     a("--fee-bps", type=float, default=5.0, help="trade fee, charged to EACH side")
     a("--liq-share", type=float, default=0.01, help="liquidated notional / volume (TO VERIFY)")
     a("--liq-fee-bps", type=float, default=50.0, help="liquidation_fee_bps")
-    a("--backed-share", type=float, default=0.05, help="new backed lien / volume (TO VERIFY)")
+    a("--liq-collect", type=float, default=0.5, help="share of the liquidation fee actually collected (TO VERIFY)")
+    a("--backed-share", type=float, default=0.05,
+      help="new backed lien paid by OUTSIDE accounts / volume; our LP's payments are internal (TO VERIFY)")
     a("--backing-fee-bps", type=float, default=10.0)
     a("--maint-atoms-per-slot", type=float, default=1.0)
     a("--portfolios-per-100k", type=float, default=20.0, help="open portfolios per $100k/day (TO VERIFY)")
     a("--listing-fee-usd", type=float, default=0.0, help="permissionless asset-create fee; 0 = listing closed")
     a("--listings-per-month", type=float, default=0.0)
+    a("--loss-bps", type=float, default=0.5, help="insurance + backing spent on bad debt, bps of volume (TO VERIFY)")
+    a("--lock-days", type=float, default=14.0, help="days the Live withdrawal gate stays shut, for the cash runway")
     # own-LP costs
     a("--adverse-bps", type=float, default=2.0, help="LP adverse selection per $ of volume (TO VERIFY)")
     a("--hedged-share", type=float, default=0.3, help="share of volume we hedge off-venue (TO VERIFY)")
@@ -44,8 +48,8 @@ def args():
     a("--sol-per-day", type=float, default=0.5, help="cranker + pusher tx and priority fees (TO VERIFY)")
     a("--rpc-usd-month", type=float, default=300.0)
     a("--hosting-usd-month", type=float, default=100.0)
-    a("--capital-usd", type=float, default=90_000.0, help="own-LP capital, see ops/CAPITAL_PLAN.md")
-    a("--capital-usd-outside", type=float, default=35_000.0, help="capital without LP and hedge buckets")
+    a("--capital-usd", type=float, default=100_000.0, help="own-LP capital, see ops/CAPITAL_PLAN.md")
+    a("--capital-usd-outside", type=float, default=45_000.0, help="capital without LP and hedge buckets")
     a("--capital-apy", type=float, default=0.05, help="opportunity cost of idle USDC")
     a("--volumes", type=str, default="100000,1000000,10000000")
     return p.parse_args()
@@ -57,17 +61,17 @@ def maint_per_dollar(o):
 
 def variable(o, mode):
     """(revenue, cost) per $ of taker volume."""
-    other = (o.liq_share * o.liq_fee_bps + o.backed_share * o.backing_fee_bps) / 1e4
+    other = (o.liq_share * o.liq_fee_bps * o.liq_collect + o.backed_share * o.backing_fee_bps) / 1e4
     if mode == "own":
         # Taker side only: our LP pays the same fee into insurance we control,
         # a transfer from LP capital to insurance, not income.
         fees = o.fee_bps / 1e4
-        cost = (o.adverse_bps + o.hedged_share * o.hedge_bps) / 1e4
+        cost = (o.adverse_bps + o.hedged_share * o.hedge_bps + o.loss_bps) / 1e4
     else:
         # Both sides are outside money. The LP also pays its fee side, so its
         # off-chain rebate must return that, cover its costs and pay a margin.
         fees = 2 * o.fee_bps / 1e4
-        cost = min(lp_rebate_bps(o), 2 * o.fee_bps) / 1e4
+        cost = (min(lp_rebate_bps(o), 2 * o.fee_bps) + o.loss_bps) / 1e4
     return fees, other, cost
 
 
@@ -89,12 +93,14 @@ def lines(o, mode, v):
     fees, _, cost = variable(o, mode)
     rev = {
         "trade fees (into insurance)": v * fees,
-        "liquidation fees": v * o.liq_share * o.liq_fee_bps / 1e4,
+        "liquidation fees (collected)": v * o.liq_share * o.liq_fee_bps * o.liq_collect / 1e4,
         "backing fees": v * o.backed_share * o.backing_fee_bps / 1e4,
         "maintenance fees": v * maint_per_dollar(o),
         "listing fees": o.listing_fee_usd * o.listings_per_month * 12 / 365,
     }
-    var = {"LP adverse + hedge" if mode == "own" else "rebate to outside LP": v * cost}
+    loss = v * o.loss_bps / 1e4
+    var = {"LP adverse + hedge" if mode == "own" else "rebate to outside LP": v * cost - loss,
+           "bad debt (insurance spent)": loss}
     return rev, var, fixed_costs(o, mode)
 
 
@@ -122,6 +128,14 @@ def table(o, mode, vols):
     print(f"{'net P&L per 30 days':32}" + "".join(f"{30 * t:>16,.0f}" for t in totals))
     print(f"{'into insurance, both fee sides':32}" + "".join(f"{2 * v * o.fee_bps / 1e4:>16,.0f}" for v in vols))
     fees, other, cost = variable(o, mode)
+    # Cash: what accrues behind the Live gate while it is shut (both fee sides,
+    # plus the rest of the gated lines). Own-LP: half of it came out of LP capital.
+    gated = [2 * v * o.fee_bps / 1e4 * o.lock_days for v in vols]
+    print(f"{'cash locked if gate shut ' + format(o.lock_days, 'g') + 'd':32}" + "".join(f"{x:>16,.0f}" for x in gated))
+    if mode == "own":
+        print(f"{'  of which drained from LP':32}" + "".join(f"{x / 2:>16,.0f}" for x in gated))
+    else:
+        print(f"{'  rebates owed meanwhile':32}" + "".join(f"{v * lp_rebate_bps(o) / 1e4 * o.lock_days:>16,.0f}" for v in vols))
     print(f"net variable margin: {(fees + other - cost) * 1e4:.2f} bps of volume (+ maintenance)")
     if mode == "outside":
         print(f"rebate to outside LP: {lp_rebate_bps(o):.2f} bps of volume "

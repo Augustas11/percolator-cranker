@@ -13,7 +13,7 @@ how early each must start before launch. Upstream has no launch date, so
 | 5 | **Rent servers:** 2 small VMs (primary + standby) in different regions | 1 day | SSH access; bots install from the R2 hosting recipe |
 | 6 | **Sign up for a paid RPC** (mainnet, with priority or staked send) plus a second provider for failover | 1–3 days | Keys in the hosts' secret stores; quota checked |
 | 7 | **Open the hedge-venue account** (if counsel says it is allowed) | 1–2 weeks (access checks) | Account funded with the $20k hedge bucket |
-| 8 | **Fund the multisig:** ~$70k USDC + ~20 SOL (the hedge $20k goes to the venue) | 1–3 days (exchange withdrawals) | Balances visible in Squads |
+| 8 | **Fund the multisig:** ~$80k USDC + ~20 SOL (the hedge $20k goes to the venue) | 1–3 days (exchange withdrawals) | Balances visible in Squads |
 | 9 | **Create the hot keys** on their hosts; give Ops the public keys | 1 hour | Launch config complete |
 | 10 | **Approve market parameters** (`LAUNCH_RUNBOOK.md` table) | 1 day | Signed off in the config |
 | 11 | **Recruit testers** (10–20, for the devnet PoC beta first) | 2–4 weeks | Names, wallets and a channel to reach them |

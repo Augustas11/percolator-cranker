@@ -44,7 +44,7 @@ market being Live.
 | 0–10 | Ops | Pin to the release commit; build our crates against it; check the verified-build hash matches the deployed program (*to verify*: the tool upstream uses) |
 | 10–15 | Ops | Diff the release against our pin: instruction tags, account layouts, `InitMarket` validation. **Any change to fees, gates or layout = no-go** until reviewed |
 | 15 | Owner | **Go/no-go #1** (criteria below) |
-| 15–35 | Ops + Owner | Run `scripts/launch_market.sh` against mainnet with the official program ID (the tech kit; built in parallel, see its `--help`). It does, in order: create the market account → `InitMarket` → AuthMark config → policies → role split → insurance seed → backing top-up → LP portfolio → start keeper, pusher, matcher (reduce-only, closed to others) |
+| 15–35 | Ops + Owner | Run `scripts/launch_market.sh` against mainnet with the official program ID (the tech kit; built in parallel, see its `--help`). It does, in order: create the market account → `InitMarket` → AuthMark config → policies → role split → insurance seed → backing top-up → LP portfolio → start keeper, pusher, matcher (quoting only to the owner-tester) |
 | 35–45 | Ops | Smoke: one owner-tester round-trip ($100 open, close, withdraw); the keeper cranks; a push lands; the monitor is green |
 | 45–55 | Owner | **Go/no-go #2** |
 | 55–60 | Ops | Matcher to open mode at launch limits |
@@ -59,7 +59,7 @@ market being Live.
 
 | Who | Check |
 |---|---|
-| Ops | No stuck account; pushes on cadence; crank success rate; SOL burn rate against the model |
+| Ops | No stuck account; pushes on cadence; crank success rate; SOL burn rate against the model; **gross OI per side** against the cap (`CAPITAL_PLAN.md`) |
 | Ops | First fills: fee lands in the insurance budget as expected (`MONEY_MODEL.md`, facts 2–3) |
 | Owner | Confirm the role holders on-chain match `KEYS.md` (monitor expected-roles check) |
 
@@ -68,7 +68,7 @@ market being Live.
 | Who | Check |
 |---|---|
 | Ops | P&L snapshot against the model: volume, fees, LP inventory P&L, SOL spent |
-| Ops | Gate uptime: share of slots where Live insurance withdrawal was allowed |
+| Ops | Gate uptime: share of slots where Live insurance withdrawal was allowed; cash reserve against `money_model.py --lock-days` |
 | Ops | Backing expiry is far enough out; next roll scheduled |
 | Owner | Decide: keep the limits, raise them (rule 7 in `CAPITAL_PLAN.md`), or pause |
 
@@ -146,18 +146,27 @@ staging):
 
 ## Pause and rollback
 
-- **Soft pause (seconds):** switch the matcher to **reduce-only**. We are the
-  only LP, so no new risk can open; users can still close against us. Use it
-  for any doubt.
-- **Hard pause:** stop the matcher entirely. Users cannot close either, so
-  use it for minutes only (for example, a suspected oracle problem).
-- **Rollback before T-0** (no external funds): resolve with the multisig
-  (`ResolveMarket`), then close out and `CloseSlab` (playbook section d,
-  "Resolution and exits"). Reclaim insurance and backing to their
-  beneficiaries.
-- **Rollback after T-0:** there is no undo. Soft pause, announce, then
-  `ResolveMarket`. Users exit through the resolved close and claim path. Only
-  then `CloseSlab`.
+Our matcher controls only **our** liquidity. Other owners can trade with
+each other directly (`P 8709-8715`), so stopping our matcher is not a
+market pause.
+
+| Lever | Who | Effect | Use |
+|---|---|---|---|
+| **Matcher reduce-only** | Ops, seconds | We stop adding risk; users can still close against us | first response to any doubt |
+| **Matcher stopped** | Ops, seconds | We stop all fills, so our takers cannot close either | minutes only, for example a suspected oracle problem |
+| **`DRAIN_ONLY` on asset 0** | multisig | Engine blocks every risk-increasing trade from **anyone** (`P 12800-12806`, gate at `E 15431-15443`, `E 20787-20798`). Reducing trades still work | the real market-wide brake. **One-way:** there is no path back to Active (`E 19671-19689`), so next comes resolution or relisting. *To verify* in staging |
+| **`ResolveMarket`** | multisig | Ends trading; users exit through the resolved close and claim path | full stop |
+
+- **Rollback before T-0** (no external funds): `ResolveMarket`, then close
+  out and `CloseSlab` (playbook section d, "Resolution and exits"). Reclaim
+  insurance and backing to their beneficiaries.
+- **Rollback after T-0:** there is no undo.
+  1. Reduce-only, announce, and `DRAIN_ONLY` if outside flow continues.
+  2. Then `ResolveMarket`. It refuses with `EngineStale` until committed
+     mark and funding accrual is cranked through (`P 11852-11866`), so keep
+     the keeper running and retry.
+  3. Users exit through the resolved close and claim path. Only then
+     `CloseSlab`.
 
 ## Incident runbook
 
@@ -173,9 +182,9 @@ staging):
   - **anyone** can call `ResolveStalePermissionless` (playbook:
     `P 13178-13200`);
   - Live withdrawals and policy changes refuse with `OracleStale`;
-  - soft pause, then push if we can, otherwise accept resolution and run the
+  - matcher reduce-only, then push if we can, otherwise accept resolution and run the
     exit steps.
-- **If Pyth itself is down:** do not push a guessed price. Soft pause and let
+- **If Pyth itself is down:** do not push a guessed price. Matcher reduce-only, and let
   the window decide.
 
 ### Stuck accounts (percolator #243 and similar)
@@ -192,8 +201,8 @@ staging):
   - **Prevent it:** withdraw unliened principal **before** `expiry_slot`, and
     never let a bucket lapse unused (`CAPITAL_PLAN.md` rule 5). The monitor
     pages on `Fresh` with `expiry_slot ≤ now`.
-  - **If it happens:** quarantine keeps the keeper healthy, and the soft
-    pause stops new risk. It clears only at market resolution, so plan an
+  - **If it happens:** quarantine keeps the keeper healthy, and the
+    matcher on reduce-only (plus `DRAIN_ONLY` if needed) stops new risk. It clears only at market resolution, so plan an
     orderly `ResolveMarket`.
 - Log every stuck account with a repro, as private findings. Posting
   upstream is an owner decision.
@@ -204,7 +213,7 @@ staging):
   impossible (playbook: `E 4316-4325`, `E 14595-14614`). **It cannot be
   undone.**
 - Do:
-  - soft pause;
+  - matcher reduce-only (plus `DRAIN_ONLY` if outside flow continues);
   - keep the keeper running (each crank forfeits a released leg or resolves,
     playbook: `E 15097-15122`);
   - tell users;
@@ -218,6 +227,6 @@ staging):
   - the crank is permissionless, so others may crank;
   - restart, or fail over to the standby within 15 min;
   - while it is down, liquidations lag and the cranker share goes to others.
-- **Matcher:** with no LP there is no trading, which is a de facto pause.
+- **Matcher:** our liquidity is gone, so our takers cannot open or close. Others can still trade directly with each other. Restart it, or fail over.
   Restart.
 - **Pusher:** see "Oracle stale".

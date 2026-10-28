@@ -4,10 +4,14 @@
 
 | | We are the only LP | Outside LP + rebate |
 |---|---:|---:|
-| Break-even | **$330k/day** | **$240k/day** |
-| Net per month at $100k/day | −$2k | −$1.6k |
-| Net per month at $1M/day | +$6k | +$9k |
-| Net per month at $10M/day | +$89k | +$112k |
+| Break-even | **$440k/day** | **$305k/day** |
+| Net per month at $100k/day | −$2.4k | −$1.9k |
+| Net per month at $1M/day | +$3.9k | +$6.4k |
+| Net per month at $10M/day | +$67k | +$90k |
+
+These are **accrual P&L, assuming bad debt stays at 0.5 bps of volume**.
+A larger loss, or a long stretch with the withdrawal gate shut, changes the
+answer. See "Cash, not just P&L" below.
 
 - Most of the income lands in **insurance**, which we can withdraw while Live
   only when the whole market is healthy. Plan the cash flow around that.
@@ -75,9 +79,9 @@ Most mechanisms are also mapped in `docs/OPERATOR_PLAYBOOK.md` on branch
 |---|---|---|---|---|
 | Trade fee, taker side | fact 2 above | insurance budget, asset 0 | only through the gate (fact 4) | 5 bps × volume |
 | Trade fee, LP side | same; our own money | insurance budget | same | not income (a transfer) |
-| Liquidation fee | `clamp(ceil(notional·bps/1e4), min_abs, cap)` (playbook: `E 20852-20884`). The keeper share is `liquidation_cranker_fee_share_bps` of the retained fee, credited as **capital** to the cranker's portfolio, only when the fee is reclaimable and the crank passes a cranker portfolio (`P 14280-14284`). The rest goes to budgets (`P 14275-14320`). The default share is 0 (`P 7713`) | keeper portfolio + insurance | **keeper share: yes**, via normal `Withdraw` (`P 7896`). The rest: gated | 1% of volume liquidated *to verify* × 50 bps |
+| Liquidation fee | `clamp(ceil(notional·bps/1e4), min_abs, cap)` (playbook: `E 20852-20884`). The keeper share is `liquidation_cranker_fee_share_bps` of the retained fee, credited as **capital** to the cranker's portfolio, only when the fee is reclaimable and the crank passes a cranker portfolio (`P 14280-14284`). The rest goes to budgets (`P 14275-14320`). The default share is 0 (`P 7713`) | keeper portfolio + insurance | **keeper share: yes**, via normal `Withdraw` (`P 7896`), which needs the keeper portfolio flat (`E 18954-18955`). Keep it flat. The rest: gated | 1% of volume liquidated × 50 bps × 50% actually collected (*to verify*). The fee is skipped for negative-PnL payers and capped at capital (`E 18198-18202`); the wrapper credits only the fee actually retained (`P 14275-14279`) |
 | Maintenance fee | `maintenance_fee_per_slot` per portfolio per slot; Live only (`P 6816-6830`). Cranker share via `maintenance_cranker_fee_share_bps` (`P 11630-11690`; default 0 at `P 7714`) | asset 0 budget + keeper | keeper share yes; rest gated | 1 atom/slot ≈ $0.22/day per portfolio; 20 portfolios per $100k/day *to verify* |
-| Backing fee | Charged to an account whose counterparty-backed lien grows (`P 14987-15037`). The amount is `fee_bps` of the lien delta, split `insurance_share_bps` to insurance and the rest to provider earnings (`E 47-74`, `E 10165-10232`). The payer must have PnL ≥ 0 (`E 10183`) | provider earnings + insurance | provider earnings: `WithdrawBackingBucketEarnings`, under the same health gate (playbook: `P 10761-10790`) | 5% of volume becomes new backed lien *to verify* × 10 bps |
+| Backing fee | Charged to an account whose counterparty-backed lien grows (`P 14987-15037`). The amount is `fee_bps` of the lien delta, split `insurance_share_bps` to insurance and the rest to provider earnings (`E 47-74`, `E 10165-10232`). The payer must have PnL ≥ 0 (`E 10183`). Both trade accounts are checked, **our LP included**, and an LP-paid fee is an internal transfer, like its trade fee. The utilization-rent part of backing is fixed at zero by `public_user_fund` (`E 4434-4437`) | provider earnings + insurance | provider earnings: `WithdrawBackingBucketEarnings`, under the same health gate (playbook: `P 10761-10790`) | 5% of volume becomes new backed lien **paid by outside accounts** *to verify* × 10 bps |
 | Funding | A premium of the pushed mark over the lagged effective price, capped by `max_abs_funding_e9_per_slot` (`P 5714-5732`, `P 15502-15537`). It is **not** OI-imbalance funding | LP vs takers, zero-sum | n/a | 0 (≈0 in steady state) *to verify* |
 | Listing fee (permissionless asset create) | `marketauth` sets it with `UpdateMarketInitFeePolicy` (tag 59). Fee 0 means only the authority may list (`P 12447-12458`). It doubles every 32 slots of asset index (`P 5543-5557`). The whole fee is deposited to asset 0 insurance (`P 12588`, `P 12610`; wrapper README "Assets 1..N") | asset 0 insurance budget | only through the gate (fact 4), and the gate is **market-wide**, so the listed asset's traders can hold it shut | 0: listing is closed on Day 0. Example: 2 listings/month at $1k each is ≈ $66/day |
 | Portfolio rent | closed portfolios' rent moves to the market account and returns to `marketauth` at `CloseSlab` (playbook: `P 14818-14838`, `P 11330-11342`) | marketauth | at close only | ignored |
@@ -91,8 +95,9 @@ Most mechanisms are also mapped in `docs/OPERATOR_PLAYBOOK.md` on branch
 - whatever is left unbudgeted at `CloseSlab`, which is burned (`P 11262-11268`; playbook:
   `E 11363-11372`, `P 11221-11268`).
 
-After resolution, budgets go to `insurance_authority` with no gate (playbook:
-`P 10991-11003`).
+After resolution, the Live health gate is replaced by terminal conditions.
+Budgets go to `insurance_authority` only once every portfolio is closed and
+`c_tot == 0`, still subject to the capacity and epoch checks (`P 10991-11011`).
 
 ## Cost lines
 
@@ -100,10 +105,11 @@ After resolution, budgets go to `insurance_authority` with no gate (playbook:
 |---|---|---|
 | LP adverse selection | 2 bps × volume *to verify* | Takers who see Pyth before our push, or who trade during mark lag, win against us. Mitigation: the LP co-signs every `TradeNoCpi` (`P 8709-8715`), so the matcher refuses fills while target ≠ effective. |
 | LP hedge | 30% of volume hedged × 4.5 bps *to verify* | Net inventory is hedged on an external perp venue, at its taker fee. |
+| Bad debt | 0.5 bps × volume *to verify* | Bankruptcies consume domain insurance and backing, raising the spent budget (`E 11456-11482`). The table counts it as a cost. A single gap move can exceed a month of it: stress-test with `--loss-bps`. |
 | Insurance capital | in capital cost | Seed. Fees add to it, but stay locked behind the gate. |
 | Backing capital | in capital cost | Winners can use PnL only up to realizable backing (engine `spec.md`), so backing is a launch requirement, not an add-on. Expiry forfeits unliened principal (playbook: `E 3468-3497`); roll before expiry. |
 | LP inventory capital | in capital cost | Margin plus a buffer for SOL moves. See `CAPITAL_PLAN.md`. |
-| Capital opportunity cost | $90k × 5% APY | The money could sit in a USDC yield instead. |
+| Capital opportunity cost | $100k × 5% APY | The money could sit in a USDC yield instead. |
 | SOL tx + priority fees | 0.5 SOL/day × $150 *to verify* | Cranker plus pusher. The staging budget was ~1 SOL/day worst case for the cranker (`docs/STAGING.md` on the R2 branch). On mainnet, priority fees dominate; measure them. |
 | SOL rent | one-time, ~0.5 SOL | Market (1 asset) 0.022 SOL, each portfolio 0.067 SOL, ATAs 0.002 SOL. No program deploy: the official program is upstream's. |
 | RPC | $300/month *to verify* | A paid plan with staked/priority send. |
@@ -117,20 +123,22 @@ After resolution, budgets go to `insurance_authority` with no gate (playbook:
 | USD per day | $100k/d | $1M/d | $10M/d |
 |---|---:|---:|---:|
 | Trade fees (taker side) | 50 | 500 | 5,000 |
-| Liquidation fees | 5 | 50 | 500 |
-| Backing fees | 5 | 50 | 500 |
+| Liquidation fees (collected) | 2 | 25 | 250 |
+| Backing fees (outside payers) | 5 | 50 | 500 |
 | Maintenance fees | 4 | 43 | 432 |
-| LP adverse selection + hedge | −33 | −335 | −3,350 |
-| Fixed (SOL, RPC, servers, $90k capital) | −100 | −100 | −100 |
-| **Net per day** | **−70** | **208** | **2,982** |
-| **Net per 30 days** | **−2,090** | **6,232** | **89,446** |
+| LP adverse selection + hedge | −34 | −335 | −3,350 |
+| Bad debt (insurance spent) | −5 | −50 | −500 |
+| Fixed (SOL, RPC, servers, $100k capital) | −102 | −102 | −102 |
+| **Net per day** | **−79** | **131** | **2,230** |
+| **Net per 30 days** | **−2,356** | **3,941** | **66,905** |
 | Into insurance (both fee sides) | 100 | 1,000 | 10,000 |
 
-- Net variable margin: **2.65 bps** of volume.
-- Break-even: **$326k/day**.
-- The $10M column assumes capital scales with volume (see `CAPITAL_PLAN.md`
-  top-up rules). The opportunity cost of that extra capital is small next to
-  the fees.
+- Net variable margin: **1.90 bps** of volume.
+- Break-even: **$437k/day**.
+- **Capital is held fixed at $100k in every column.** That capital only
+  carries $100k of LP inventory. At $10M/day the limits and capital would
+  likely grow several times (say $360k). The extra opportunity cost is
+  ~$37/day, small next to the fees, but the capacity itself is *to verify*.
 
 ### Scenario B: an outside professional LP, paid a rebate
 
@@ -149,13 +157,14 @@ of LP and hedge capital.
 | USD per day | $100k/d | $1M/d | $10M/d |
 |---|---:|---:|---:|
 | Trade fees (both sides, outside money) | 100 | 1,000 | 10,000 |
-| Liquidation + backing + maintenance | 14 | 143 | 1,432 |
+| Liquidation + backing + maintenance | 12 | 118 | 1,182 |
 | Rebate to outside LP | −76 | −760 | −7,600 |
-| Fixed (SOL, RPC, servers, $35k capital) | −93 | −93 | −93 |
-| **Net per day** | **−55** | **290** | **3,739** |
-| **Net per 30 days** | **−1,639** | **8,708** | **112,172** |
+| Bad debt (insurance spent) | −5 | −50 | −500 |
+| Fixed (SOL, RPC, servers, $45k capital) | −94 | −94 | −94 |
+| **Net per day** | **−63** | **214** | **2,988** |
+| **Net per 30 days** | **−1,905** | **6,417** | **89,631** |
 
-- Break-even: **$243k/day**.
+- Break-even: **$306k/day**.
 - **The cash-flow catch.** The rebate is paid in cash, but the fee income
   sits in insurance behind the Live gate. Hold a cash float to cover the
   rebates between withdrawal windows, or settle rebates only at withdrawal.
@@ -176,13 +185,28 @@ of LP and hedge capital.
    fee plus their spread. *To verify against live competitors on the day.*
 2. **Adverse selection.** If it is 5 bps instead of 2, the margin goes
    negative. This is the number the PoC beta must measure.
-3. **Gate uptime.** If `negative_pnl_account_count` is rarely 0, fee income
-   is P&L but not cash until Resolved. Meanwhile our LP keeps paying its fee
-   side into insurance, draining LP capital by `fee × volume` per day (≈$500
-   per day at $1M). *To verify:* the share of slots where the gate is open, in
-   the staging run.
+3. **Gate uptime.** See "Cash, not just P&L" below.
 4. **SOL fees.** These are the largest fixed cost. Priority-fee policy
    decides break-even at low volume.
+
+## Cash, not just P&L
+
+The Live withdrawal gate is **market-wide**: one account with negative PnL
+anywhere keeps it shut (fact 4). How long it stays shut is unknown; measure
+it in staging. While it is shut:
+
+- **Scenario A:** fee income accrues in insurance, and half of it came out
+  of our LP capital. At $1M/day, 14 shut days lock $14k, of which $7k is
+  drained from LP capital.
+- **Scenario B:** rebates are owed in cash while the fee income is locked.
+  At $1M/day, 14 days is $10.6k of rebates.
+- **Backing earnings** are locked behind the same gate.
+- **Cash that is not gated:** the keeper's share of liquidation and
+  maintenance fees (normal `Withdraw`).
+
+`python3 ops/money_model.py --lock-days N` prints these numbers. Size the
+cash reserve to them (`CAPITAL_PLAN.md`). Until the gate's uptime is
+measured, treat insurance income as reachable only at resolution.
 
 ## To verify before committing capital
 
