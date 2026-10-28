@@ -76,6 +76,12 @@ market being Live.
 
 All must be true. Any "no" stops the launch.
 
+0. **Upstream gate: no real capital until upstream ships an official,
+   non-bounty program ID and the audit status is clear.** At the pin, both
+   READMEs say the code is not audited and must not be used with real funds
+   (wrapper `README.md` 3–5, engine `README.md` 3–4). Upstream's mainnet
+   deployments so far are bounty programs, which are rewarded by draining.
+   A bounty or test ID never passes this gate.
 1. The program ID is upstream's official one, and the deployed binary
    matches the release.
 2. The release has no change to fee routing, withdrawal gates or account
@@ -101,6 +107,42 @@ All must be true. Any "no" stops the launch.
 | Maintenance fee | 1 atom/slot | ≈ $0.22/day per portfolio |
 | Backing fee | 10 bps, insurance share 2,000 | Playbook staging value |
 | Permissionless resolve | ~1 h stale window and force-close delay | 0 disables SHUTDOWN (playbook: `P 12628`) |
+| Listing fee (`UpdateMarketInitFeePolicy`, tag 59) | **0 = listing closed** | Only `marketauth` can add assets (`P 12447-12458`). Open it later, deliberately (below) |
+
+### Before opening listing (not Day 0)
+
+Assets 1..N are permissionless once the fee is non-zero, so treat them as
+untrusted. They share our market account, our collateral vault and some
+market-wide state.
+
+**What isolates SOL-PERP:**
+- Each asset has its own insurance and backing.
+- Claims are bound to their `(asset, side)` domain.
+- Bad debt stays in the domain that caused it.
+
+  (Wrapper README, "Assets 1..N", with its attack tests, for example
+  `v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance`.)
+- Maintenance fees go only to asset 0, so a do-nothing asset cannot siphon
+  them (`P 6799-6808`).
+
+**What does not isolate it** (market-wide state, *to verify* each in
+staging):
+- the Live withdrawal gate counts negative-PnL accounts and stress
+  **market-wide** (`P 6007-6043`). A listed asset's losing traders can keep
+  **our** insurance and backing withdrawals shut;
+- Recovery is market-wide (playbook: `E 4316-4325`). A stuck close on a
+  listed asset could push SOL-PERP into Recovery too;
+- CU and account size: each slot grows the market account, and portfolios
+  carry at most 14 legs (`P 110`).
+
+**Mitigations:**
+- keep the fee high;
+- keep `fee_redirect_to_market_0_bps` set, so listed assets pay asset 0;
+- monitor every asset;
+- SHUTDOWN a misbehaving asset (`asset_admin` or `marketauth`, playbook
+  section c);
+- if listing is a business line, run it in a **separate market** rather than
+  next to SOL-PERP.
 
 ## Pause and rollback
 
