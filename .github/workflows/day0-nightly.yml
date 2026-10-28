@@ -1,0 +1,102 @@
+# Nightly Day-0 rehearsal against the NEWEST upstream wrapper `main` (not our
+# pin): build it, deploy it to a fresh program id on a local validator and run
+# scripts/day0_drill.sh. Report-only: a separate workflow, never a required
+# check. A red run means upstream moved in a way the launch kit must follow.
+# Reference / dry-run only; not a paid live service; M3 NO-GO.
+name: day0-nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: day0-nightly
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SOLANA_VERSION: "2.0.21"
+  # Our crates' build.rs refuses a wrapper that is not at scripts/pins.env;
+  # this rehearsal builds against upstream main on purpose.
+  PERCOLATOR_SKIP_PIN_CHECK: "1"
+
+jobs:
+  drill:
+    name: Day-0 drill on upstream main
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: layout
+        run: |
+          source scripts/env.sh
+          echo "PERCOLATOR_PROG_DIR=$PERCOLATOR_PROG_DIR" >> "$GITHUB_ENV"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - name: cache Solana CLI + platform-tools v1.52
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/solana
+            ~/.cache/solana
+          key: solana-${{ runner.os }}-${{ env.SOLANA_VERSION }}-platform-tools-v1.52
+      - name: install Solana CLI
+        run: |
+          if [ ! -x "$HOME/.local/share/solana/install/active_release/bin/solana" ]; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          fi
+          solana --version
+      - name: fetch upstream wrapper main; follow its engine pin
+        run: |
+          source scripts/pins.env
+          git clone -q "$PERCOLATOR_PROG_REPO" "$PERCOLATOR_PROG_DIR"
+          sha="$(git -C "$PERCOLATOR_PROG_DIR" rev-parse HEAD)"
+          rev="$(grep -o 'rev = "[0-9a-f]*"' "$PERCOLATOR_PROG_DIR/Cargo.toml" | head -1 | cut -d'"' -f2)"
+          echo "WRAPPER_MAIN_SHA=$sha" >> "$GITHUB_ENV"
+          {
+            echo "### Day-0 nightly"
+            echo "- wrapper main: \`$sha\` (pin \`$PERCOLATOR_PROG_SHA\`)"
+            echo "- engine: \`$rev\` (pin \`$PERCOLATOR_ENGINE_REV\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # One engine crate in the graph: our crates follow the wrapper's rev.
+          for m in cranker/Cargo.toml staging/Cargo.toml monitor/Cargo.toml; do
+            sed -i "s/rev = \"$PERCOLATOR_ENGINE_REV\"/rev = \"$rev\"/" "$m"
+          done
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cranker/target
+            staging/target
+            monitor/target
+          key: day0-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ env.WRAPPER_MAIN_SHA }}
+          restore-keys: day0-${{ runner.os }}-
+      - name: build the wrapper .so (upstream main)
+        run: cd "$PERCOLATOR_PROG_DIR" && cargo build-sbf --tools-version v1.52
+      - name: Day-0 drill (fresh validator, fresh program id, launch, health, stop)
+        run: DRILL_SKIP_SBF_BUILD=1 DRILL_RUN_DIR="$RUNNER_TEMP/drill" ./scripts/day0_drill.sh
+      - name: drill times
+        if: always()
+        run: |
+          {
+            echo '```'
+            cat "$RUNNER_TEMP/drill/launch/timings.txt" 2>/dev/null || echo "(no timings: the drill stopped early)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # Logs and state only: never the run's keys/ (throwaway, but keys).
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: day0-drill
+          path: |
+            ${{ runner.temp }}/drill/**/*.log
+            ${{ runner.temp }}/drill/launch/state.json
+            ${{ runner.temp }}/drill/launch/timings.txt
+          if-no-files-found: ignore
