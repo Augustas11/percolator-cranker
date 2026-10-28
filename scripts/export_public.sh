@@ -60,6 +60,16 @@ put scripts/live_shaped.sh      scripts/live_shaped.sh
 put scripts/check_public_tree.sh scripts/check_public_tree.sh
 put scripts/fetch_upstream.sh   scripts/fetch_upstream.sh
 put scripts/pins.env            scripts/pins.env
+# operator docs, devnet staging deploy, container/systemd templates
+put docs/OPERATOR_PLAYBOOK.md   docs/OPERATOR_PLAYBOOK.md
+put docs/STAGING.md             docs/STAGING.md
+put scripts/staging_devnet_deploy.sh scripts/staging_devnet_deploy.sh
+put deploy/Dockerfile           deploy/Dockerfile
+put deploy/Dockerfile.dockerignore deploy/Dockerfile.dockerignore
+put deploy/docker-compose.yml   deploy/docker-compose.yml
+put deploy/common.env.example   deploy/common.env.example
+put deploy/systemd/percolator-keeper@.service deploy/systemd/percolator-keeper@.service
+put deploy/systemd/percolator-monitor.service deploy/systemd/percolator-monitor.service
 # the same CI pipeline as this repo (layout-neutral via scripts/env.sh;
 # public/scripts/env.sh sets the public layout)
 put .github/workflows/ci.yml    .github/workflows/ci.yml

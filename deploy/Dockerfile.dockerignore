@@ -1,0 +1,12 @@
+# BuildKit reads <Dockerfile>.dockerignore next to the Dockerfile.
+# Keep build output, the fetched upstream checkout, ledgers and any key
+# material out of the build context.
+target/
+upstream/
+.solana-test-ledger/
+.preview/
+keys/
+**/*.json
+.env
+*.log
+.git/

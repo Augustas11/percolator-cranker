@@ -1,0 +1,49 @@
+# Keyed staging bot. The instance name is the binary name:
+#   systemctl enable --now percolator-keeper@cranker
+#   systemctl enable --now percolator-keeper@staging_traders   (separate change)
+#
+# Layout on the host (no secrets in this file):
+#   /opt/percolator-keeper/bin/<binary>          the built binaries
+#   /etc/percolator-keeper/common.env            PERCOLATOR_PROGRAM_ID, PERCOLATOR_RPC_URL
+#   /etc/percolator-keeper/<binary>.env          optional per-bot knobs (CRANKER_*)
+#   /etc/percolator-keeper/keys/<binary>.json    the role's keypair, root-owned, 0600
+#
+# The keypair reaches the service as a systemd credential. It is linked to
+# $HOME/.config/solana/id.json, which is where the binaries read it at this
+# pin.
+
+[Unit]
+Description=Percolator staging keeper (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=percolator-keeper/%i
+Environment=HOME=%S/percolator-keeper/%i
+EnvironmentFile=/etc/percolator-keeper/common.env
+EnvironmentFile=-/etc/percolator-keeper/%i.env
+LoadCredential=keypair:/etc/percolator-keeper/keys/%i.json
+ExecStartPre=/bin/sh -c 'mkdir -p "$HOME/.config/solana" && ln -sfn "$CREDENTIALS_DIRECTORY/keypair" "$HOME/.config/solana/id.json"'
+ExecStart=/opt/percolator-keeper/bin/%i
+Restart=on-failure
+RestartSec=10
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

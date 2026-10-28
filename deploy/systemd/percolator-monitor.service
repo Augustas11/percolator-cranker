@@ -1,0 +1,36 @@
+# Read-only staging monitor (binary from a separate change). It holds no key.
+#   systemctl enable --now percolator-monitor
+
+[Unit]
+Description=Percolator staging monitor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=percolator-keeper/monitor
+Environment=HOME=%S/percolator-keeper/monitor
+EnvironmentFile=/etc/percolator-keeper/common.env
+EnvironmentFile=-/etc/percolator-keeper/monitor.env
+ExecStart=/opt/percolator-keeper/bin/monitor
+Restart=on-failure
+RestartSec=10
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

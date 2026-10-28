@@ -1,0 +1,73 @@
+# Staging bots: cranker, traders, monitor.
+#
+#   KEEPER_KEYS_DIR=/srv/percolator/keys PERCOLATOR_PROGRAM_ID=<id> \
+#     docker compose -f deploy/docker-compose.yml up -d
+#
+# Binaries:
+#   - `cranker` is in this repo.
+#   - `staging_traders` and `monitor` come from separate changes. Build the
+#     image with KEEPER_BINS="cranker staging_traders monitor" once they land.
+#     Until then only the cranker service starts:
+#       docker compose -f deploy/docker-compose.yml up -d cranker
+#
+# Keys:
+#   - Nothing secret lives in this file or the image.
+#   - KEEPER_KEYS_DIR is a host directory holding one keypair file per role,
+#     mode 0600, readable by KEEPER_UID.
+#   - Each service mounts only its own key, read-only.
+#   - No bot gets marketauth, the mint authority or the upgrade authority.
+#
+# RPC:
+#   - At this pin the cranker binary uses 127.0.0.1:8899 and
+#     $HOME/.config/solana/id.json. PERCOLATOR_RPC_URL is passed through for
+#     the staging binaries, and for the cranker once it reads an RPC
+#     setting.
+#   - For a validator on the host, use KEEPER_NETWORK_MODE=host (Linux).
+
+x-keeper: &keeper
+  image: ${KEEPER_IMAGE:-percolator-keeper:latest}
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+    args:
+      BINS: ${KEEPER_BINS:-cranker}
+  user: "${KEEPER_UID:-10001}:${KEEPER_GID:-10001}"
+  network_mode: ${KEEPER_NETWORK_MODE:-bridge}
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  environment: &keeper-env
+    PERCOLATOR_PROGRAM_ID: ${PERCOLATOR_PROGRAM_ID:?set PERCOLATOR_PROGRAM_ID}
+    PERCOLATOR_RPC_URL: ${PERCOLATOR_RPC_URL:-devnet}
+    RUST_LOG: ${RUST_LOG:-info}
+
+services:
+  cranker:
+    <<: *keeper
+    entrypoint: ["/usr/local/bin/cranker"]
+    environment:
+      <<: *keeper-env
+      CRANKER_CYCLES: ${CRANKER_CYCLES:-1000000}
+      CRANKER_CYCLE_MS: ${CRANKER_CYCLE_MS:-30000}
+      CRANKER_CYCLE_MAX_TX: ${CRANKER_CYCLE_MAX_TX:-64}
+      CRANKER_MEASURE_CU: ${CRANKER_MEASURE_CU:-0}
+    volumes:
+      - ${KEEPER_KEYS_DIR:?set KEEPER_KEYS_DIR}/cranker.json:/keeper/.config/solana/id.json:ro
+
+  traders:
+    <<: *keeper
+    # Binary from a separate change; its flags and key layout are defined there.
+    entrypoint: ["/usr/local/bin/staging_traders"]
+    volumes:
+      - ${KEEPER_KEYS_DIR:?set KEEPER_KEYS_DIR}/traders-payer.json:/keeper/.config/solana/id.json:ro
+      - ${KEEPER_KEYS_DIR:?set KEEPER_KEYS_DIR}/traders:/keeper/traders:ro
+
+  monitor:
+    <<: *keeper
+    # Binary from a separate change. Read-only RPC; it holds no key.
+    entrypoint: ["/usr/local/bin/monitor"]
