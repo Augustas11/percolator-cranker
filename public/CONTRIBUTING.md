@@ -10,6 +10,5 @@
   byte offsets.
 - **Fee, bounty and mainnet paths are out of scope.**
 - **No keys, mnemonics or RPC tokens in commits.**
-- **License:** to be decided by the maintainer before the first tagged
-  release. Contributions are accepted under the license the repository
-  carries at that time.
+- **License:** Apache-2.0 (see `LICENSE`). Contributions are accepted
+  under the same license.

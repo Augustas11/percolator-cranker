@@ -19,7 +19,19 @@ repository; this session prepares the tree.
 3. **The owner reads the exported tree before the first push.** This step
    is required; see the release checklist.
 
-## Name options (owner decides)
+## Owner decisions (2026-10-28)
+
+- **Name:** `drip`, as `Augustas11/drip`. The README opens with: *"An
+  independent, unofficial reference keeper for the Percolator protocol.
+  Not affiliated with the upstream authors. Not a paid service."*
+- **License:** Apache-2.0. The standard text is `public/LICENSE`, listed in
+  the manifest.
+- **Security contact:** GitHub private vulnerability reporting, at
+  `https://github.com/Augustas11/drip/security/advisories/new`. The owner
+  enables "Private vulnerability reporting" in the repo settings when
+  creating the repo.
+
+## Name options (decided: `drip`)
 
 | Name | Rationale |
 |---|---|
@@ -151,22 +163,23 @@ wrapper checkout, the bring-up crate and the keeper manifest.
 
 ## Release checklist (after the owner creates the repo)
 
-1. `PUBLIC_NAME=<chosen> SECURITY_CONTACT=<approved> ./scripts/export_public.sh <new-dir>`.
+1. The owner creates `Augustas11/drip` (empty) and, in Settings →
+   Security, enables **Private vulnerability reporting**. `SECURITY.md`
+   points there.
+2. From a clean checkout of `main`: `PUBLIC_NAME=drip SECURITY_CONTACT=https://github.com/Augustas11/drip/security/advisories/new ./scripts/export_public.sh <new-dir>`.
    It must end with `exported to <new-dir>` and must not say DRAFT.
-2. In `<scratch>`, run `./scripts/fetch_upstream.sh`, `cargo build`,
+3. In `<new-dir>`, run `./scripts/fetch_upstream.sh`, `cargo build`,
    `cargo test`, the bring-up and a 3-cycle dry run. All green.
-3. Add the owner-approved `LICENSE` (add it to `public/` and the manifest),
-   commit, and re-run step 1.
 4. **Required: the owner reads the whole exported tree** before anything is
    pushed. To produce it for review (from a clean checkout of `main` in
    this repo):
 
    ```bash
-   PUBLIC_NAME=<chosen> SECURITY_CONTACT=<approved> ./scripts/export_public.sh ../public-review
+   PUBLIC_NAME=drip SECURITY_CONTACT=https://github.com/Augustas11/drip/security/advisories/new ./scripts/export_public.sh ../public-review
    ```
 
    Then read every file in `../public-review` (`find ../public-review -type
-   f | sort` lists them; about 41 files). Look for anything private: names,
+   f | sort` lists them; about 42 files). Look for anything private: names,
    paths, notes, links, numbers. Only push that exact tree.
 5. `git init`, then push one commit to the new repo. Wait for CI to go
    green; dispatch the gated e2e job once.
@@ -202,18 +215,17 @@ release is a fresh export (one commit per release, no shared history).
 
 ## Owner decisions needed
 
-1. **Name**: pick one from the table above (or another).
-2. **License**: Apache-2.0 proposed, to match upstream. Nothing is added
-   until you approve.
-3. **Security contact**: an address or form for `SECURITY.md`.
-4. **Repo creation**: you create it and give this session push access.
+Name, license and security contact are decided (see the top of this
+file).
+
+1. **Repo creation**: you create it and give this session push access.
    This session never creates repos or changes visibility.
-5. **Sync model**: confirm "public becomes the code home after v0.1.0", or
+2. **Sync model**: confirm "public becomes the code home after v0.1.0", or
    keep export-per-release.
-6. **Oracle-provider names in code comments**: Pyth, Switchboard and
+3. **Oracle-provider names in code comments**: Pyth, Switchboard and
    Chainlink appear because the wrapper supports them. They are protocol
    dependencies, not competing tools, so they are **not** on the denylist.
    Say if you want them generic.
-7. **Known-issue wording**: the public README describes the unreferenced
+4. **Known-issue wording**: the public README describes the unreferenced
    lapsed-backing wedge without naming upstream PRs. Posting it upstream
    stays your call.

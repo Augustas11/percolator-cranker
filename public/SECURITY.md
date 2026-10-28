@@ -5,8 +5,9 @@ no funds, runs no service, and has no mainnet path.
 
 ## Reporting
 
-Report suspected vulnerabilities in this repository privately to
-**@SECURITY_CONTACT@**. Please don't open a public issue. Expect an
+Report suspected vulnerabilities in this repository privately, through
+GitHub private vulnerability reporting: **@SECURITY_CONTACT@**. Please
+don't open a public issue. Expect an
 acknowledgement within a few days.
 
 Issues in the upstream engine or wrapper belong upstream, under their own
