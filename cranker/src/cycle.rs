@@ -53,6 +53,8 @@ pub struct SubmissionRecord {
 pub struct CuStats {
     /// Smallest program CU seen on an `Ok(no-mut)` crank.
     pub noop_min: Option<u64>,
+    /// Whole-tx CU for that same smallest no-op crank.
+    pub noop_tx: Option<u64>,
     /// Largest program CU seen on any crank that landed.
     pub worst_ok: Option<u64>,
     /// Largest program CU seen on a reverted crank (preflight logs).
@@ -63,9 +65,10 @@ impl CuStats {
     pub fn observe(&mut self, o: &CrankOutcome) {
         let Some(cu) = o.program_cu() else { return };
         match o {
-            CrankOutcome::Ok { mutated, .. } => {
-                if !mutated {
-                    self.noop_min = Some(self.noop_min.map_or(cu, |m| m.min(cu)));
+            CrankOutcome::Ok { mutated, tx_cu, .. } => {
+                if !mutated && self.noop_min.map_or(true, |m| cu < m) {
+                    self.noop_min = Some(cu);
+                    self.noop_tx = *tx_cu;
                 }
                 self.worst_ok = Some(self.worst_ok.map_or(cu, |m| m.max(cu)));
             }

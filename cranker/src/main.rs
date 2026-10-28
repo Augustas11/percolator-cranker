@@ -188,8 +188,8 @@ fn main() -> Result<()> {
         quarantine.events().len()
     );
     println!(
-        "cu: noop_min={:?} worst_ok={:?} worst_reject={:?} (program CU)",
-        cu.noop_min, cu.worst_ok, cu.worst_reject
+        "cu: noop_min={:?} (tx total {:?}) worst_ok={:?} worst_reject={:?} (program CU)",
+        cu.noop_min, cu.noop_tx, cu.worst_ok, cu.worst_reject
     );
 
     // Post-run reward portfolio snapshot for reconciliation.
