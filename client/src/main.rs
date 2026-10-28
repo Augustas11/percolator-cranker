@@ -15,7 +15,7 @@
 //! per run via scripts/m1_bringup.sh). The market + portfolio addresses are
 //! generated fresh each run.
 
-// Plan-classification gate used by the (forthcoming M2) cranker submission
+// Plan-classification gate used by the cranker submission
 // loop. Lives here so the predicate import is exercised by the M1 binary's
 // build until ./cranker/ stands up. See plan_gate.rs for the full doc.
 mod plan_gate;
@@ -50,7 +50,7 @@ fn main() -> Result<()> {
     println!("== M1 bring-up against {RPC_URL} ==");
     println!("program_id = {program_id}");
 
-    // Smoke-test the M2 plan-classification gate so a regression in the
+    // Smoke-test the plan-classification gate so a regression in the
     // upstream predicate trips this binary's build / first run.
     {
         use percolator::{AutoCrankPlanV16, PermissionlessRecoveryReasonV16};

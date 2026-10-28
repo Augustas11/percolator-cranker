@@ -1,7 +1,7 @@
 # Runbook
 
 Everything here targets a **local `solana-test-validator`**. This keeper is
-reference / dry-run / staging only.
+reference / dry-run / local-validator only.
 
 ## 1. Prerequisites
 
@@ -160,6 +160,11 @@ visible from outside the transaction.
   does.
 - **No priority fees** and no leader-slot awareness. Pyth accounts for
   Hybrid assets need operator-supplied mapping, or the canonical PDA mode.
-- **Integration tests are gated.** They run only when `PERCOLATOR_TEST_RPC`
-  and `PERCOLATOR_PROGRAM_ID` are set; `invariants` and `hard_reject` also
-  need `PERCOLATOR_TEST_MARKET`.
+- **Integration tests are gated.** They are `#[ignore]`d by default and run
+  with `cargo test -- --include-ignored` when `PERCOLATOR_TEST_RPC` (a local
+  validator only) and `PERCOLATOR_PROGRAM_ID` are set. `invariants` checks
+  `PERCOLATOR_TEST_MARKET` if given and otherwise bootstraps its own market;
+  the others always bootstrap their own.
+- **`PERCOLATOR_SKIP_PIN_CHECK=1`** downgrades the build-time wrapper pin
+  check to a warning. Use it only for a deliberate build against a wrapper
+  other than the pin.

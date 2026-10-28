@@ -2,7 +2,7 @@
 //!
 //! Since wrapper `5cb331dd`, a `PermissionlessCrank` (tag 5) on a Resolved
 //! market may carry **at most one** hint, with `oracle_accounts == 0` and
-//! `asset_index < max_market_slots` (`repo-prog/src/v16_program.rs`,
+//! `asset_index < max_market_slots` (the wrapper's `src/v16_program.rs`,
 //! `handle_permissionless_crank` → `handle_close_resolved`). The hint is
 //! discovery-only: the wrapper turns it into
 //! `AutoCrankObservationV16 { asset_index, effective_price: 0, funding_rate_e9: 0 }`
@@ -45,7 +45,7 @@ pub fn resolved_bucket_deadline(group: &MarketGroupV16, expiry_slot: u64) -> u64
 /// would pin the hint on a bucket the engine has already handled.
 ///
 /// Which deadline? Engine `4db11a8c` (the default pin) checks the **raw**
-/// `expiry_slot <= now` (`repo/src/v16.rs` ~9546). Engine `68859b94` also
+/// `expiry_slot <= now` (the engine's `src/v16.rs` ~9546). Engine `68859b94` also
 /// caps it at `resolved_slot + H` (#224). So:
 /// 1. assets with a bucket lapsed by its raw expiry come first: every
 ///    engine rev acts on those;

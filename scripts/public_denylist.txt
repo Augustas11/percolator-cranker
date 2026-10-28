@@ -40,3 +40,14 @@ staging_local
 percolator-monitor
 CRANKER_STATUS_FILE
 CRANKER_FAULT_ACCOUNTS
+# private planning / layout references in exported code (scrubbed 2026-10-28)
+repo-prog/
+repo/src
+NO-GO
+positioning
+stub inventory
+preview_launch_fixes
+service-operator
+Layer B
+M2.f
+M2.g

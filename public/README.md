@@ -69,6 +69,7 @@ and ours disagree.
 ./scripts/fetch_upstream.sh                 # wrapper @ pinned SHA → upstream/
 FORCE_SBF_REBUILD=1 ./scripts/m1_bringup.sh # local validator + deploy + smoke test
 source scripts/env.sh
+export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey upstream/percolator-prog/target/deploy/percolator_prog-keypair.json)
 CRANKER_CYCLES=3 cargo run --release -p percolator-cranker --bin cranker
 ```
 
@@ -90,11 +91,10 @@ See [docs/RUNBOOK.md](docs/RUNBOOK.md) → Known limitations.
 
 ## CI
 
-`.github/workflows/ci.yml` (the same pipeline as the private working repo)
-has two jobs:
+`.github/workflows/ci.yml` has two jobs:
 
-- **build + unit tests:** runs on pushes to `main` and on pull requests,
-  against the pinned wrapper.
+- **build + unit tests:** runs on pushes to `main`, on pull requests and on
+  manual dispatch, against the pinned wrapper.
 - **e2e:** runs on pull requests and manual dispatch. It does the SBF build
   (platform-tools v1.52), a local-validator bring-up, a 3-cycle dry run and
   the validator integration tests.

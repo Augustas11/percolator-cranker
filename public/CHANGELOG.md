@@ -18,6 +18,7 @@ First public reference release.
   - Per-cycle wall, CU and tx budget.
   - Liquidatable-first ordering with per-class rotation and a quiet
     reserve.
-- **CU baseline.** No-op crank: 18,565 program CU (18,889 tx total).
+- **CU baseline.** No-op crank: 18,363 program CU by default; 18,565
+  (18,889 tx total) with the reward portfolio appended (fee opt-in).
 - **Known issue.** Unreferenced lapsed backing wedges Live refresh
   (upstream #243); see RUNBOOK → Known limitations.

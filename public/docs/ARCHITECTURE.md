@@ -2,13 +2,13 @@
 
 ```
 crates/
-  cranker/            library + binaries
+  cranker/            library + the `cranker` binary
     src/
       discovery.rs    getProgramAccounts (header memcmp) → market-scoped candidates
       binding.rs      portfolio_id / sequence / position_epoch bindings, layout check
       observation.rs  per-asset oracle-profile walk (Manual/Hybrid/EWMA/AuthMark), Pyth resolver
       plan_gate.rs    delegates to the engine's auto_crank_plan_requires_caller_observation
-      resolved.rs     Resolved-market backing hint (lapsed Fresh bucket, earliest deadline)
+      resolved.rs     Resolved-market backing hint (lapsed Fresh buckets, round-robin)
       work.rs         off-chain priority estimate; sub-atom funding remainder = settled
       scheduler.rs    class quotas and turns, per-class cursors, per-tx budget, outcome tally
       quarantine.rs   same-error streaks → capped exponential backoff, JSON events
@@ -30,8 +30,12 @@ crates/
 3. **Plan per candidate.**
    - **Live / Recovery:** one hint per active leg asset, each with the
      oracle accounts its profile needs.
-   - **Resolved:** at most one hint `{asset, oracle_accounts: 0}` for the
-     earliest-due lapsed Fresh bucket. The wrapper reads Resolved accounts
+   - **Resolved:** at most one hint `{asset, oracle_accounts: 0}` naming an
+     asset with a lapsed Fresh bucket. Buckets lapsed by their raw expiry
+     come first (what the pinned engine checks). Only when there are none
+     does the keeper fall back to the resolved-horizon cap (a newer engine
+     rule; on the pinned engine such a hint is answered NonProgress, i.e.
+     idle). Several due assets are served round-robin by cycle. The wrapper reads Resolved accounts
      as `[owner, market, portfolio, owner ATA, vault, vault authority,
      token program]`. The owner has to sign only inside
      `force_close_delay_slots`; there the keeper skips third-party accounts

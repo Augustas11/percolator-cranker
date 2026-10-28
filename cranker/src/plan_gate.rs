@@ -2,7 +2,7 @@
 //!
 //! Delegates to the upstream free function
 //! `percolator::auto_crank_plan_requires_caller_observation`
-//! (`repo/src/v16.rs:187`, re-exported in `repo/src/lib.rs:54`).
+//! (the engine's `src/v16.rs:187`, re-exported in the engine's `src/lib.rs:54`).
 //!
 //! **Why we don't hand-roll the match:** upstream's predicate is the only
 //! place the engine's truth-table is pinned by proof. A local copy silently
@@ -33,7 +33,7 @@ pub fn needs_observation(plan: &AutoCrankPlanV16) -> bool {
 /// `false` → state-mutating progress on retry; the cranker MUST re-read the
 ///           target portfolio post-state and re-decide before resubmitting.
 #[inline]
-#[allow(dead_code)] // callable helper reserved for M2.f pre-retry decisions;
+#[allow(dead_code)] // callable helper reserved for pre-retry decisions;
                     // kept alongside `needs_observation` so the intent reads clearly.
 pub fn blind_retry_is_safe(plan: &AutoCrankPlanV16) -> bool {
     // Identical to needs_observation today because the no-observation =

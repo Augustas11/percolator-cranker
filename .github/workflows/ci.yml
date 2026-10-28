@@ -58,6 +58,39 @@ jobs:
       - name: unit tests (validator-gated integration tests self-skip)
         run: cargo test --release --manifest-path "$CRANKER_MANIFEST"
 
+  # Runs only where scripts/export_public.sh exists (the maintainers' export
+  # source); skipped everywhere else. Re-runs the export, its content gate,
+  # and a --locked build + test of the exported workspace, so a stale lock
+  # or a content-gate failure shows up on the change that caused it.
+  public-export:
+    name: public export + content gate + exported build
+    if: ${{ hashFiles('scripts/export_public.sh') != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/pub-target
+          key: pubexport-${{ runner.os }}-${{ hashFiles('public/Cargo.lock', 'scripts/pins.env') }}
+          restore-keys: pubexport-${{ runner.os }}-
+      - name: export (draft) + content gate
+        run: ./scripts/export_public.sh "$RUNNER_TEMP/pub"
+      - name: exported tree builds and tests on its own (--locked)
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/pub-target
+        run: |
+          cd "$RUNNER_TEMP/pub"
+          ./scripts/fetch_upstream.sh
+          cargo build --release --locked --workspace --all-targets
+          cargo test --release --locked --workspace
+
   # SBF build + local validator. Heavier, so it runs on pull requests and
   # manual dispatch only, not on pushes to main.
   e2e:

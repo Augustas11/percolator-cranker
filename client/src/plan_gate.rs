@@ -5,7 +5,7 @@
 //!
 //! Source of truth: the upstream free function
 //! [`percolator::auto_crank_plan_requires_caller_observation`]
-//! (`repo/src/v16.rs:187`, re-exported in `repo/src/lib.rs:54`).
+//! (the engine's `src/v16.rs:187`, re-exported in the engine's `src/lib.rs:54`).
 //! Backing proofs: `proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan`
 //! and `v16_auto_crank_progress_realizable_without_observation_for_every_class`
 //! in `tests/proofs_v16.rs` / `tests/v16_spec_tests.rs`.
@@ -16,7 +16,7 @@
 //! couldn't catch the drift because the new variant would just fall through
 //! to the wrong arm. Always delegate.
 //!
-//! Usage from the cranker loop (M2.f):
+//! Usage from the cranker loop:
 //! ```ignore
 //! use percolator::AutoCrankPlanV16;
 //! if plan_gate::needs_observation(&predicted_plan) {
@@ -28,10 +28,10 @@
 //! }
 //! ```
 //!
-//! Same gate also governs retry safety (M2.f): a "needs_observation = false"
+//! Same gate also governs retry safety: a "needs_observation = false"
 //! plan may MUTATE on re-submission (Liquidate, SettleBChunk,
 //! RefreshAccount{Some} all progress from committed state via
-//! `obs_or_current_asset` at `repo/src/v16.rs:11328`). Retry MUST re-read
+//! `obs_or_current_asset` at the engine's `src/v16.rs:11328`). Retry MUST re-read
 //! portfolio state first.
 
 use percolator::{auto_crank_plan_requires_caller_observation, AutoCrankPlanV16};
@@ -61,7 +61,7 @@ pub fn needs_observation(plan: &AutoCrankPlanV16) -> bool {
 /// `false` → state-mutating progress on retry; cranker MUST re-read the
 ///           target portfolio post-state and re-decide before resubmitting.
 #[inline]
-#[allow(dead_code)] // exercised by M2.f once ./cranker/ stands up
+#[allow(dead_code)] // exercised by the cranker crate, not this binary
 pub fn blind_retry_is_safe(plan: &AutoCrankPlanV16) -> bool {
     // Identical to needs_observation today because the no-observation =
     // NonProgress invariant only survives for one variant. Keeping a

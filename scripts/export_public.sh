@@ -3,7 +3,7 @@
 #
 #   ./scripts/export_public.sh <target-dir>
 #
-# Copies ONLY the paths listed below, applies the public layout
+# Copies ONLY the manifest's paths, applies the public layout
 # (crates/cranker, crates/bringup, upstream/ via scripts/fetch_upstream.sh),
 # overlays the public-only files under public/, then runs
 # scripts/check_public_tree.sh with the private denylist. Nothing is copied by
@@ -16,6 +16,12 @@
 #
 # Env: PUBLIC_NAME (default "percolator-reference-keeper") replaces
 # @PUBLIC_NAME@ in overlay docs once the owner picks a name.
+# SECURITY_CONTACT replaces @SECURITY_CONTACT@; without it the export is a
+# DRAFT (the check runs with --draft) and is not releasable.
+#
+# Exactly the files in scripts/public_manifest.txt are exported, read from
+# the COMMITTED tree (HEAD), never the working tree. The export fails if a
+# tracked file under the exported directories is not in the manifest.
 
 set -euo pipefail
 
@@ -28,49 +34,49 @@ if [ -e "$DEST" ] && [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^target$' || t
   echo "refusing: $DEST exists and is not empty" >&2
   exit 1
 fi
+CREATED=0
+[ -e "$DEST" ] || CREATED=1
 mkdir -p "$DEST"
 DEST="$(cd "$DEST" && pwd)"
+# A failed export never leaves a half-built tree behind (only a tree this
+# run created is removed; an existing empty dir is emptied).
+cleanup_on_fail() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "export failed (exit $rc); removing partial tree $DEST" >&2
+    if [ "$CREATED" -eq 1 ]; then rm -rf -- "$DEST"; else find "$DEST" -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf -- {} +; fi
+  fi
+}
+trap 'cleanup_on_fail; rm -f "${LISTED:-}"' EXIT
 
-# Copy one file from the private tree (committed content of the working
-# tree) to a public path.
-put() {
-  local from="$1" to="$2"
+# ---- manifest: exactly these files, from the COMMITTED tree (HEAD) -------
+MANIFEST="$SCRIPT_DIR/public_manifest.txt"
+LISTED="$(mktemp)"   # bash 3.2-compatible set of manifest source paths
+while IFS= read -r line || [ -n "$line" ]; do
+  line="${line%%#*}"
+  [ -z "${line// /}" ] && continue
+  read -r from to <<<"$line"
+  [ -n "$from" ] && [ -n "$to" ] || { echo "bad manifest line: $line" >&2; exit 1; }
+  case "$to" in
+    target/*|upstream/*|.git/*|/*|*..*)
+      echo "manifest destination not allowed (the gate would skip or escape it): $to" >&2; exit 1 ;;
+  esac
+  printf '%s\n' "$from" >> "$LISTED"
+  if ! git -C "$SRC" cat-file -e "HEAD:$from" 2>/dev/null; then
+    echo "manifest file not committed at HEAD: $from" >&2; exit 1
+  fi
   mkdir -p "$(dirname "$DEST/$to")"
-  cp "$SRC/$from" "$DEST/$to"
-}
-# Copy a directory, keeping only the listed file patterns.
-put_dir() {
-  local from="$1" to="$2"; shift 2
-  (cd "$SRC/$from" && find . -type f \( "$@" \) -not -path './target/*') | while read -r f; do
-    put "$from/${f#./}" "$to/${f#./}"
-  done
-}
-
-# ---- allowlist ----------------------------------------------------------
-# cranker crate (library, binary, integration tests)
-put cranker/Cargo.toml          crates/cranker/Cargo.toml
-put cranker/build.rs            crates/cranker/build.rs
-put_dir cranker/src             crates/cranker/src   -name '*.rs'
-put_dir cranker/tests           crates/cranker/tests -name '*.rs'
-# M1 bring-up client
-put client/Cargo.toml           crates/bringup/Cargo.toml
-put client/build.rs             crates/bringup/build.rs
-put_dir client/src              crates/bringup/src   -name '*.rs'
-# scripts usable outside this repo
-put scripts/m1_bringup.sh       scripts/m1_bringup.sh
-put scripts/check_public_tree.sh scripts/check_public_tree.sh
-put scripts/fetch_upstream.sh   scripts/fetch_upstream.sh
-put scripts/pins.env            scripts/pins.env
-# the same CI pipeline as this repo (layout-neutral via scripts/env.sh;
-# public/scripts/env.sh sets the public layout)
-put .github/workflows/ci.yml    .github/workflows/ci.yml
-# public-only overlay (README, docs, CI, workspace, env.sh, pins, fetch)
-(cd "$SRC/public" && find . -type f) | while read -r f; do
-  put "public/${f#./}" "${f#./}"
-done
-# The root Cargo.lock comes from the overlay (public/Cargo.lock): the
-# workspace-resolved lock, seeded from cranker/Cargo.lock. Re-seed it when
-# crate dependencies change; the verify step builds with --locked.
+  git -C "$SRC" show "HEAD:$from" > "$DEST/$to"
+  case "$to" in *.sh) chmod +x "$DEST/$to" ;; esac
+done < "$MANIFEST"
+# Every tracked file in the exported directories must be listed: a new file
+# reaches the public tree only by being added to the manifest on purpose.
+while IFS= read -r -d '' f; do
+  if ! grep -qxF -- "$f" "$LISTED"; then
+    echo "tracked file not in $MANIFEST (add it, or keep it private by moving it): $f" >&2
+    exit 1
+  fi
+done < <(git -C "$SRC" ls-files -z -- cranker/src cranker/tests client/src public)
 
 # ---- layout rewrites (explicit, each one checked) -----------------------
 rewrite() { # file, from, to
@@ -96,14 +102,19 @@ s = s.replace("# Cargo.lock IS committed", "# Cargo.lock lives at the workspace 
 open(p, "w").write(s)
 PY
 done
-PUBLIC_NAME="$PUBLIC_NAME" python3 - "$DEST" <<'PY'
+PUBLIC_NAME="$PUBLIC_NAME" SECURITY_CONTACT="${SECURITY_CONTACT:-}" python3 - "$DEST" <<'PY'
 import os, sys, pathlib
-name = os.environ["PUBLIC_NAME"]
+subs = {"@PUBLIC_NAME@": os.environ["PUBLIC_NAME"]}
+if os.environ.get("SECURITY_CONTACT"):
+    subs["@SECURITY_CONTACT@"] = os.environ["SECURITY_CONTACT"]
 for p in pathlib.Path(sys.argv[1]).rglob("*"):
     if p.is_file() and "target" not in p.parts and p.suffix in {".md", ".yml", ".toml", ".sh", ".html"}:
         s = p.read_text()
-        if "@PUBLIC_NAME@" in s:
-            p.write_text(s.replace("@PUBLIC_NAME@", name))
+        t = s
+        for k, v in subs.items():
+            t = t.replace(k, v)
+        if t != s:
+            p.write_text(t)
 PY
 chmod +x "$DEST"/scripts/*.sh
 
@@ -122,4 +133,9 @@ for name in "${forbidden[@]}"; do
 done
 
 echo "exported to $DEST ($(find "$DEST" -type f -not -path '*/target/*' | wc -l | tr -d ' ') files)"
-"$SCRIPT_DIR/check_public_tree.sh" "$DEST" "$SCRIPT_DIR/public_denylist.txt"
+if [ -n "${SECURITY_CONTACT:-}" ]; then
+  "$SCRIPT_DIR/check_public_tree.sh" "$DEST" "$SCRIPT_DIR/public_denylist.txt"
+else
+  echo "DRAFT: SECURITY_CONTACT not set, so @SECURITY_CONTACT@ remains; this tree is not releasable yet."
+  "$SCRIPT_DIR/check_public_tree.sh" --draft "$DEST" "$SCRIPT_DIR/public_denylist.txt"
+fi

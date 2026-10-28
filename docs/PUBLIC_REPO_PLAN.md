@@ -76,7 +76,7 @@ docs/        # ARCHITECTURE, RUNBOOK
 | `scripts/export_public.sh <dir>` | private only | no |
 | allowlist | inside `export_public.sh` (explicit `put` lines) | — |
 | public-only files (README, docs, workspace `Cargo.toml`, public-layout `env.sh`, crate READMEs, `.gitignore`) | `public/` overlay | yes |
-| shared with this repo, so they can't drift: `.github/workflows/ci.yml`, `scripts/fetch_upstream.sh`, `scripts/pins.env`, `m1_bringup.sh` | private tree, copied as-is | yes |
+| shared with this repo (identical at each export; private CI re-runs the export on every change, so drift is caught before release): `.github/workflows/ci.yml`, `scripts/fetch_upstream.sh`, `scripts/pins.env`, `m1_bringup.sh` | private tree, copied as-is | yes |
 | layout rewrites (path dep `../repo-prog` → `../../upstream/percolator-prog`, `@PUBLIC_NAME@`) | `export_public.sh`, each anchored and checked | — |
 | `scripts/check_public_tree.sh <dir> [denylist]` | private, and exported (generic checks) | yes |
 | `scripts/public_denylist.txt` | private only | no (asserted) |
@@ -118,8 +118,12 @@ wrapper checkout, the bring-up crate and the keeper manifest.
    `SECURITY.md`.
 4. `git init`, then push one commit to the new repo. Wait for CI to go
    green; dispatch the gated e2e job once.
-5. Tag `v0.1.0`. The release notes cover pins, keeper behavior, quarantine
-   and load-test results, CU, and the known issue.
+5. Tag `v0.1.0`. The release notes cover pins, keeper behavior,
+   quarantine, CU and the known issue (upstream #243). **Never** include
+   load-test results or findings: they stay private (see Scope). Release
+   notes are written by hand, so they don't pass through the content gate;
+   run `check_public_tree.sh` on a file containing the notes before
+   publishing them.
 
 ## Export rules
 

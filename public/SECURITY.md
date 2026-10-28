@@ -1,6 +1,6 @@
 # Security
 
-This is a **reference keeper for a local or staging validator**. It holds
+This is a **reference keeper for a local validator**. It holds
 no funds, runs no service, and has no mainnet path.
 
 ## Reporting

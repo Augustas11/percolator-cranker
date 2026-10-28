@@ -194,7 +194,7 @@ pub fn fetch_cu(rpc: &RpcClient, program_id: &Pubkey, sig: &Signature) -> (Optio
 
 /// Match the `Custom(N)` code in a wrapper error message to a
 /// `PercolatorError` variant name. Codes are the u32-cast enum
-/// discriminants at `repo-prog/src/v16_program.rs:96` — see
+/// discriminants at the wrapper's `src/v16_program.rs:96` — see
 /// `PercolatorError` there. Keep in sync manually or the friendly names
 /// silently drift; not worth pulling in a proc-macro for this.
 pub fn wrapper_error_name(msg: &str) -> Option<&'static str> {
