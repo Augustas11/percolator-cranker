@@ -42,7 +42,7 @@ impl QuarantineConfig {
         let get = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
         Self {
             threshold: get("CRANKER_QUARANTINE_THRESHOLD")
-                .map(|v| v.max(1) as u32)
+                .map(|v| v.clamp(1, u32::MAX as u64) as u32)
                 .unwrap_or(d.threshold),
             base_backoff_cycles: get("CRANKER_QUARANTINE_BASE_CYCLES")
                 .map(|v| v.max(1))
@@ -55,7 +55,7 @@ impl QuarantineConfig {
 
     /// Backoff for the `strike`-th quarantine (1-based): base · 2^(strike-1), capped.
     pub fn backoff_for_strike(&self, strike: u32) -> u64 {
-        let shift = strike.saturating_sub(1).min(32);
+        let shift = strike.saturating_sub(1).min(63);
         self.base_backoff_cycles
             .saturating_mul(1u64 << shift)
             .min(self.max_backoff_cycles)
@@ -96,25 +96,21 @@ pub struct QuarantineEvent {
 }
 
 impl QuarantineEvent {
-    /// One-line JSON, no serde dependency. Values are pubkeys, error names
-    /// and labels, so escaping `"` and `\` is enough.
+    /// One-line JSON (serde_json, so any error text is escaped correctly).
     pub fn to_json_line(&self) -> String {
-        format!(
-            "{{\"event\":\"quarantine\",\"account\":\"{}\",\"error\":\"{}\",\"cycle\":{},\"slot\":{},\"plan_class\":\"{}\",\"strike\":{},\"backoff_cycles\":{},\"until_cycle\":{}}}",
-            self.account,
-            json_escape(&self.error),
-            self.cycle,
-            self.slot,
-            json_escape(&self.plan_class),
-            self.strike,
-            self.backoff_cycles,
-            self.until_cycle,
-        )
+        serde_json::json!({
+            "event": "quarantine",
+            "account": self.account.to_string(),
+            "error": self.error,
+            "cycle": self.cycle,
+            "slot": self.slot,
+            "plan_class": self.plan_class,
+            "strike": self.strike,
+            "backoff_cycles": self.backoff_cycles,
+            "until_cycle": self.until_cycle,
+        })
+        .to_string()
     }
-}
-
-fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[derive(Debug, Default)]
@@ -122,6 +118,8 @@ pub struct Quarantine {
     cfg: QuarantineConfig,
     entries: HashMap<Pubkey, Entry>,
     events: Vec<QuarantineEvent>,
+    /// Consecutive idle attempts per account (reset by progress or failure).
+    idle_streaks: HashMap<Pubkey, u64>,
 }
 
 impl Quarantine {
@@ -130,6 +128,7 @@ impl Quarantine {
             cfg,
             entries: HashMap::new(),
             events: Vec::new(),
+            idle_streaks: HashMap::new(),
         }
     }
 
@@ -157,6 +156,7 @@ impl Quarantine {
     /// account into quarantine.
     pub fn record_failure(&mut self, f: FailureReport<'_>) -> Option<QuarantineEvent> {
         let cfg = self.cfg;
+        self.idle_streaks.remove(f.account);
         let e = self.entries.entry(*f.account).or_default();
         if e.last_error == f.error {
             e.streak += 1;
@@ -188,9 +188,24 @@ impl Quarantine {
         Some(ev)
     }
 
-    /// Progress or idle: the account is healthy again.
+    /// Progress: the account is healthy again.
     pub fn record_ok(&mut self, account: &Pubkey) {
         self.entries.remove(account);
+        self.idle_streaks.remove(account);
+    }
+
+    /// Idle: not a failure (clears the failure streak), but counted, so
+    /// persistent idle on an account still owed work can be reported.
+    /// Returns the consecutive idle count, or 0 when `pending_work` is false.
+    pub fn record_idle(&mut self, account: &Pubkey, pending_work: bool) -> u64 {
+        self.entries.remove(account);
+        if !pending_work {
+            self.idle_streaks.remove(account);
+            return 0;
+        }
+        let n = self.idle_streaks.entry(*account).or_default();
+        *n += 1;
+        *n
     }
 
     /// Every quarantine event so far, in order.
@@ -248,6 +263,9 @@ mod tests {
         assert!(q.is_blocked(&pk, 4));
         assert!(!q.is_blocked(&pk, 5));
         assert!(ev.to_json_line().contains("\"error\":\"EngineCounterUnderflow\""));
+        let weird = QuarantineEvent { error: "a\"b\\c\nd".into(), ..ev };
+        let v: serde_json::Value = serde_json::from_str(&weird.to_json_line()).expect("valid JSON");
+        assert_eq!(v["error"], "a\"b\\c\nd");
     }
 
     #[test]

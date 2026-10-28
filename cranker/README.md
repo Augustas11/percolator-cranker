@@ -15,8 +15,10 @@ PERCOLATOR_PROGRAM_ID=<from bringup> CRANKER_CYCLES=3 \
 ```
 
 Reference / dry-run only. Not a paid live service. M3 is NO-GO until a
-non-null program id lands on a public cluster. No fee, bounty or mainnet
-path exists in this crate.
+non-null program id lands on a public cluster. No bounty or mainnet path
+exists in this crate. A liquidation cranker share accrues into the keeper's
+own reward portfolio when the market enables one (local bootstrap: 5000
+bps); nothing withdraws it unless `CRANKER_WITHDRAWAL_TEST=1` is set.
 
 Pre-merge preview of the upstream launch fixes (not the default):
 
@@ -34,9 +36,18 @@ to skip the extra `getTransaction` per crank.
 Env vars:
 * `CRANKER_CYCLES` (default `3`) — number of loop iterations.
 * `CRANKER_CYCLE_MS` (default `30000`), `CRANKER_CYCLE_CU` (default
-  `24000000`), `CRANKER_CYCLE_MAX_TX` (default `64`) — per-cycle budget.
-  When it runs out, the rest of the queue is deferred and the per-class
-  rotation reaches it first next cycle.
+  `24000000`), `CRANKER_CYCLE_MAX_TX` (default `64`): the per-cycle budget.
+  - **Wall clock** starts at cycle entry, so discovery and planning count.
+  - **Enforced before every tx:** each tx reserves its full compute-unit
+    limit (1.4M) up front, then is settled to the CU measured from its logs.
+    A tx is counted once it begins, whatever its outcome.
+  - **When it runs out**, the rest of the queue is deferred, and rotation
+    reaches it first next cycle.
+* `CRANKER_ATTEMPT_MAX_TX` (default `4`): the most txs one account may use
+  in a cycle. This bounds an A6 lien drain, which continues next cycle.
+* `CRANKER_IDLE_STUCK_CYCLES` (default `10`): a Resolved claimant that still
+  holds value and has been idle this many cycles in a row is reported as
+  `idle_pending_stuck`, with one `idle_with_pending_work` JSON event.
 * `CRANKER_QUARANTINE_THRESHOLD` (default `3`),
   `CRANKER_QUARANTINE_BASE_CYCLES` (default `2`),
   `CRANKER_QUARANTINE_MAX_CYCLES` (default `64`) — same-error streak that
@@ -76,9 +87,10 @@ Each cycle (`cycle::run_one_cycle`, shared with the load scenario):
    goes to the owner's ATA (created idempotently first, rent paid by the
    cranker). There's no reward portfolio on this route. Only lapsed **Fresh**
    buckets are hinted.
-4. Order candidates (`scheduler.rs`): liquidatable → pending → quiet
-   (`work.rs`), rotated within each class every cycle. Skip quarantined
-   accounts. Spend the cycle budget.
+4. Order candidates (`scheduler.rs`). Each class (liquidatable, pending,
+   quiet; see `work.rs`) is rotated every cycle, then the classes are
+   interleaved 2:1:1. A stream of liquidatable accounts can't starve the
+   others. Skip quarantined accounts. Spend the cycle budget.
 5. Submit, classify **Progress / Idle / Failed**. `Ok(no-mut)` and an
    `EngineNonProgress` revert are idle. Any other revert, engine error or
    RPC error is a failure of that account only. Three same-error failures
@@ -98,9 +110,17 @@ line; the run ends with the mirror-custody table and CU stats.
   crank. Wire unchanged: still `[5 | now_slot | n | (asset_index u16,
   oracle_accounts u8)*]`; on Resolved the wrapper accepts `n ≤ 1` and
   `oracle_accounts == 0`.
-* **Recovery crank bumps `position_epoch`** (prog `b40ffbd8`). The cranker
-  never caches a `PortfolioBinding` across cycles or past a mutating crank
-  (`binding::BindingSnapshot`); re-read before any owner ix.
+* **Recovery crank bumps `position_epoch`** (prog `b40ffbd8`).
+  * **Keeper.** The production crank path takes no binding at all (tag 5
+    has no epoch field), so the keeper caches nothing that could go stale.
+    Every owner instruction the repo builds (tests, scenario, Q6
+    spot-check) reads the binding from fresh account bytes right before
+    sending.
+  * **What is tested.** The scenario's check d covers a Recovery-asset
+    `ForceCloseAbandonedAsset`. It bumps the epoch; an owner instruction
+    bound to the stale epoch is rejected, and the re-read one is accepted.
+  * **Not reached.** The market-wide Recovery `PermissionlessCrank` path
+    that `b40ffbd8` changed.
 * **Funding is exact** (engine #227, in `68859b94`): a leg whose F snapshot
   trails its target by less than one atom is F-settled. `work::leg_f_settled`
   is the only F test, so such legs never count as pending work. There is
@@ -161,7 +181,7 @@ It ends with assertions a–e:
 * a. no account stays unrefreshable past the quarantine window;
 * b. every resolved claimant is paid;
 * c. the residue before CloseSlab is within dust plus lapsed principal;
-* d. the position epoch is re-read after Recovery;
+* d. a Recovery-asset force-close bumps the position epoch; the stale binding is rejected and the re-read one accepted;
 * e. coverage.
 
 On the current pins it fails a, b and c because of a suspected engine
