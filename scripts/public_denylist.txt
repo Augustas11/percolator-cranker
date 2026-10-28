@@ -37,6 +37,8 @@ live_shaped
 OPERATOR_PLAYBOOK
 staging_devnet_deploy
 staging_local
+staging_usdc_faucet
+percolator-staging
 percolator-monitor
 CRANKER_STATUS_FILE
 CRANKER_FAULT_ACCOUNTS

@@ -1,0 +1,40 @@
+# One keeper or staging bot per instance; the instance name is the binary:
+#   systemctl enable --now percolator-staging@drip      (keeper)
+#   systemctl enable --now percolator-staging@staging   (staging bots)
+# Reference / dry-run only; not a paid live service; M3 NO-GO. See docs/STAGING.md.
+#
+# Host layout (no secrets in this file):
+#   /opt/percolator/bin/<instance>         the built binary
+#   /etc/percolator/common.env             PERCOLATOR_PROGRAM_ID, STAGING_RPC_URL, ...
+#   /etc/percolator/<instance>.env         optional per-bot knobs (CRANKER_*, STAGING_*)
+#   /etc/percolator/keys/<instance>.json   that bot's keypair, root-owned, 0600
+
+[Unit]
+Description=Percolator %i (staging)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=percolator/%i
+Environment=HOME=%S/percolator/%i
+Environment=STAGING_PAYER=%S/percolator/%i/.config/solana/id.json
+EnvironmentFile=/etc/percolator/common.env
+EnvironmentFile=-/etc/percolator/%i.env
+LoadCredential=keypair:/etc/percolator/keys/%i.json
+ExecStartPre=/bin/sh -c 'mkdir -p "$HOME/.config/solana" && ln -sfn "$CREDENTIALS_DIRECTORY/keypair" "$HOME/.config/solana/id.json"'
+ExecStart=/opt/percolator/bin/%i
+Restart=on-failure
+RestartSec=10
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
