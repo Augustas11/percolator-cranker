@@ -1,8 +1,8 @@
 //! Library surface for the percolator cranker.
 //!
-//! The binary (`src/main.rs`), the integration tests under `tests/` and the
-//! `live_shaped` load scenario all link this library, so the crank cycle
-//! (`cycle::run_one_cycle`) is one piece of code everywhere.
+//! The binary (`src/main.rs`) and the integration tests under `tests/` link
+//! this library, so the crank cycle (`cycle::run_one_cycle`) is one piece of
+//! code everywhere.
 
 pub mod binding;
 pub mod cycle;
@@ -11,7 +11,6 @@ pub mod observation;
 pub mod plan_gate;
 pub mod quarantine;
 pub mod resolved;
-pub mod scenario;
 pub mod scheduler;
 pub mod setup;
 pub mod submit;

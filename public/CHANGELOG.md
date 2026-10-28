@@ -18,11 +18,6 @@ First public reference release.
   - Per-cycle wall, CU and tx budget.
   - Liquidatable-first ordering with per-class rotation and a quiet
     reserve.
-- **Load scenario `live_shaped`.** Deterministic: 3 assets, about 40
-  traders, liquidations, funding, backing expiry, Recovery, Resolve and
-  exits, with assertions for liveness, payout, residue and position-epoch
-  re-read.
-- **CU baselines.** No-op crank: 18,565 program CU. Worst landed crank in
-  the scenario: 409,225.
-- **Known issue.** Unreferenced lapsed backing wedges Live refresh; see
-  RUNBOOK → Known limitations.
+- **CU baseline.** No-op crank: 18,565 program CU (18,889 tx total).
+- **Known issue.** Unreferenced lapsed backing wedges Live refresh
+  (upstream #243); see RUNBOOK → Known limitations.

@@ -18,4 +18,4 @@ disclosure process. This repository does not handle them.
   anything that could make the keeper sign something other than what it
   logs.
 - **Out of scope:** upstream program behavior, local-validator-only
-  denial of service, and the scenario's synthetic market parameters.
+  denial of service, and the bootstrap market's synthetic parameters.
