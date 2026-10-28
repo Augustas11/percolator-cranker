@@ -22,16 +22,32 @@ established yet.
   must assume more such cases exist.
 - **No public cranker for the current engine and wrapper is known.** The
   reference spot is open.
+- **Upstream does not build frontends or run markets.** It ships the engine
+  and wrapper; operating, interfaces and keepers are left to others.
+
+## Done (2026-10-28)
+
+- **Re-pin to the launch fixes** (PR #1): wrapper `5cb331dd`, engine
+  `4db11a8c`; Resolved-mode hint, recovery epoch re-read, funding dust,
+  per-account quarantine, cycle budget, fair scheduling, idle vs failed.
+- **Upstream bug report:** F1 (unreferenced lapsed backing wedges Live
+  refresh and liquidation) filed as percolator #243 with a LiteSVM repro.
+  Nothing else posted.
+- **Item 1 shipped:** `drip` v0.1.0 at `Augustas11/drip` (plain keeper,
+  Apache-2.0). The load test and findings stay private, on
+  `claude/live-shaped-scenario`.
 
 ## In flight
 
-- **Re-pin to the launch fixes.** Covers the new pins,
-  Resolved-mode asset hint, recovery position epoch, exact funding,
-  per-account quarantine, and a `live_shaped` local load scenario.
+- **Item 2 as a single SOL-PERP market** (see below).
 
 ## Immediate (next 2–4 weeks)
 
-### 1. Ship the first public cranker for the current engine and wrapper
+### 1. Ship the first public cranker for the current engine and wrapper — DONE
+
+Shipped as `drip` v0.1.0 (2026-10-28). Load-test results stay private, so
+CI on drip runs build, tests and the dry run, not the scenario. Original
+plan, for the record:
 
 Release it as a tagged version with a runbook, quarantine logic and
 load-test results.
@@ -54,8 +70,12 @@ market is run exactly as we would run a real one: our keys hold every market
 role, and every role has a bot or a written procedure.
 
 Run your own copy of the wrapper (own program ID) on devnet, 24/7, with the
-cranker and scripted traders: several assets, funding on, and at least one
-asset driven through Recovery → Resolved.
+cranker and scripted traders. **Start with one market: SOL-PERP** (SOL/USD
+priced, test USDC collateral), funding on, conservative leverage, tight OI
+caps, our matcher as the only LP. SOL is an AuthMark asset whose price
+pusher signs marks from Pyth SOL/USD (a seeded mock locally). SOL goes once
+through Live → Recovery → Resolved → relisted. Add a second asset only after
+that lifecycle has passed.
 - **Why:** it reproduces live-shaped failure modes under load, gives
   operating data, and serves as a live demo for market operators.
 - **Done when:**
@@ -83,11 +103,45 @@ A monitor built from the state the cranker already reads.
   - a static dashboard page and alert thresholds exist;
   - it runs against both the local scenario and the staging market.
 
+### PoC beta: run SOL-PERP perps ourselves (after 2 and 3)
+
+**Goal:** a proof of concept that we can actually run perps on the
+Percolator engine and operate them, validated with data. It is not a demo
+for others.
+
+**What it is:** the SOL-PERP market from item 2 on devnet, running for
+weeks, with `drip` cranking, the operator bots (price pusher, matcher,
+backing manager, insurance), the monitor from item 3, and a **minimal
+trading frontend** so invited humans trade next to the bots (deposit,
+open, close, withdraw) with test USDC from a faucet.
+
+**Pass/fail, fixed before launch:**
+1. **Liveness:** no account stuck past the quarantine window, except known
+   upstream bugs (e.g. #243), each logged with a repro.
+2. **Solvency:** unowned collateral stays bounded; every resolved claimant
+   is paid.
+3. **Lifecycle:** SOL goes listing → Live → Recovery → Resolved → relisted
+   under real trading.
+4. **Operations:** the pusher, matcher and backing manager run unattended;
+   every incident is handled from the playbook.
+5. **Economics:** measured operator income (LP spread, backing fees,
+   cranker share) against cost (insurance, backing capital, SOL).
+
+**Phases:**
+1. Devnet SOL-PERP with bots only (items 2 and 3 on devnet).
+2. Add the trading frontend and invited testers.
+3. Decision: if 1–5 pass, item 4 (mainnet) goes on the table through its
+   gates; if not, we have the data and repros to say why.
+
+**Guardrails:** devnet and test tokens only, invite-only testers, a clear
+"demo, no real funds" label, and no real-money path before the legal
+review in item 4.
+
 ### Cross-cutting decision: posting upstream
 
-The visible path to influence is posting bug reports with reproductions
-upstream. **Owner decision.** Until it's made, bugs found are written
-up in `prep.md` under "Found in load test" and nothing is posted.
+**Decided for F1 only** (percolator #243, 2026-10-28). Other findings stay
+private in `cranker/scenario-findings.md` unless the owner decides to post
+them.
 
 ## At launch: we are the operator
 
@@ -169,10 +223,11 @@ competition. Hold until launch and real flow.
 
 ## Order
 
-1 → 2 (operator rehearsal on devnet, including the price pusher and a
-basic matcher) → 3 now. Then the matcher kit and SDK (5), which our own market
-needs anyway. Decide 4 (mainnet market) when its gates clear; 4b only when
-other operators exist.
+1 (done) → 2 (SOL-PERP operator rehearsal) → 3 → **PoC beta** phase 1
+(devnet, bots only). Then the SDK (5) and matcher kit, which the beta's
+trading frontend and our own market need anyway → PoC beta phase 2 (frontend
+and testers). Decide 4 (mainnet market) from the PoC results once its gates
+clear; 4b only when other operators exist.
 
 ## Risks
 
