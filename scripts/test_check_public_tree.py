@@ -81,14 +81,18 @@ class Helper(unittest.TestCase):
                 self.assertHit("home path")
 
     def test_email_and_security_contact(self):
-        self.put("a.md", "mail me: someone@example.org\n")
+        self.put("a.md", "mail me: someone@mailhost.io\n")
         self.assertHit("email")
         self.fresh()
-        self.put("SECURITY.md", "report to sec@example.org\n")
-        rc, out = run_helper(self.root, "--allow-email", "sec@example.org")
+        self.put("t.rs", "fixture: user@remote.example, x@y.invalid\n")  # reserved domains
+        rc, out = run_helper(self.root)
         self.assertEqual(rc, 0, out)
-        self.put("docs/x.md", "sec@example.org\n")  # only SECURITY.md may carry it
-        self.assertHit("email", "--allow-email", "sec@example.org")
+        self.fresh()
+        self.put("SECURITY.md", "report to sec@keeper-project.io\n")
+        rc, out = run_helper(self.root, "--allow-email", "sec@keeper-project.io")
+        self.assertEqual(rc, 0, out)
+        self.put("docs/x.md", "sec@keeper-project.io\n")  # only SECURITY.md may carry it
+        self.assertHit("email", "--allow-email", "sec@keeper-project.io")
 
     def test_denylist_contents_file_names_and_private_repo(self):
         for rel, text in (("a.md", f"by {OWNER}\n"),

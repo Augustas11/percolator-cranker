@@ -10,7 +10,8 @@
 #   - private-key shapes: a 64-number JSON/Rust array, a PEM private-key
 #     header, keypair / id.json / .env file names;
 #   - home-directory paths;
-#   - email addresses (except --allow-email ADDR, which is the security contact);
+#   - email addresses (except --allow-email ADDR, the security contact, and
+#     the reserved documentation domains example.*, .invalid, .test, .localhost);
 #   - every fixed string in the denylist (owner handles, the private repo
 #     name and URL, private doc names), in contents and file names;
 #   - unreplaced template placeholders (at-sign NAME at-sign), unless --draft.
@@ -64,7 +65,8 @@ scan "private key header" -E 'BEGIN [A-Z ]*PRIVATE KEY'
 scan "home path" -E '/(Users|home)/[^/[:space:]]'
 email_hits() {
   grep -rnIoE --exclude-dir=.git '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}' . \
-    | grep -Ev '^\./(target|upstream)/' || true
+    | grep -Ev '^\./(target|upstream)/' \
+    | grep -Ev '@([A-Za-z0-9-]+\.)*(example(\.(com|org|net))?|invalid|test|localhost)$' || true
 }
 # grep -o lines are ./file:line:address; the approved contact may appear in SECURITY.md only.
 report "email" < <(email_hits | awk -F: -v ok="$allow_email" '!(ok != "" && $1 == "./SECURITY.md" && $3 == ok)')
