@@ -1,0 +1,32 @@
+:root { font-family: system-ui, sans-serif; color: #172b3a; background: #f3f6f8; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+.banner { padding: 12px 20px; text-align: center; background: #fff0c2; color: #654600; }
+main { max-width: 1100px; margin: auto; padding: 24px; }
+header, .actions { display: flex; align-items: center; gap: 10px; }
+header { justify-content: space-between; }
+h1 { margin: 0; font-size: 28px; }
+h2 { margin: 0 0 18px; font-size: 18px; }
+.panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+section { padding: 20px; background: white; border: 1px solid #d7e0e5; border-radius: 8px; }
+dl { display: grid; grid-template-columns: 1fr auto; gap: 10px; margin: 0; }
+dt { color: #526675; }
+dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+label { display: block; margin: 14px 0 6px; }
+input, button { border: 1px solid #9aaebb; border-radius: 5px; padding: 9px 12px; font: inherit; }
+input { width: 100%; background: white; color: inherit; }
+button { cursor: pointer; background: #edf3f7; color: #18394e; }
+button[aria-pressed="true"] { background: #18394e; color: white; }
+button:disabled { cursor: wait; opacity: 0.6; }
+button:focus-visible, input:focus-visible { outline: 3px solid #2782ac; outline-offset: 2px; }
+.actions { margin-top: 12px; flex-wrap: wrap; }
+.error { min-height: 24px; color: #a12626; margin: 12px 0; }
+.badge { padding: 2px 7px; border-radius: 4px; background: #e1f1e8; color: #225b3d; }
+.warning { background: #fff0c2; color: #654600; }
+.liquidatable { background: #fce3e3; color: #a12626; }
+.fills { margin-top: 16px; }
+.table-scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; text-align: left; font-variant-numeric: tabular-nums; }
+th, td { padding: 10px 8px; border-bottom: 1px solid #e3e9ed; white-space: nowrap; }
+@media (max-width: 420px) { main { padding: 16px; } .panels { grid-template-columns: 1fr; } header { flex-wrap: wrap; } }
