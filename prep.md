@@ -559,7 +559,7 @@ targets):
       and M2.f will be written against current guard semantics
       (no false-green risk).
 
-### R1. Public reference release (new repo): plain keeper only. **Export ready 2026-10-28; waiting on owner.**
+### R1. Public reference release (new repo): plain keeper only. **DONE 2026-10-28: published as `Augustas11/drip` v0.1.0.**
 - [x] Scope (owner decision): keeper core, decoding, tx builders, quarantine
       and budget, docs, CI. The operator stack stays private: staging,
       bots, matcher, backing manager, playbook, devnet and hosting scripts,
@@ -569,12 +569,16 @@ targets):
 - [x] Allowlist export plus a simple leak helper (owner decision: the
       helper is advisory, not a security boundary). The private denylist
       (`scripts/public_denylist.txt`) is never exported.
-- [ ] Owner reads the exported tree before the first push (required).
+- [x] Owner reads the exported tree before the first push (required).
 - [x] Same CI file in both repos (layout-neutral via `scripts/env.sh`).
-- [ ] Owner decisions: public name, LICENSE (Apache-2.0 proposed),
-      security contact, repo creation and push access, sync model.
-- [ ] Push a single commit to the owner-created repo. Tag `v0.1.0` once CI
-      there is green.
+- [x] Owner decisions: name `drip`, Apache-2.0, GitHub private
+      vulnerability reporting. The keeper crate and binary are renamed
+      `drip` in this repo.
+- [x] Published: https://github.com/Augustas11/drip, one initial commit
+      `ae8845f` (the export of private `050b0b2`); CI green there,
+      including e2e by dispatch; tag `v0.1.0`.
+- Sync model: this repo stays the code home; drip is updated only by
+      re-running the export.
 
 ### M3. Pre-deployment readiness (only relevant once devnet deployment appears)
 - [ ] Real keeper portfolio funded on the target chain.
