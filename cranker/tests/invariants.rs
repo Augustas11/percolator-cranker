@@ -9,10 +9,24 @@
 mod common;
 
 #[test]
+#[ignore = "needs a local validator: set PERCOLATOR_TEST_RPC + PERCOLATOR_PROGRAM_ID (+ optional PERCOLATOR_TEST_MARKET), run with --include-ignored"]
 fn market_snapshot_satisfies_conservation() -> anyhow::Result<()> {
-    let Some(live) = common::live_from_env() else {
-        common::skip("market_snapshot_satisfies_conservation");
-        return Ok(());
+    // PERCOLATOR_TEST_MARKET names an existing market to check; without it
+    // the test bootstraps its own, so it never silently skips.
+    let live = match common::live_from_env() {
+        Some(live) => live,
+        None => {
+            let (rpc, program_id) = common::rpc_and_program_from_env().ok_or_else(|| {
+                anyhow::anyhow!("PERCOLATOR_TEST_RPC / PERCOLATOR_PROGRAM_ID not set")
+            })?;
+            let env = percolator_cranker::setup::bootstrap_with_fee(
+                &rpc,
+                &program_id,
+                common::load_payer()?,
+                0,
+            )?;
+            common::Live { rpc, program_id, market: env.market }
+        }
     };
 
     let (mg, portfolios) = common::assert_conservation_live(&live)?;

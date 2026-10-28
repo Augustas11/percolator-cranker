@@ -63,18 +63,12 @@ CRANKER_CYCLES=3 cargo run --release -p percolator-cranker --bin cranker
 The binary bootstraps its own one-asset market and runs N cycles against
 it.
 
-The load scenario uses the running validator and never resets it:
-
-```bash
-./scripts/live_shaped.sh 2>&1 | tee live-shaped-run.log
-```
-
 ## 5. Configuration (environment)
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `PERCOLATOR_PROGRAM_ID` | — (required by the binary) | Deployed wrapper program id |
-| `CRANKER_CYCLES` | 3 (scenario: 200) | Loop iterations |
+| `CRANKER_CYCLES` | 3 | Loop iterations |
 | `CRANKER_CYCLE_MS` | 30000 | Per-cycle wall budget |
 | `CRANKER_CYCLE_CU` | 24000000 | Per-cycle CU budget. Unknown CU is charged at 200k per tx. |
 | `CRANKER_CYCLE_MAX_TX` | 64 | Per-cycle tx budget. Each drain step counts, and a quarter is reserved for quiet accounts. |
@@ -83,9 +77,6 @@ The load scenario uses the running validator and never resets it:
 | `CRANKER_QUARANTINE_MAX_CYCLES` | 64 | Backoff cap |
 | `CRANKER_MEASURE_CU` | 1 | `0` skips the per-tx `getTransaction` that reads CU from the logs |
 | `CRANKER_PYTH_MODE` | off | `canonical` enables the shard-0 Pyth PDA fallback for Hybrid assets |
-| `CRANKER_SCENARIO` | — | `live_shaped` runs the load scenario from the main binary |
-| `CRANKER_SCENARIO_SEED` / `_TRADERS` / `_ASSETS` | fixed / 40 / 3 | Scenario shape |
-| `CRANKER_SCENARIO_DUMP_DIR` | — | Save market and portfolio bytes whenever an account is quarantined |
 | `CRANKER_STATUS_FILE` | — | Write a JSON status file after every cycle (atomic). Read by the monitor. |
 | `CRANKER_FAULT_ACCOUNTS` | — | **Test hook.** `pk,pk,…` or `@file`: report `Failed{InjectedFault}` for these accounts without sending a tx |
 
@@ -138,7 +129,7 @@ alert rules. See [MONITOR.md](MONITOR.md).
    pin, or two `percolator` crates get linked.
 4. Run `cargo update -p percolator`, then `./scripts/fetch_upstream.sh`,
    `FORCE_SBF_REBUILD=1 ./scripts/m1_bringup.sh`, a 3-cycle keeper run, the
-   unit tests and the load scenario.
+   the unit tests and the validator integration tests.
 5. Re-measure CU and update the README tables.
 
 ## 8. Known limitations
@@ -154,11 +145,10 @@ alert rules. See [MONITOR.md](MONITOR.md).
     resolves.
   - The keeper quarantines such accounts and keeps the rest progressing.
     The monitor alerts on it (`FreshBucketPastExpiryInLive`).
-    `live_shaped` reports the failure honestly.
+    Reported upstream as #243.
 - **Residual value at CloseSlab.** Backing principal that lapses unused
-  goes to the residual pool, and `CloseSlab` burns claim-free residue. The
-  scenario checks the residue against "dust plus lapsed principal" and
-  reports any excess.
+  goes to the residual pool, and `CloseSlab` burns claim-free residue.
+  Operators should withdraw unused backing before it expires.
 - **The keeper doesn't decide the plan.** Priority is an off-chain
   estimate; the engine's selector is the only authority on what a crank
   does.

@@ -38,11 +38,6 @@ Each cycle, the keeper:
    in a row. Backoff grows exponentially and is capped, and each quarantine
    prints one JSON line you can grep for.
 
-It also ships a deterministic load scenario, `live_shaped`. The scenario
-drives a 3-asset market with about 40 traders through liquidations, funding,
-backing expiry, an asset in Recovery, resolution and every exit, cranked by
-the same cycle code.
-
 ## Pins
 
 | Surface | Pin |
@@ -60,8 +55,6 @@ and ours disagree.
 | Path | CU |
 |---|---|
 | No-op `PermissionlessCrank`, 1 asset | 18,565 (18,889) |
-| No-op crank, 3 hints (`live_shaped`) | 41,695 (42,019) |
-| Worst landed crank seen in `live_shaped` | 409,225 |
 
 ## Quickstart
 
@@ -70,7 +63,6 @@ and ours disagree.
 FORCE_SBF_REBUILD=1 ./scripts/m1_bringup.sh # local validator + deploy + smoke test
 source scripts/env.sh
 CRANKER_CYCLES=3 cargo run --release -p percolator-cranker --bin cranker
-./scripts/live_shaped.sh                    # 200-cycle load scenario
 ```
 
 Prerequisites, configuration and how to read the output are covered in
@@ -78,30 +70,29 @@ Prerequisites, configuration and how to read the output are covered in
 
 ## Known issue on the current pins
 
-In the `live_shaped` scenario, some accounts become unrefreshable in Live.
-This happens when a backing bucket lapses (passes its expiry) without any
-account referencing it, and a later refresh would attribute new positive PnL
-to that domain. Every crank on those accounts then reverts with
-`EngineStale` until the market resolves.
+Under load, some accounts can become unrefreshable in Live. It happens when
+a backing bucket lapses (passes its expiry) without any account referencing
+it, and a later refresh would attribute new positive PnL to that domain.
+Every crank on those accounts then reverts with `EngineStale` until the
+market resolves.
 
-The keeper quarantines those accounts and keeps cranking everyone else, but
-the scenario's "no account stays unrefreshable" assertion fails. This
-appears to be an engine-side liveness gap, not keeper behavior. It is still
-present on the engine's newer master. See [docs/RUNBOOK.md](docs/RUNBOOK.md)
-→ Known limitations.
+This is an engine-side liveness gap, reported upstream as
+[aeyakovenko/percolator#243](https://github.com/aeyakovenko/percolator/issues/243).
+The keeper quarantines affected accounts and keeps cranking everyone else.
+See [docs/RUNBOOK.md](docs/RUNBOOK.md) → Known limitations.
 
 ## CI
 
-`.github/workflows/ci.yml` has two jobs:
+`.github/workflows/ci.yml` (the same pipeline as the private working repo)
+has two jobs:
 
 - **build + unit tests:** runs on pushes to `main` and on pull requests,
   against the pinned wrapper.
 - **e2e:** runs on pull requests and manual dispatch. It does the SBF build
-  (platform-tools v1.52), a local-validator bring-up, a 3-cycle dry run, the
-  lifecycle integration test, and a 50-cycle `live_shaped` run.
+  (platform-tools v1.52), a local-validator bring-up, a 3-cycle dry run and
+  the validator integration tests.
 
-The `live_shaped` step is **non-gating**, and its name says so, because of
-the known issue above. Its report is uploaded as an artifact.
+Nothing in either job is non-gating.
 
 ## Docs
 

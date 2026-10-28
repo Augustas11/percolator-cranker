@@ -120,6 +120,9 @@ pub struct Quarantine {
     events: Vec<QuarantineEvent>,
     /// Consecutive idle attempts per account (reset by progress or failure).
     idle_streaks: HashMap<Pubkey, u64>,
+    /// Scheduler fairness cursors. Kept here because this struct is the
+    /// keeper's only state that lives across cycles.
+    schedule: crate::scheduler::ScheduleState,
 }
 
 impl Quarantine {
@@ -129,6 +132,7 @@ impl Quarantine {
             entries: HashMap::new(),
             events: Vec::new(),
             idle_streaks: HashMap::new(),
+            schedule: Default::default(),
         }
     }
 
@@ -186,6 +190,14 @@ impl Quarantine {
         };
         self.events.push(ev.clone());
         Some(ev)
+    }
+
+    pub fn schedule_state(&self) -> &crate::scheduler::ScheduleState {
+        &self.schedule
+    }
+
+    pub fn schedule_state_mut(&mut self) -> &mut crate::scheduler::ScheduleState {
+        &mut self.schedule
     }
 
     /// Progress: the account is healthy again.

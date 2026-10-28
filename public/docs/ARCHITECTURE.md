@@ -15,9 +15,7 @@ crates/
       submit.rs       tx build (Live / Resolved account routes), send, classify, CU from logs
       cycle.rs        one discover → hint → schedule → submit cycle (shared by everything)
       setup.rs        one-asset market bootstrap for the binary and tests
-      scenario/       live_shaped load scenario (seeded RNG, chain helpers)
       main.rs         binary `cranker`
-      bin/live_shaped.rs
     tests/            validator-gated integration tests (conservation, rollback, lifecycle)
   bringup/            local smoke test: init market → deposit → crank → fee routing
 ```

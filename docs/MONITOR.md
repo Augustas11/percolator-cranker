@@ -20,8 +20,8 @@ the crate lives at `cranker/`.
 ```bash
 source scripts/env.sh
 # keeper, with the status file on
-CRANKER_STATUS_FILE=/tmp/keeper-status.json \
-  cargo run --release -p percolator-cranker --bin live_shaped
+CRANKER_STATUS_FILE=/tmp/keeper-status.json CRANKER_CYCLES=1000 \
+  cargo run --release -p percolator-cranker --bin cranker
 # monitor (another shell); the market pubkey is printed by the keeper
 cargo run --release -p percolator-cranker --bin monitor -- \
   --market <MARKET> --program "$PERCOLATOR_PROGRAM_ID" \
@@ -50,7 +50,7 @@ cargo run --release -p percolator-cranker --bin monitor -- --market <MARKET> --p
 
 | Env | Effect |
 |---|---|
-| `CRANKER_STATUS_FILE=<path>` | The `cranker` binary and the `live_shaped` scenario rewrite `<path>` after every cycle: a temp file and a rename, so readers never see a partial file. Writing never changes a cycle or scheduler decision, and a write error is printed and ignored. |
+| `CRANKER_STATUS_FILE=<path>` | The `cranker` binary rewrites `<path>` after every cycle: a temp file and a rename, so readers never see a partial file. Writing never changes a cycle or scheduler decision, and a write error is printed and ignored. |
 | `CRANKER_FAULT_ACCOUNTS=<pk,pk,…>` | **Test hook.** The cycle reports `Failed { error: "InjectedFault" }` for these accounts and sends no transaction. They then go through the normal quarantine path. `@<file>` reads the list from a file and re-reads it every cycle, so a fault can be injected into a running keeper. Real failure paths are untouched. |
 
 Status file fields (`version: 1`):
@@ -266,7 +266,7 @@ text, using a small script that applies the same comparisons and thresholds
 as `alerts.yml`. `UnownedCollateralDrift` was extrapolated from the sample
 window, because no run lasted an hour.
 
-### Run A: metrics evolving over a full `live_shaped` run
+### Run A: metrics evolving over a full `live_shaped` run (historical: the load test is maintained separately)
 
 ```bash
 CRANKER_CYCLES=60 CRANKER_STATUS_FILE=<dir>/status.json CRANKER_FAULT_ACCOUNTS=@<dir>/faults \

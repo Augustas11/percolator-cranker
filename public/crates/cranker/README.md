@@ -6,7 +6,6 @@ Library and binaries for the reference keeper. See the workspace
 
 ```bash
 cargo run --release -p percolator-cranker --bin cranker        # bootstrap + N cycles
-cargo run --release -p percolator-cranker --bin live_shaped    # load scenario
 cargo run --release -p percolator-cranker --bin monitor -- --market <pk> --program <pk>  # read-only monitor
 cargo test -p percolator-cranker                               # unit tests (no validator)
 ```
