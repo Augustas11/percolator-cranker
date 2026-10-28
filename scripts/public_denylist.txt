@@ -1,0 +1,42 @@
+# PRIVATE — never exported (scripts/export_public.sh asserts this).
+# One case-insensitive fixed string per line. Hits fail check_public_tree.sh.
+
+# owner identity / private repo
+augstar
+Augustas11
+_aug11_
+aug11
+percolator-cranker/
+# private working docs and the watcher process
+prep.md
+ROADMAP
+strategic-questions
+cranker-strategic
+signals.md
+radar.md
+watchlist
+contributors.md
+digests/
+percolator-watch
+watcher
+prompts/
+scenario-findings
+# third-party handles / orgs / tools named in private notes
+Commoneffort
+mizuki0x
+Malibu
+malibuonbase
+antfeed
+oh-my-claudecode
+Claude
+Codex
+Cursor IDE
+Grok
+# operator stack: private by owner decision (content references)
+live_shaped
+OPERATOR_PLAYBOOK
+staging_devnet_deploy
+staging_local
+percolator-monitor
+CRANKER_STATUS_FILE
+CRANKER_FAULT_ACCOUNTS

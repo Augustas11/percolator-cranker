@@ -559,6 +559,22 @@ targets):
       and M2.f will be written against current guard semantics
       (no false-green risk).
 
+### R1. Public reference release (new repo): plain keeper only. **Export ready 2026-10-28; waiting on owner.**
+- [x] Scope (owner decision): keeper core, decoding, tx builders, quarantine
+      and budget, docs, CI. The operator stack stays private: staging,
+      bots, matcher, backing manager, playbook, devnet and hosting scripts,
+      the monitor, and the load test. `export_public.sh` never copies it;
+      `check_public_tree.sh` fails on its paths and on references to it.
+- [x] Plan, name options and sync proposal: `docs/PUBLIC_REPO_PLAN.md`.
+- [x] Export plus content gate. The private denylist
+      (`scripts/public_denylist.txt`) is never exported. Negative tests
+      catch every planted violation.
+- [x] Same CI file in both repos (layout-neutral via `scripts/env.sh`).
+- [ ] Owner decisions: public name, LICENSE (Apache-2.0 proposed),
+      security contact, repo creation and push access, sync model.
+- [ ] Push a single commit to the owner-created repo. Tag `v0.1.0` once CI
+      there is green.
+
 ### M3. Pre-deployment readiness (only relevant once devnet deployment appears)
 - [ ] Real keeper portfolio funded on the target chain.
 - [ ] Oracle account subscriptions wired (not stubbed).
