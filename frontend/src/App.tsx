@@ -92,7 +92,7 @@ export default function App({ client }: { client: MarketClient }) {
             </div>
             <label htmlFor="size">Size (SOL)</label>
             <input id="size" type="number" min="0" step="any" value={size} onChange={e => setSize(e.target.value)} />
-            <label htmlFor="leverage">Leverage (1–10)</label>
+            <label htmlFor="leverage">Leverage (1–{market.maxLeverage})</label>
             <input id="leverage" type="number" min="1" max={market.maxLeverage} step="any" value={leverage} onChange={e => setLeverage(e.target.value)} />
             <div className="actions">
               <button onClick={() => void call(() => client.openPosition(side, Number(size), Number(leverage)))}>Open</button>

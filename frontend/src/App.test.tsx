@@ -46,7 +46,9 @@ test("connects, deposits, opens a long, and keeps rendering after a tick", async
     expect(position.textContent).toContain("1 SOL");
     expect(container.querySelector("tbody")!.textContent).toContain("you");
     expect(client.getSnapshot().portfolio.health.initialMarginUsed).toBe(30);
+    const markBefore = container.querySelector('[aria-labelledby="market-heading"] dd')!.textContent;
     await act(async () => { client.tick(); });
+    expect(container.querySelector('[aria-labelledby="market-heading"] dd')!.textContent).not.toBe(markBefore);
     expect(position.textContent).toContain("long");
     expect(position.textContent).toContain("1 SOL");
     expect(container.querySelector(".error")!.textContent).toBe("");

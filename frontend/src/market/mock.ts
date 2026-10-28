@@ -1,5 +1,7 @@
 import type { Fill, Leg, MarketClient, MarketSnapshot, Side } from "./types";
 
+const EPS = 1e-9;
+
 interface MockOptions { tickMs?: number; seed?: number; startPrice?: number; autoTick?: boolean }
 
 function positive(value: number, name: string) {
@@ -77,7 +79,7 @@ export class MockMarketClient implements MarketClient {
         health: {
           equity, initialMarginUsed, maintenanceMargin,
           freeCollateral: Math.max(0, equity - initialMarginUsed), ratio,
-          status: ratio <= 1 ? "liquidatable" : ratio < 1.5 ? "warning" : "healthy",
+          status: equity < 0 || ratio <= 1 ? "liquidatable" : ratio < 1.5 ? "warning" : "healthy",
         },
       },
       fills: next.fills.slice(0, 20),
@@ -113,7 +115,6 @@ export class MockMarketClient implements MarketClient {
     this.connected();
     positive(amount, "amount");
     const s = this.snapshot;
-    positive(s.portfolio.collateral + amount, "collateral");
     this.publish({ ...s, portfolio: { ...s.portfolio, collateral: s.portfolio.collateral + amount } });
   }
 
@@ -121,8 +122,9 @@ export class MockMarketClient implements MarketClient {
     this.connected();
     positive(amount, "amount");
     const s = this.snapshot;
-    if (amount > s.portfolio.health.freeCollateral || amount > s.portfolio.collateral) throw new Error("insufficient free collateral");
-    this.publish({ ...s, portfolio: { ...s.portfolio, collateral: s.portfolio.collateral - amount } });
+    // EPS absorbs float residue so "withdraw everything" works after decimal deposits.
+    if (amount > s.portfolio.health.freeCollateral + EPS || amount > s.portfolio.collateral + EPS) throw new Error("insufficient free collateral");
+    this.publish({ ...s, portfolio: { ...s.portfolio, collateral: Math.max(0, s.portfolio.collateral - amount) } });
   }
 
   async openPosition(side: Side, size: number, leverage: number) {
@@ -130,7 +132,7 @@ export class MockMarketClient implements MarketClient {
     positive(size, "size");
     if (side !== "long" && side !== "short") throw new Error("invalid side");
     const s = this.snapshot;
-    if (!Number.isFinite(leverage) || leverage < 1 || leverage > s.market.maxLeverage) throw new Error("leverage must be between 1 and 10");
+    if (!Number.isFinite(leverage) || leverage < 1 || leverage > s.market.maxLeverage) throw new Error(`leverage must be between 1 and ${s.market.maxLeverage}`);
     const existing = s.portfolio.legs[0];
     if (existing && existing.side !== side) throw new Error("close the current position first");
     const notional = size * s.mark.price;
