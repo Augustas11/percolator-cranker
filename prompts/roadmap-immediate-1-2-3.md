@@ -156,6 +156,13 @@ outside readers. The owner creates it; you prepare everything it needs.
 
 ## Deliverable 2: staging market = operator rehearsal
 
+> **Update 2026-10-28 (owner):** R2 is a single **SOL-PERP** market (SOL/USD
+> priced, test USDC collateral, SOL as an AuthMark asset priced by our
+> pusher from Pyth SOL/USD, a seeded mock locally). Where this section says
+> 3+ assets or Hybrid assets, read one asset (SOL). This market becomes the
+> PoC beta in `ROADMAP.md`. Keep it simple: smallest change that meets the
+> criteria.
+
 There are no market operators yet; **the owner is the first operator**. Run
 the staging market exactly as a real market: the owner's (staging) keys hold
 `marketauth`, every asset admin, oracle authority, insurance operator and
@@ -165,19 +172,19 @@ backing authority, and every role gets a bot or a written procedure.
    staging mode (`scripts/staging_local.sh`):
    - a local validator;
    - the wrapper deployed with a staging program keypair;
-   - 3+ assets, about 40 trader bots and one maker per asset;
+   - one asset (SOL-PERP), about 40 trader bots and one maker;
    - a deterministic but evolving price path: random walk with shocks that
      cause liquidations, lapsed/impaired buckets and reversals;
    - nonzero funding;
-   - one asset scheduled through Recovery → Resolved and then relisted.
+   - SOL scheduled once through Recovery → Resolved and then relisted.
 
    It must run unattended for at least 6 hours without operator action.
    Record the result in `prep.md`.
 2. **Operator roles** (new modules under `staging/` or `crates/`):
    - **Price pusher.** For AuthMark assets, a bot that reads Pyth (devnet or
      a local mock) and signs `PushAuthMark` with sequence handling, a
-     staleness alarm and a max-move guard. Hybrid assets need no pusher;
-     include at least one of each.
+     staleness alarm and a max-move guard. SOL is AuthMark; no Hybrid
+     asset for now.
    - **LP matcher.** A minimal matcher program (oracle ± spread, ABI v3,
      modelled on the wrapper's own test fixture semantics but written fresh),
      configured with `SetMatcherConfig` on an operator LP portfolio. Traders
@@ -273,14 +280,14 @@ backing authority, and every role gets a bot or a written procedure.
 
 ## Acceptance criteria
 
-- [ ] Step 0 re-pin criteria met and recorded.
-- [ ] R1: name options and `docs/PUBLIC_REPO_PLAN.md`; `export_public.sh` and
+- [x] R1: name options and `docs/PUBLIC_REPO_PLAN.md`; `export_public.sh` and
       `check_public_tree.sh` passing; the exported tree builds and tests on
       its own; LICENSE (owner-approved), README, RUNBOOK, CHANGELOG, SECURITY
       and CI ready; pushed as a single commit to the owner-created repo, and
       `v0.1.0` tagged there (created only after CI
       is green).
-- [ ] R2: local staging runs 6+ hours unattended with the operator roles
+- [x] Step 0 re-pin done (PR #1); R1 shipped as drip v0.1.0 (2026-10-28).
+- [ ] R2 (SOL-PERP): local staging runs 6+ hours unattended with the operator roles
       (price pusher, LP matcher, backing manager, insurance) running as bots;
       `OPERATOR_PLAYBOOK.md` written, including operator income; devnet scripts, STAGING
       doc and hosting recipe exist; nothing deployed by you.
