@@ -34,6 +34,7 @@ scripts/pins.env scripts/pins.env
 public/.gitignore .gitignore
 public/CHANGELOG.md CHANGELOG.md
 public/CONTRIBUTING.md CONTRIBUTING.md
+public/LICENSE LICENSE
 public/Cargo.lock Cargo.lock
 public/Cargo.toml Cargo.toml
 public/README.md README.md

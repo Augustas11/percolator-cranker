@@ -24,7 +24,7 @@
   private denylist. The allowlist above is the control; the helper and the
   owner's read of the tree before the first push are the backstops.
 
-Env: PUBLIC_NAME (default "percolator-reference-keeper") replaces
+Env: PUBLIC_NAME (default "drip") replaces
 @PUBLIC_NAME@. SECURITY_CONTACT replaces @SECURITY_CONTACT@; without it the
 export is a DRAFT (the gate runs with --draft) and is not releasable.
 """
@@ -135,7 +135,7 @@ def main(argv):
                 die(f"rewrite anchor missing in {rel}: {a}")
             open(p, "w", encoding="utf-8").write(s.replace(a, b))
 
-        subs = {"@PUBLIC_NAME@": os.environ.get("PUBLIC_NAME", "percolator-reference-keeper")}
+        subs = {"@PUBLIC_NAME@": os.environ.get("PUBLIC_NAME", "drip")}
         contact = os.environ.get("SECURITY_CONTACT", "")
         if contact:
             subs["@SECURITY_CONTACT@"] = contact

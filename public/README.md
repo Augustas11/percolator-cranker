@@ -1,8 +1,9 @@
 # @PUBLIC_NAME@
 
-An **independent, unofficial reference keeper (cranker)** for the Percolator
-perpetuals risk engine on Solana. It is not affiliated with the upstream
-authors, and it is **not a paid service**.
+An independent, unofficial reference keeper for the Percolator protocol.
+Not affiliated with the upstream authors. Not a paid service.
+
+It is a keeper (cranker) for the Percolator perpetuals risk engine on Solana.
 
 > **Status: reference / dry-run / local-validator only.** Nothing here is
 > deployed on any public cluster. Fee paths are off by default
@@ -109,4 +110,4 @@ Nothing in either job is non-gating.
 
 ## License
 
-To be decided. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Apache-2.0. See [LICENSE](LICENSE).
