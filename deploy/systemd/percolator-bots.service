@@ -1,0 +1,38 @@
+# Day-0 bots on an existing launch market: pusher, matcher, backing,
+# insurance and keeper in one process (`staging bots`). The keeper is the
+# drip crank code (`drip::cycle`); the drip binary itself boots its own market
+# at this pin, so it cannot serve here. docs/LAUNCH.md, "Hosting".
+# Reference / dry-run only; not a paid live service; M3 NO-GO.
+#
+# Host layout (no secrets in this file):
+#   /opt/percolator/bin/staging              the built binary
+#   /etc/percolator/sol-perp.toml            the launch config
+#   /etc/percolator/launch.env               deploy/launch.env.example, 0600
+#   /var/lib/percolator-launch/              the launch run dir: state.json, keys/ (0600)
+# User `percolator` (useradd --system percolator) owns the run dir.
+
+[Unit]
+Description=Percolator Day-0 bots
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=percolator
+StateDirectory=percolator-launch
+StateDirectoryMode=0700
+EnvironmentFile=/etc/percolator/launch.env
+ExecStart=/bin/sh -c 'exec /opt/percolator/bin/staging bots /etc/percolator/sol-perp.toml "$LAUNCH_CLUSTER" "$STATE_DIRECTORY" >> "$STATE_DIRECTORY/bots.log" 2>&1'
+Restart=on-failure
+RestartSec=10
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

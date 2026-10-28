@@ -1,0 +1,28 @@
+# Day-0 monitor: read-only, serves /metrics on 127.0.0.1:9184 for Prometheus
+# (deploy/prometheus.yml, rules monitor/alerts.yml). docs/MONITOR.md.
+# Reference / dry-run only; not a paid live service; M3 NO-GO.
+
+[Unit]
+Description=Percolator Day-0 monitor
+Wants=network-online.target
+After=network-online.target percolator-bots.service
+
+[Service]
+Type=simple
+User=percolator
+EnvironmentFile=/etc/percolator/launch.env
+# Exits until bots.log names the market; restarts until it does.
+ExecStart=/bin/sh -c 'exec /opt/percolator/bin/monitor --rpc "$LAUNCH_RPC_URL" --keeper-log /var/lib/percolator-launch/bots.log --listen 127.0.0.1:9184'
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

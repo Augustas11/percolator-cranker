@@ -1,0 +1,8 @@
+# deploy/Dockerfile context: never ship keys, run dirs or build output.
+launch-runs/
+.staging-runs/
+.preview/
+**/target/
+*.log
+public/
+frontend/
