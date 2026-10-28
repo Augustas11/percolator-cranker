@@ -45,6 +45,7 @@ FORBIDDEN_NAMES = {
     "signals.md", "radar.md", "contributors.md", "watchlist.md", "releases", "state",
     "repo", "repo-prog", ".preview", ".solana-test-ledger", "public_denylist.txt",
     "export_public.sh", "export_public.py", "public_manifest.txt", "scenario-findings.md",
+    "ops",
 }
 REWRITES = [
     ("crates/cranker/Cargo.toml", 'path = "../repo-prog"', 'path = "../../upstream/percolator-prog"'),

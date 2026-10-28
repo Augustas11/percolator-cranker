@@ -51,3 +51,9 @@ service-operator
 Layer B
 M2.f
 M2.g
+# operator ops kit (ops/): private by owner decision
+MONEY_MODEL
+CAPITAL_PLAN
+LAUNCH_RUNBOOK
+OWNER_ACTIONS
+LEGAL_QUESTIONS
