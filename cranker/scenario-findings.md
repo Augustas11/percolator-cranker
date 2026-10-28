@@ -105,6 +105,67 @@ wrapper `handle_close_slab`). In the 10-trader run the vault held 9,098,424
 atoms after every owner exit and every authority withdrawal, and in the
 default run 13,482,914; in both cases CloseSlab burned the balance (nothing
 was swept to the market authority). Roughly 8M of that
-is backing principal the backing authority topped up and let lapse. Flagged
-only so the economics are deliberate; the scenario counts it as CloseSlab
-success.
+is backing principal the backing authority topped up and let lapse.
+
+**Not all of it is explained (F2, open).** Assertion c now judges the
+residue before CloseSlab against the dust bound plus lapsed principal. On
+the default run that allows 8,000,528 atoms (8,000,000 lapsed + 528 dust).
+The vault held 13,482,914, which leaves **≈5,482,386 atoms unexplained**.
+Two known contributors:
+
+* Domain 4's bucket (1,000,000, far-future expiry, never lapsed): after
+  resolve, `WithdrawBackingBucket` accepted only 1 atom.
+* `ClaimResolvedPayoutTopup` was rejected `EngineLockActive` 290 times, so
+  haircut winners may have left value behind.
+
+There is no minimal repro yet. On the default pin c is now a FAIL, not a
+pass.
+
+## Upstream cross-references (checked 2026-10-28, read-only; nothing posted)
+
+PR and issue states were read through the GitHub API. Line numbers are on
+engine `68859b94` (`src/v16.rs`).
+
+**F1: same family as earlier fixes, but a distinct gap.**
+
+* Prior fixes, all closed without a direct merge:
+  * engine #102 (closed 2026-09-03), "Expire lapsed source backing during
+    Live auto-crank";
+  * engine #173 and #179 (closed 2026-09-03);
+  * engine #196 (closed 2026-09-02);
+  * prog #204 (closed 2026-09-03), "Unstick Live auto-crank after
+    source-backing expiry".
+* What landed on master instead is
+  `expire_first_lapsed_source_backing_for_account_not_atomic` (~9847). It
+  scans only the domains the account already references.
+* F1's bucket is the domain the winner's *new* positive PnL is about to be
+  attributed to, so the account doesn't reference it yet, and that scan
+  never reaches it.
+* On `68859b94`, `validate_source_domain_ledger_current` (~9411) still
+  returns `Stale` for a Fresh bucket with `expiry_slot <= current_slot`.
+* The asset-level scan `first_lapsed_source_backing_for_asset_at_slot`
+  (~9817) has one caller (~16216), in the `AutoCrankPlanV16::CloseResolved`
+  arm of `permissionless_auto_crank_not_atomic`, so it runs in Resolved only.
+* No open issue or PR found that describes the unreferenced-domain case.
+
+**F1b: very likely engine #216** (merged 2026-10-27, in `68859b94`, not in
+`4db11a8c`).
+
+* #216: "A loss landing on lapsed or impaired backing no longer reverts
+  refresh". A loss reserve against a Fresh-past-expiry bucket was rejected
+  with `LockActive`; the fix expires the bucket first.
+* Related: engine #242 (merged 2026-10-27) fixes issue #230, impaired-bucket
+  lien reconcile (`LockActive` / `CounterUnderflow`).
+
+**F2 / CloseSlab burn: related, not the same bug.**
+
+* Engine issue #206 / PR #210 (both open): a lapsed bucket un-pledges its
+  liened principal.
+* Engine PR #209 (open): expired counterparty liens stop counting as margin.
+* Prog issue #451 / PR #454 (open, part of the #456 stack): a resolved
+  backing provider has no pre-expiry exit, so unowed backing is forfeited
+  and swept. That may explain the domain-4 withdrawal that released 1 atom.
+
+The pre-merge preview run (prog #456 head + engine `68859b94`) decides which
+of these are still open there; its result is recorded in `prep.md`.
+
