@@ -563,12 +563,13 @@ targets):
 - [x] Scope (owner decision): keeper core, decoding, tx builders, quarantine
       and budget, docs, CI. The operator stack stays private: staging,
       bots, matcher, backing manager, playbook, devnet and hosting scripts,
-      the monitor, and the load test. `export_public.sh` never copies it;
-      `check_public_tree.sh` fails on its paths and on references to it.
+      the monitor, and the load test. `export_public.sh` never copies it
+      (allowlist manifest); the denylist names it for the leak helper.
 - [x] Plan, name options and sync proposal: `docs/PUBLIC_REPO_PLAN.md`.
-- [x] Export plus content gate. The private denylist
-      (`scripts/public_denylist.txt`) is never exported. Negative tests
-      catch every planted violation.
+- [x] Allowlist export plus a simple leak helper (owner decision: the
+      helper is advisory, not a security boundary). The private denylist
+      (`scripts/public_denylist.txt`) is never exported.
+- [ ] Owner reads the exported tree before the first push (required).
 - [x] Same CI file in both repos (layout-neutral via `scripts/env.sh`).
 - [ ] Owner decisions: public name, LICENSE (Apache-2.0 proposed),
       security contact, repo creation and push access, sync model.

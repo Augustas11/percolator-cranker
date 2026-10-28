@@ -92,7 +92,7 @@ pub fn skip(test: &str) {
 /// themselves. Returns `None` (skip) when either var is missing.
 /// Validator tests send transactions: refuse anything but a local RPC.
 /// Parses the authority and compares the exact host; userinfo (`a@b`) is
-/// rejected so `http://127.0.0.1@remote.example/` cannot pass. // public-check: allow-test-fixture
+/// rejected so `http://127.0.0.1@remote.example/` cannot pass.
 fn local_rpc(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) else {
         return false;
@@ -115,11 +115,11 @@ fn local_rpc_guard_parses_the_host() {
         assert!(local_rpc(ok), "{ok}");
     }
     for bad in [
-        "http://localhost.example.com:8899", // public-check: allow-test-fixture
-        "http://127.0.0.1@remote.example:8899", // public-check: allow-test-fixture
-        "https://localhost@remote.example.invalid:8899", // public-check: allow-test-fixture
-        "http://127.0.0.1.evil:8899", // public-check: allow-test-fixture
-        "ftp://127.0.0.1", // public-check: allow-test-fixture
+        "http://localhost.example.com:8899",
+        "http://127.0.0.1@remote.example:8899",
+        "https://localhost@remote.example.invalid:8899",
+        "http://127.0.0.1.evil:8899",
+        "ftp://127.0.0.1",
     ] {
         assert!(!local_rpc(bad), "{bad}");
     }

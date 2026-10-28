@@ -59,11 +59,11 @@ jobs:
         run: cargo test --release --manifest-path "$CRANKER_MANIFEST"
 
   # Runs only where scripts/export_public.sh exists (the maintainers' export
-  # source); skipped everywhere else. Re-runs the export, its content gate,
+  # source); skipped everywhere else. Re-runs the export, its leak helper,
   # and a --locked build + test of the exported workspace, so a stale lock
-  # or a content-gate failure shows up on the change that caused it.
+  # or a leak-helper hit shows up on the change that caused it.
   public-export:
-    name: public export + content gate + exported build
+    name: public export + leak helper + exported build
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -87,10 +87,10 @@ jobs:
             ${{ runner.temp }}/pub-target
           key: pubexport-${{ runner.os }}-${{ hashFiles('public/Cargo.lock', 'scripts/pins.env') }}
           restore-keys: pubexport-${{ runner.os }}-
-      - name: content-gate regression probes
+      - name: exporter + leak-helper tests
         if: steps.detect.outputs.present == 'true'
         run: python3 scripts/test_check_public_tree.py
-      - name: export (draft) + content gate
+      - name: export (draft) + leak helper
         if: steps.detect.outputs.present == 'true'
         run: ./scripts/export_public.sh "$RUNNER_TEMP/pub"
       - name: exported tree builds and tests on its own (--locked)

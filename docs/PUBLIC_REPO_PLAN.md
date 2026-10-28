@@ -1,14 +1,23 @@
 # Public repo plan (R1)
 
-Status: export and check scripts are done and green. The exported tree
+Status: the export script and the leak helper are done and green. The exported tree
 builds and tests on its own, including bring-up and a dry run on a local
 validator. Waiting on the owner for the decisions at the bottom.
 
 This private repo (`percolator-cranker`) is never made public. The public
 release is a **new repository** with one fresh initial commit, produced by an
-allowlist export (`scripts/export_public.sh`) and gated by a content check
-(`scripts/check_public_tree.sh`). The owner creates the repository; this
-session prepares the tree.
+allowlist export (`scripts/export_public.sh`). The owner creates the
+repository; this session prepares the tree.
+
+**What protects the export (owner decision, 2026-10-28):**
+1. **The allowlist export is the control.** Only the paths named in
+   `scripts/public_manifest.txt` are copied, from the committed HEAD.
+   Anything not listed never leaves.
+2. **`scripts/check_public_tree.sh` is a simple helper**, not a security
+   boundary. It greps the exported text files for obvious mistakes (see
+   below) and exits non-zero on any hit.
+3. **The owner reads the exported tree before the first push.** This step
+   is required; see the release checklist.
 
 ## Name options (owner decides)
 
@@ -39,9 +48,9 @@ operator stack stays private:
 - the liveness/solvency monitor (may be sold later);
 - the load-test scenario and its findings.
 
-`scripts/export_public.sh` never copies any of those paths, and
-`scripts/check_public_tree.sh` fails if one appears (path rules plus the
-private denylist).
+`scripts/export_public.sh` never copies any of those paths (they are not
+in the manifest), and the private denylist names them so the helper flags a
+reference that slips into an exported file.
 
 ## Layout
 
@@ -78,15 +87,18 @@ docs/        # ARCHITECTURE, RUNBOOK
 | public-only files (README, docs, workspace `Cargo.toml` and lock, public-layout `env.sh`, crate READMEs, `.gitignore`) | `public/` overlay, listed in the manifest | yes |
 | shared with this repo (identical at each export; private CI re-runs the export on every change): `.github/workflows/ci.yml`, `scripts/fetch_upstream.sh`, `scripts/pins.env`, `m1_bringup.sh` | private tree, listed in the manifest | yes |
 | layout rewrites (path dep `../repo-prog` → `../../upstream/percolator-prog`), `@PUBLIC_NAME@`, `@SECURITY_CONTACT@` | `export_public.py`, each anchored and checked | — |
-| `scripts/check_public_tree.sh [--draft] [--allow-email ADDR] <dir> [denylist]` → `check_public_tree.py` | private, and exported (generic checks) | yes |
+| `scripts/check_public_tree.sh [--draft] [--allow-email ADDR] <dir> [denylist]`: the leak helper (plain `grep`) | private, and exported (generic checks) | yes |
 | `scripts/public_denylist.txt` | private only | no (asserted) |
-| `scripts/test_check_public_tree.py`: regression probes for every gate bypass found in audits | private only | no |
+| `scripts/test_check_public_tree.py`: exporter tests (allowlist, destinations, rollback) and one basic test per helper pattern | private only | no |
 
 **Export.**
 - The destination must not exist.
-- The tree is built in a fresh temp dir next to it, and renamed into place
-  only after every check passes. A failed export leaves nothing behind and
-  never touches existing files.
+- The tree is built in a fresh temp dir next to it. Only after every check
+  passes is the destination created (an atomic `mkdir`, which fails if
+  anything is there) and the entries moved in. A failed export, including
+  one that fails while moving entries, leaves nothing behind and never
+  touches existing files.
+- Destinations are unique, case-insensitively.
 - HEAD is resolved once. Exactly the manifest's files are read from that
   commit (`git cat-file`), never from the working tree.
 - Every file committed at that HEAD under `cranker/src`, `cranker/tests`,
@@ -97,23 +109,20 @@ docs/        # ARCHITECTURE, RUNBOOK
   `.gitignore`.
 - Without `SECURITY_CONTACT` the export is a DRAFT and says so.
 
-**Content gate.** It fails closed:
-- **File checks:** walk errors, bad names, dot paths and symlinks fail, and
-  any file that isn't strict UTF-8 without NULs fails. The whole file is
-  decoded, so late binary or UTF-16 content can't hide.
-- **Secrets:** secret-like file names, 64-byte key arrays, and private-key,
-  seed-phrase and mnemonic markers.
-- **Locations:** absolute local paths and emails. The one exception is the
-  approved security contact, and only in `SECURITY.md`.
-- **Links:** URLs (parsed, with an allowlisted host and path) and any
-  `github.com/<owner>/<repo>` that isn't one of the two upstream repos.
-- **Private material:** operator-stack paths, unreplaced placeholders, and
-  the denylist, checked in both contents and file names.
-- **Test fixtures:** a line marked `public-check: allow-test-fixture` is
-  exempt from the email and URL rules only. It must be in `crates/*/tests/`
-  and use loopback or documentation-placeholder hosts.
-- **Cargo.lock** is exempt from the URL rule only; its sources come from
-  upstream manifests.
+**Leak helper.** A plain `grep` over the exported tree, text files only
+(binaries are skipped). It flags:
+- private-key shapes: a 64-number array, a PEM private-key header, and
+  keypair / `id.json` / `.env` file names;
+- `/Users/…` and `/home/…` paths;
+- email addresses, except the approved security contact in `SECURITY.md`
+  and the reserved documentation domains (`example.*`, `.invalid`, `.test`);
+- every denylist string (owner handles, the private repo name and URL,
+  private doc names, the operator stack), in contents and file names;
+- unreplaced placeholders (unless it is a draft export).
+
+It is advisory: it catches obvious mistakes and is not built to resist
+deliberate evasion. The allowlist decides what is copied, and the owner's
+read is the final check.
 
 The scripts read their layout from env vars with private-layout defaults
 (`PERCOLATOR_PROG_DIR`, `BRINGUP_DIR`, `CRANKER_MANIFEST`), so the same
@@ -129,9 +138,9 @@ wrapper checkout, the bring-up crate and the keeper manifest.
 - **host** (push to `main`, pull requests, dispatch): fetch the pinned
   wrapper, build, run unit tests.
 - **public-export:** runs its steps only where `scripts/export_public.py`
-  exists, so it does nothing in the public repo. It runs the gate's
-  regression probes, then the export and its gate with the private
-  denylist, then a `--locked` build and test of the exported workspace.
+  exists, so it does nothing in the public repo. It runs the exporter and
+  helper tests, then the export and the helper with the private denylist,
+  then a `--locked` build and test of the exported workspace.
 - **e2e** (pull requests, manual dispatch): SBF build with platform-tools
   v1.52, validator bring-up, a 3-cycle dry run with fail-on-error, and the
   validator integration tests. Nothing is non-gating. (The `live_shaped`
@@ -146,16 +155,28 @@ wrapper checkout, the bring-up crate and the keeper manifest.
    It must end with `exported to <new-dir>` and must not say DRAFT.
 2. In `<scratch>`, run `./scripts/fetch_upstream.sh`, `cargo build`,
    `cargo test`, the bring-up and a 3-cycle dry run. All green.
-3. Add the owner-approved `LICENSE` (add it to `public/` and the manifest,
-   so it goes through the gate).
-4. `git init`, then push one commit to the new repo. Wait for CI to go
+3. Add the owner-approved `LICENSE` (add it to `public/` and the manifest),
+   commit, and re-run step 1.
+4. **Required: the owner reads the whole exported tree** before anything is
+   pushed. To produce it for review (from a clean checkout of `main` in
+   this repo):
+
+   ```bash
+   PUBLIC_NAME=<chosen> SECURITY_CONTACT=<approved> ./scripts/export_public.sh ../public-review
+   ```
+
+   Then read every file in `../public-review` (`find ../public-review -type
+   f | sort` lists them; about 41 files). Look for anything private: names,
+   paths, notes, links, numbers. Only push that exact tree.
+5. `git init`, then push one commit to the new repo. Wait for CI to go
    green; dispatch the gated e2e job once.
-5. Tag `v0.1.0`. The release notes cover pins, keeper behavior,
+6. Tag `v0.1.0`. The release notes cover pins, keeper behavior,
    quarantine, CU and the known issue (upstream #243). **Never** include
    load-test results or findings: they stay private (see Scope). Release
    notes are written by hand, so they don't pass through the export. Gate
    them first: `mkdir -p <tmp>/notes && cp RELEASE_NOTES.md <tmp>/notes/ &&
-   ./scripts/check_public_tree.sh <tmp>/notes scripts/public_denylist.txt`.
+   ./scripts/check_public_tree.sh <tmp>/notes scripts/public_denylist.txt`,
+   and read them yourself.
 
 ## Export rules
 
@@ -167,9 +188,9 @@ wrapper checkout, the bring-up crate and the keeper manifest.
   `signals.md`, `radar.md`, `contributors.md`, `watchlist.md`, `releases/`,
   `state/`), `repo/`, `repo-prog/`, `.preview/`, ledgers, keypairs, `.env`,
   and `scripts/public_denylist.txt` itself.
-- **Content gate.** `scripts/check_public_tree.sh` fails on keypair JSON or
-  secrets, absolute local paths, personal emails, links to this private repo,
-  and any denylisted handle, org name or tool name.
+- **Leak helper (advisory).** `scripts/check_public_tree.sh` flags keypair
+  shapes, home paths, emails, and any denylisted handle, repo name or tool
+  name. The owner's read before the first push is required.
 
 ## Sync model after v0.1.0 (proposal; owner decides)
 
