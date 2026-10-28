@@ -9,7 +9,9 @@
 # Everything lands in a run dir (default .staging-runs/<timestamp>, gitignored):
 # payer.json (generated, local only), ledger/, validator.log, staging.log.
 # The exit code is the staging binary's: 0 = normal, 1 = abnormal failures.
-# Other STAGING_* knobs (tick, seed, backing tenor, ...) pass through; see
+# Market, amounts, matcher and oracle params come from launch/sol-perp.toml
+# (STAGING_CONFIG overrides), the same file as the Day-0 launch. Other
+# STAGING_* knobs (tick, seed, backing tenor, ...) pass through; see
 # docs/STAGING.md.
 
 set -euo pipefail

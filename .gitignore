@@ -35,3 +35,7 @@ Thumbs.db
 
 # --- R2 local staging runs (scripts/staging_local.sh): ledger, logs, generated payer key ---
 /.staging-runs/
+
+# --- Day-0 launch runs (scripts/launch_market.sh, day0_drill.sh): state, generated keys, logs ---
+/launch-runs/
+/deploy/.env

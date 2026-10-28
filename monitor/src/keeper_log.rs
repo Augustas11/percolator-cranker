@@ -16,6 +16,8 @@ pub struct KeeperLog {
     pub signature: Option<String>,
     pub last_success_slot: Option<u64>,
     pub first_seen_slot: Option<u64>,
+    /// Pusher: source price timestamp to push landing, ms (staging `mark_lag` event).
+    mark_lag_ms: Option<u64>,
     last_cycle: u64,
     summary: BTreeMap<String, u64>,
     attempts: [u64; 3],
@@ -92,6 +94,7 @@ impl KeeperLog {
                                 "error":v["error"],"strike":v["strike"],"until_cycle":v["until_cycle"],"last_event_slot":slot}));
                         }
                     }
+                    Some("mark_lag") => self.mark_lag_ms = v["ms"].as_u64(),
                     Some("unconfirmed" | "idle_with_pending_work") => {
                         self.events.insert(v["event"].as_str().unwrap().into(), v);
                     }
@@ -191,7 +194,7 @@ impl KeeperLog {
             "quarantined_accounts":rows,"last_success_signature":self.signature,"last_success_slot":self.last_success_slot,
             // Before any known success, count from the first slot this log was watched,
             // so a keeper failing from its start still trips the no-success alert.
-            "slots_since_last_success":self.last_success_slot.or(self.first_seen_slot).map(|s|slot.saturating_sub(s)),"last_events":self.events})
+            "slots_since_last_success":self.last_success_slot.or(self.first_seen_slot).map(|s|slot.saturating_sub(s)),"last_events":self.events,"mark_lag_ms":self.mark_lag_ms})
     }
 }
 
@@ -230,6 +233,9 @@ mod tests {
                 .replace("failed=1", "failed=0"),
         );
         assert_eq!(k.cycles, [1, 1, 1]);
+        // The staging pusher's lag event (Day-0 launch, docs/LAUNCH.md).
+        k.line(r#"{"event":"mark_lag","ms":512,"target_ms":400}"#);
+        assert_eq!(k.snapshot(120, true, None, None)["mark_lag_ms"], 512);
     }
     #[test]
     fn non_progress_reject_clears_other_rejects_update_error_and_no_success_baseline() {

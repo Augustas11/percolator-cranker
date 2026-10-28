@@ -5562,13 +5562,17 @@ name = "staging"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "drip",
  "percolator",
  "percolator-prog",
+ "serde",
+ "serde_json",
  "solana-client",
  "solana-sdk",
  "spl-associated-token-account",
  "spl-token",
+ "toml",
 ]
 
 [[package]]

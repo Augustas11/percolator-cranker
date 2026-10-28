@@ -1,0 +1,116 @@
+# SOL-PERP launch config: the one file for scripts/launch_market.sh, the
+# staging binary (staging/) and scripts/staging_local.sh.
+# Reference / dry-run only; not a paid live service; M3 NO-GO.
+# Amounts are collateral atoms (6 decimals: 1_000_000 = $1). Prices are USD e6
+# per SOL. Sizes are 1e-6 SOL. Public keys only; no key material here.
+
+# Must equal scripts/pins.env, the single source of truth that
+# scripts/fetch_upstream.sh and the crates' build.rs read. launch_market.sh
+# refuses to run when they differ.
+[pins]
+wrapper_sha = "5cb331dde354517c6371a8acf92cecb194f3bb73"
+engine_rev = "4db11a8cb0053815e23a35d3a7d3edc265d8d866"
+
+# program_id: any deployed wrapper (ours or upstream's). Empty on local means
+# the id of repo-prog/target/deploy/percolator_prog-keypair.json.
+# collateral_mint: a mint address, or "create" for a fresh 6-decimal test USDC
+# mint whose authority is the run's payer (local and devnet only).
+# price_source: "mock" (seeded walk, local) or "pyth" (the on-chain Pyth
+# SOL/USD price account, read over this RPC).
+[cluster.local]
+rpc = "http://127.0.0.1:8799"
+program_id = ""
+collateral_mint = "create"
+price_source = "mock"
+
+[cluster.devnet]
+rpc = "https://api.devnet.solana.com"
+# Upstream's devnet program; replace with ours to rehearse on our deployment.
+program_id = "Bu1J8eQQN2mNnUgisSEd5StBG6zDaRb7fwDjN34VzgLG"
+collateral_mint = "create"
+price_source = "pyth"
+
+[cluster.mainnet]
+rpc = ""                # the paid RPC endpoint
+program_id = ""         # the official program id, set on Day 0
+collateral_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
+price_source = "pyth"
+# Squads vault (2-of-3, ops/KEYS.md). It becomes marketauth and signs every
+# authority transaction; launch_market.sh writes those unsigned for import.
+multisig_vault = ""
+
+[oracle]
+# Pyth SOL/USD. price_source = "pyth" reads its PriceUpdateV2 account (the
+# sponsored push-oracle account, shard 0, same address on devnet and
+# mainnet) with the wrapper's own parser; a reading older than
+# pyth_max_age_s or wider than pyth_max_conf_bps is not pushed.
+# Devnet's account was ~70 s old when checked (2026-10-29): fine for a
+# rehearsal, far off the 400 ms target. Tighten for mainnet.
+pyth_feed_id = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
+pyth_price_account = "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE"
+pyth_max_age_s = 120
+pyth_max_conf_bps = 100
+# The money case holds only with the mark within ~400 ms of the market
+# (research/replay/REPORT.md, "Recommended start"). Lag = source price time
+# to push landed; the pusher logs it, the health check and monitor alert on it.
+lag_target_ms = 400
+# One bots tick: the pusher reads the source, then the matcher, backing,
+# insurance and keeper run. Sub-400 ms needs the pusher on its own loop.
+push_interval_ms = 3000
+push_heartbeat_slots = 25
+push_deviation_bps = 10
+
+# InitMarket. Values and reasoning: docs/OPERATOR_PLAYBOOK.md section 2.
+[market]
+max_portfolio_assets = 1
+initial_price = 150000000        # mock start; on pyth clusters the live price is used
+h_min = 0
+h_max = 150
+min_nonzero_mm_req = 1000
+min_nonzero_im_req = 2000
+maintenance_margin_bps = 1000
+initial_margin_bps = 2000        # 5x
+max_trading_fee_bps = 100
+# 12 bps, not the money model's 5: at 5 bps the market loses to latency
+# arbitrage at every reachable lag, and 8 is not enough on its own
+# (research/replay/REPORT.md, headline and "Recommended start").
+trade_fee_base_bps = 12
+liquidation_fee_bps = 50
+liquidation_fee_cap = 10000000000
+min_liquidation_abs = 0
+max_price_move_bps_per_slot = 5
+max_accrual_dt_slots = 64
+max_abs_funding_e9_per_slot = 10000
+min_funding_lifetime_slots = 64
+max_account_b_settlement_chunks = 4
+max_bankrupt_close_chunks = 4
+max_bankrupt_close_lifetime_slots = 1500
+public_b_chunk_atoms = "max"     # MAX_VAULT_TVL
+maintenance_fee_per_slot = 0
+
+# ConfigurePermissionlessResolve: SHUTDOWN needs a force-close delay; stale
+# resolve after ~1 h without a mark.
+[resolve]
+stale_slots = 9000
+force_close_delay_slots = 20
+
+# Off-chain matcher: LP and trader co-sign TradeNoCpi at mark +- spread.
+# Nothing to configure on chain (no TradeCpi matcher program).
+[matcher]
+size_q = 10000000                # 10 SOL
+spread_bps = 10
+fee_bps = 12                     # >= trade_fee_base_bps (the wrapper refuses less)
+
+[amounts]
+lp_deposit = 30000000000         # $30k
+trader_deposit = 30000000000     # test trader (local, devnet only)
+insurance_seed = 10000000        # $10
+insurance_topup = 10000000       # bots: every insurance_every ticks
+insurance_every = 30
+backing_per_domain = 10000000000 # $10k on domains 0 (long) and 1 (short)
+backing_tenor_slots = 9000       # ~1 h
+# Test mint only: minted to the authority for backing and insurance.
+authority_test_mint = 10000000000000
+
+[monitor]
+listen = "127.0.0.1:9184"

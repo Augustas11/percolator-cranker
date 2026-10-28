@@ -42,6 +42,15 @@ groups:
           severity: critical
         annotations:
           summary: 'Keeper log is unreadable or older than 120 seconds'
+      # Money case (research/replay/REPORT.md): 12 bps holds only with the
+      # mark within ~400 ms of the market. Lag = source price time to push landed.
+      - alert: PusherMarkLagHigh
+        expr: percolator_keeper_mark_lag_ms > 400
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Pushed mark lags the source price by over 400 ms'
       - alert: MonitorChainReadFailing
         expr: percolator_monitor_chain_read_ok == 0
         for: 5m
