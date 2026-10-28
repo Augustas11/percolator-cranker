@@ -84,7 +84,8 @@ flat, so the choice is made per market.
 STAGING_HOURS=0.17 ./scripts/staging_local.sh   # ~10 minute smoke run
 ```
 
-Ctrl-C stops it; the validator is killed on exit. Each run writes
+Ctrl-C stops it; the validator is killed on exit and its `ledger/` deleted
+(`KEEP_LEDGER=1` keeps it). Each run writes
 `.staging-runs/<timestamp>/` (gitignored): `staging.log`, `validator.log`,
 `ledger/`, `payer.json`.
 

@@ -10,6 +10,7 @@
 # Run dir launch-runs/drill-<timestamp>/ (DRILL_RUN_DIR overrides; gitignored).
 # DRILL_RPC_PORT (8699) keeps it apart from staging (8799) and M1 (8899).
 # DRILL_SKIP_SBF_BUILD=1 reuses the existing .so (the nightly builds it first).
+# The ledger is deleted at exit unless KEEP_LEDGER=1.
 # Exit: launch_market.sh's.
 
 set -euo pipefail
@@ -36,7 +37,7 @@ PAYER="$RUN_DIR/keys/payer.json"
 solana-keygen new --no-bip39-passphrase --silent --force --outfile "$PAYER"
 echo "==> validator on $RPC (run dir $RUN_DIR)"
 solana-test-validator --reset --quiet \
-  --ledger "$RUN_DIR/ledger" --limit-ledger-size 50000000 \
+  --ledger "$RUN_DIR/ledger" --limit-ledger-size 10000 \
   --bind-address 127.0.0.1 --rpc-port "$PORT" --faucet-port $((PORT + 1000)) \
   --gossip-port $((PORT + 1010)) --dynamic-port-range "$((PORT + 1020))-$((PORT + 1120))" \
   --mint "$(solana-keygen pubkey "$PAYER")" > "$RUN_DIR/validator.log" 2>&1 &
@@ -44,6 +45,9 @@ VALIDATOR_PID=$!
 cleanup() {
   LAUNCH_RUN_DIR="$RUN_DIR/launch" "$SCRIPT_DIR/launch_market.sh" stop local || true
   kill "$VALIDATOR_PID" 2>/dev/null || true
+  wait "$VALIDATOR_PID" 2>/dev/null || true
+  # Drop the ledger (KEEP_LEDGER=1 keeps it); logs, timings, state stay.
+  [ "${KEEP_LEDGER:-0}" = 1 ] || rm -rf "$RUN_DIR/ledger"
 }
 trap cleanup EXIT
 for _ in $(seq 1 60); do
