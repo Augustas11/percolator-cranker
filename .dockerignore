@@ -6,3 +6,9 @@ launch-runs/
 *.log
 public/
 frontend/
+# Secrets: the filled-in hosting env and any key files never enter the build context.
+**/.env
+**/.env.*
+!**/*.env.example
+**/keys/
+*.pem

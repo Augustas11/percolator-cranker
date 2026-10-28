@@ -14,4 +14,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/staging/target/release/staging /src/monitor/target/release/monitor /usr/local/bin/
 COPY launch/sol-perp.toml /etc/percolator/sol-perp.toml
+# Compose sets the user to the run dir's owner (LAUNCH_UID/LAUNCH_GID).
 USER 10001

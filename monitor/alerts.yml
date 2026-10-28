@@ -51,6 +51,14 @@ groups:
           severity: warning
         annotations:
           summary: 'Pushed mark lags the source price by over 400 ms'
+      # The lag gauge keeps its last value when pushes stop; the age does not.
+      - alert: PusherMarkStale
+        expr: percolator_keeper_mark_push_age_seconds > 120
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'No price push has landed for over two minutes'
       - alert: MonitorChainReadFailing
         expr: percolator_monitor_chain_read_ok == 0
         for: 5m

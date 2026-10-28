@@ -287,6 +287,10 @@ pub fn print_keeper_lines(records: &[SubmissionRecord], summary_line: &str) {
 #[derive(Serialize, Deserialize, Default)]
 struct State {
     program_id: String,
+    /// Genesis hash of the chain this launch ran on: a reset validator or
+    /// another cluster cannot reuse the completed steps.
+    #[serde(default)]
+    genesis: String,
     mint: String,
     market: String,
     lp_pf: String,
@@ -301,8 +305,11 @@ impl State {
             Err(_) => Ok(State::default()),
         }
     }
+    /// Write a temp file and rename it, so a crash never leaves a torn state.
     fn save(&self, run: &Path) -> Result<()> {
-        std::fs::write(run.join("state.json"), serde_json::to_string_pretty(self)? + "\n")?;
+        let tmp = run.join("state.json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)? + "\n")?;
+        std::fs::rename(&tmp, run.join("state.json"))?;
         Ok(())
     }
 }
@@ -340,6 +347,15 @@ fn open(args: &[String]) -> Result<(Staging, State, PathBuf, String)> {
         bail!("{} belongs to program {}; use a fresh run dir", run.display(), state.program_id);
     }
     let rpc = RpcClient::new_with_commitment(env("LAUNCH_RPC_URL").unwrap_or(c.rpc.clone()), CommitmentConfig::confirmed());
+    // The chain decides mainnet, not the label: every entry point (script,
+    // direct binary, hosting) is checked here before any key is used.
+    let genesis = rpc.get_genesis_hash().context("read genesis hash")?.to_string();
+    if (genesis == MAINNET_GENESIS) != mainnet {
+        bail!("RPC genesis {genesis} does not match cluster {cluster:?}");
+    }
+    if !state.genesis.is_empty() && state.genesis != genesis {
+        bail!("{} belongs to chain {}; use a fresh run dir", run.display(), state.genesis);
+    }
     let payer = key(&run, "payer", !mainnet)?;
     let lp = key(&run, "lp", !mainnet)?;
     // Mainnet: the vault is the authority and there is no test trader.
@@ -349,6 +365,9 @@ fn open(args: &[String]) -> Result<(Staging, State, PathBuf, String)> {
         "create" => (key(&run, "mint", true)?.pubkey(), true),
         m => (Pubkey::from_str(m).context("collateral_mint")?, false),
     };
+    if !state.mint.is_empty() && state.mint != mint.to_string() {
+        bail!("{} uses mint {}, the config says {mint}; use a fresh run dir", run.display(), state.mint);
+    }
     let mut st = Staging::new(cfg, rpc, program_id, payer, admin, lp, trader, mint, own_mint);
     st.run_dir = Some(run.clone());
     if mainnet {
@@ -367,8 +386,12 @@ fn open(args: &[String]) -> Result<(Staging, State, PathBuf, String)> {
             *pf = Pubkey::from_str(s)?;
         }
     }
+    let mut state = state;
+    state.genesis = genesis;
     Ok((st, state, run, cluster.clone()))
 }
+
+const MAINNET_GENESIS: &str = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 
 // ------------------------------------------------------------ steps
 
@@ -466,11 +489,17 @@ fn run_step(st: &mut Staging, state: &mut State, run: &Path, cluster: &str, name
                 legs.push((false, st.cfg.amounts.trader_deposit));
             }
             for (is_lp, amount) in legs {
+                // The portfolio key is saved before anything is sent, and
+                // creation + InitPortfolio is one tx, so a crash or a lost
+                // state.json resumes on the same account: never a second
+                // portfolio or a second deposit.
+                let kp = key(run, if is_lp { "lp_portfolio" } else { "trader_portfolio" }, true)?;
                 let (owner, slot) = if is_lp { (&st.lp, &mut state.lp_pf) } else { (&st.trader, &mut state.trader_pf) };
-                if slot.is_empty() {
-                    *slot = setup::create_portfolio(&st.rpc, &st.payer, owner, &st.market, st.program_id)?.to_string();
+                *slot = kp.pubkey().to_string();
+                if !st.exists(&kp.pubkey())? {
+                    st.create_portfolio(owner, &kp)?;
                 }
-                let pf = Pubkey::from_str(slot)?;
+                let pf = kp.pubkey();
                 let p = read_portfolio(&st.rpc.get_account_data(&pf)?).map_err(|e| anyhow!("read_portfolio: {e:?}"))?;
                 if p.capital.get() == 0 {
                     st.deposit(owner, &pf, amount)?;
@@ -494,6 +523,23 @@ pub fn bots(args: &[String]) -> Result<Staging> {
     }
     let (_, g, _) = st.read()?;
     (st.mark, st.feed) = (g.assets[0].effective_price, g.assets[0].effective_price);
+    // A restart keeps managing an open trader position: the matcher only ever
+    // holds 0 or one `size_q` either way, so the leg's sign gives it back.
+    let p = read_portfolio(&st.rpc.get_account_data(&st.trader_pf)?).map_err(|e| anyhow!("read_portfolio: {e:?}"))?;
+    let q = p.legs[0].basis_pos_q.get();
+    if q != 0 {
+        st.open = Some(q.signum() * st.cfg.matcher.size_q as i128);
+        println!("bots: trader holds a position ({q}); the matcher closes it first");
+    }
     (st.keeper_log, st.phase) = (true, Phase::Live);
     Ok(st)
+}
+
+/// An RPC URL without credentials (paid endpoints carry them in the path,
+/// the query or userinfo): scheme and host only.
+pub fn redact(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let host = rest.split(['/', '?']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    if scheme.is_empty() { host.to_string() } else { format!("{scheme}://{host}/…") }
 }

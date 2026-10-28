@@ -49,7 +49,7 @@ scripts/launch_market.sh stop <cluster>                 # stops bots + monitor
 | 4 | `backing` | `TopUpBackingBucket` on domains 0 and 1, one tx | authority |
 | 5 | `lp` | LP portfolio + deposit; test-trader portfolio + deposit (not mainnet). The matcher is off-chain (co-signed `TradeNoCpi`), so it has no on-chain config | LP, trader |
 | 6 | start bots | `staging bots` (pusher, matcher, backing, insurance, keeper) and the monitor, in the background with logs and pid files | hot keys |
-| 7 | health | a clean keeper cycle, a fill, the mark lag, monitor sane (chain read, Live, keeper log read, 2 portfolios, 2 fresh buckets, no senior shortfall) | — |
+| 7 | health | a clean keeper cycle, a fill, the mark lag, and this launch's monitor (its market, a snapshot under 30 s old, process alive) sane: chain read, Live, keeper log read, 2 portfolios, 2 fresh buckets, no senior shortfall | — |
 
 Steps 1-5 are `staging step <name> <config> <cluster> <run dir>`: the R2
 setup code (`staging/src/main.rs`), split into steps (`staging/src/launch.rs`).
@@ -67,7 +67,14 @@ existing accounts are not recreated, and `InitMarket`, the policies, the
 insurance seed, the backing top-up and the deposits are skipped when the
 market already shows them (control sequences, bucket status, portfolio
 capital). Bots already running are left alone. A run dir is bound to one
-program id.
+program id, one chain (genesis hash) and one collateral mint; anything else
+needs a fresh run dir. `state.json` is written atomically. The LP and trader
+portfolio keys are saved in `keys/` before anything is sent, and creation +
+`InitPortfolio` is one transaction, so a crash (or a lost `state.json`)
+resumes on the same portfolio and never deposits twice. Restarted bots read
+the trader's open position back from the chain. Mainnet is decided by the
+RPC's genesis hash inside the binary too, so a direct `staging step|bots`
+call with a mislabeled cluster is refused.
 
 **Safety.** Mainnet needs a non-empty `program_id`, `--mainnet-i-understand`
 and an RPC whose genesis is mainnet's; local and devnet refuse an RPC whose
@@ -115,6 +122,9 @@ deviation.
 - The pusher logs `{"event":"mark_lag","ms":…}` per push; the monitor
   exports it as `percolator_keeper_mark_lag_ms` (it reads the bots log) and
   `monitor/alerts.yml` alerts `PusherMarkLagHigh` above 400 ms for 5 min.
+  The lag gauge keeps its last value if pushes stop, so the monitor also
+  exports `percolator_keeper_mark_push_age_seconds` (from the event's
+  `at_ms`), and `PusherMarkStale` fires when no push has landed for 2 min.
   The health check prints p50 and max over 5 pushes; over target it warns
   (`LAUNCH_LAG_STRICT=1` fails).
 - **Price source:** `price_source = "pyth"` (devnet, mainnet) reads the
@@ -197,8 +207,11 @@ One server; `deploy/`:
   with `deploy/prometheus.yml` (targets 127.0.0.1) and
   `deploy/alertmanager.yml`. `percolator-staging@.service` stays for R2.
 - Env: `LAUNCH_CLUSTER`, `LAUNCH_RPC_URL` (the paid RPC),
-  `PERCOLATOR_PROGRAM_ID`, `LAUNCH_RUN_DIR`, `TELEGRAM_BOT_TOKEN`,
-  `TELEGRAM_CHAT_ID`.
+  `PERCOLATOR_PROGRAM_ID`, `LAUNCH_RUN_DIR`, `LAUNCH_UID`/`LAUNCH_GID`
+  (owner of the run dir; Compose runs the bots and monitor as that user so
+  the 0600 keys stay private), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+  `deploy/.env` never enters the Docker build context (`.dockerignore`), and
+  logs show the RPC host only, never its credentials.
 - The run dir from the launch (state.json + keys/) is copied to the host.
   Mainnet: only the hot keys of `ops/KEYS.md`, placed on their host.
 - **Keeper:** inside the bots process (`drip::cycle`, the keeper's own

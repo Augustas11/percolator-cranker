@@ -204,6 +204,19 @@ impl Staging {
         matches!(self.rpc.simulate_transaction(&tx), Ok(r) if r.value.err.is_none())
     }
 
+    /// Create and InitPortfolio `kp` for `owner` in one tx (same account
+    /// layout as `drip::setup::create_portfolio`).
+    fn create_portfolio(&self, owner: &Keypair, kp: &Keypair) -> Result<()> {
+        let len = state::portfolio_account_len_for_market_slots(1).map_err(|e| anyhow!("{e:?}"))?;
+        let rent = self.rpc.get_minimum_balance_for_rent_exemption(len)?;
+        let create = system_instruction::create_account(&self.payer.pubkey(), &kp.pubkey(), rent, len as u64, &self.program_id);
+        let init = self.prog_ix(
+            P::InitPortfolio,
+            vec![AccountMeta::new(owner.pubkey(), true), AccountMeta::new(self.market, false), AccountMeta::new(kp.pubkey(), false)],
+        );
+        self.send(&[create, init], &[kp, owner]).context("create portfolio")
+    }
+
     fn prog_ix(&self, ix: P, accounts: Vec<AccountMeta>) -> Instruction {
         Instruction { program_id: self.program_id, accounts, data: ix.encode() }
     }
@@ -512,7 +525,11 @@ impl Staging {
         }
         let lag = lag.unwrap_or_default();
         if self.keeper_log {
-            println!("{{\"event\":\"mark_lag\",\"ms\":{lag},\"target_ms\":{}}}", self.cfg.oracle.lag_target_ms);
+            println!(
+                "{{\"event\":\"mark_lag\",\"ms\":{lag},\"target_ms\":{},\"at_ms\":{}}}",
+                self.cfg.oracle.lag_target_ms,
+                launch::now_ms()
+            );
         }
         self.mark = mark;
         self.last_push_slot = now;
@@ -787,7 +804,7 @@ fn main() -> Result<()> {
 fn r2_setup() -> Result<Staging> {
     let url = env::var("STAGING_RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:8799".into());
     if url.to_lowercase().contains("mainnet") {
-        bail!("refusing a mainnet RPC: {url}");
+        bail!("refusing a mainnet RPC: {}", launch::redact(&url));
     }
     let cfg = launch::load(&env::var("STAGING_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.into()))?;
     let program_id = Pubkey::from_str(&env::var("PERCOLATOR_PROGRAM_ID").context("PERCOLATOR_PROGRAM_ID must be set")?)?;
@@ -795,7 +812,7 @@ fn r2_setup() -> Result<Staging> {
         .unwrap_or_else(|_| format!("{}/.config/solana/id.json", env::var("HOME").unwrap_or_default()));
     let payer = read_keypair_file(&payer_path).map_err(|e| anyhow!("read payer {payer_path}: {e}"))?;
     let rpc = RpcClient::new_with_commitment(url.clone(), CommitmentConfig::confirmed());
-    rpc.get_version().with_context(|| format!("connect to {url}"))?;
+    rpc.get_version().with_context(|| format!("connect to {}", launch::redact(&url)))?;
     Staging::setup(cfg, rpc, program_id, payer)
 }
 
@@ -809,7 +826,7 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
     let max_consec: u64 = env_or("STAGING_MAX_CONSEC_FAIL", 10);
     println!(
         "staging SOL-PERP: rpc={} program={} usdc_mint={} market={} lp={} trader={} hours={hours} tick_ms={tick_ms} backing_tenor_slots={}",
-        st.rpc.url(), st.program_id, st.mint, st.market, st.lp_pf, st.trader_pf, st.tenor
+        launch::redact(&st.rpc.url()), st.program_id, st.mint, st.market, st.lp_pf, st.trader_pf, st.tenor
     );
     if st.keeper_log {
         // drip's boot line: the monitor discovers the market from it.

@@ -13,6 +13,8 @@ services:
     build: { context: .., dockerfile: deploy/Dockerfile }
     image: percolator-launch:local
     restart: on-failure
+    # Run as the owner of the run dir, so its 0600 keys stay 0600 and readable.
+    user: "${LAUNCH_UID:?set LAUNCH_UID (id -u of the run dir owner)}:${LAUNCH_GID:?set LAUNCH_GID}"
     environment: [LAUNCH_CLUSTER, LAUNCH_RPC_URL, PERCOLATOR_PROGRAM_ID]
     volumes: ["${LAUNCH_RUN_DIR:?set LAUNCH_RUN_DIR}:/run-dir"]
     entrypoint: ["/bin/sh", "-c"]
@@ -22,6 +24,7 @@ services:
     image: percolator-launch:local
     depends_on: [bots]
     restart: on-failure   # exits until bots.log names the market
+    user: "${LAUNCH_UID:?set LAUNCH_UID}:${LAUNCH_GID:?set LAUNCH_GID}"
     environment: [LAUNCH_RPC_URL, PERCOLATOR_PROGRAM_ID]
     volumes: ["${LAUNCH_RUN_DIR:?set LAUNCH_RUN_DIR}:/run-dir:ro"]
     entrypoint: ["/bin/sh", "-c"]

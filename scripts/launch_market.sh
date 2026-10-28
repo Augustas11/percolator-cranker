@@ -70,6 +70,8 @@ print(c)' "$CONFIG" "$1"; }
   die "config pins differ from scripts/pins.env (the source of truth): update both, then scripts/fetch_upstream.sh"
 RPC="${LAUNCH_RPC_URL:-$(cfg "cluster.$CLUSTER.rpc")}"  # a paid RPC stays out of the config
 [ -n "$RPC" ] || die "[cluster.$CLUSTER] rpc is empty"
+# Paid RPC URLs carry credentials (userinfo, path or query): print the host only.
+RPC_SHOWN="$(printf '%s' "$RPC" | sed -E 's#^([a-z]+://)?([^@/?]*@)?([^/?]+).*#\1\3/...#')"
 PROGRAM_ID="$(cfg "cluster.$CLUSTER.program_id")"
 if [ -z "$PROGRAM_ID" ] && [ "$CLUSTER" = local ]; then
   PROGRAM_ID="$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")"
@@ -77,16 +79,16 @@ fi
 [ -n "$PROGRAM_ID" ] || die "[cluster.$CLUSTER] program_id is empty"
 export PERCOLATOR_PROGRAM_ID="$PROGRAM_ID"
 MAINNET_GENESIS="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
-genesis="$(solana genesis-hash -u "$RPC" 2>/dev/null)" || die "cannot reach $RPC"
+genesis="$(solana genesis-hash -u "$RPC" 2>/dev/null)" || die "cannot reach $RPC_SHOWN"
 if [ "$CLUSTER" = mainnet ]; then
   [ "${3:-}" = --mainnet-i-understand ] || die "mainnet needs --mainnet-i-understand"
-  [ "$genesis" = "$MAINNET_GENESIS" ] || die "$RPC is not mainnet"
+  [ "$genesis" = "$MAINNET_GENESIS" ] || die "$RPC_SHOWN is not mainnet"
   export LAUNCH_MAINNET_I_UNDERSTAND=1
 else
-  [ "$genesis" != "$MAINNET_GENESIS" ] || die "$RPC serves mainnet; refusing $CLUSTER"
+  [ "$genesis" != "$MAINNET_GENESIS" ] || die "$RPC_SHOWN serves mainnet; refusing $CLUSTER"
 fi
-solana program show -u "$RPC" "$PROGRAM_ID" >/dev/null 2>&1 || die "program $PROGRAM_ID is not deployed on $RPC"
-echo "==> $CLUSTER: rpc $RPC, program $PROGRAM_ID, run dir $RUN_DIR"
+solana program show -u "$RPC" "$PROGRAM_ID" >/dev/null 2>&1 || die "program $PROGRAM_ID is not deployed on $RPC_SHOWN"
+echo "==> $CLUSTER: rpc $RPC_SHOWN, program $PROGRAM_ID, run dir $RUN_DIR"
 
 if [ "${LAUNCH_SKIP_BUILD:-0}" != 1 ]; then
   echo "==> building staging + monitor"
@@ -145,9 +147,10 @@ timed "6 start-bots" start_bots
 # ---- step 7: health check
 health() {
   python3 -I - "$RUN_DIR/bots.log" "$FROM_LINE" "http://$LISTEN/snapshot.json" "$(cfg oracle.lag_target_ms)" \
-    "${LAUNCH_HEALTH_TIMEOUT:-180}" "${LAUNCH_LAG_STRICT:-0}" "$RUN_DIR/pids/bots.pid" "${LAUNCH_LAG_SAMPLES:-5}" <<'PY'
+    "${LAUNCH_HEALTH_TIMEOUT:-180}" "${LAUNCH_LAG_STRICT:-0}" "$RUN_DIR/pids/bots.pid" "${LAUNCH_LAG_SAMPLES:-5}" \
+    "$MARKET" "$RUN_DIR/pids/monitor.pid" <<'PY'
 import json, os, re, statistics, sys, time, urllib.request
-log, first, url, target, timeout, strict, pidfile, samples = sys.argv[1:]
+log, first, url, target, timeout, strict, pidfile, samples, market, monpid = sys.argv[1:]
 first, target, samples, deadline = int(first), int(target), int(samples), time.time() + int(timeout)
 while True:
     lines = open(log, errors="replace").read().splitlines()[first - 1:]
@@ -162,6 +165,9 @@ while True:
     try:
         snap = json.load(urllib.request.urlopen(url, timeout=3))
         k = snap.get("keeper") or {}
+        # Only this launch's monitor counts: the right market, a fresh snapshot.
+        if snap.get("market") != market: why.append(f"monitor serves market {snap.get('market')}, not {market}")
+        if time.time() - (snap.get("snapshot_unix_seconds") or 0) > 30: why.append("monitor snapshot stale")
         if snap.get("chain_read_ok") != 1: why.append("chain read failing")
         if snap.get("mode") != "live": why.append(f"market mode {snap.get('mode')}")
         if not k.get("log_ok"): why.append("keeper log not read")
@@ -171,11 +177,17 @@ while True:
     except Exception as e:
         why.append(f"monitor: {e}")
     if crank and fill and len(lags) >= samples and not why:
-        break
-    try:
-        os.kill(int(open(pidfile).read()), 0)
-    except Exception:
-        sys.exit("bots process exited; see bots.log")
+        # Checked once more after success: both processes still up.
+        alive = True
+        for pf in (pidfile, monpid):
+            try: os.kill(int(open(pf).read()), 0)
+            except Exception: alive = False
+        if alive: break
+    for pf, name in ((pidfile, "bots"), (monpid, "monitor")):
+        try:
+            os.kill(int(open(pf).read()), 0)
+        except Exception:
+            sys.exit(f"{name} process exited; see {name}.log")
     if time.time() > deadline:
         sys.exit(f"health: crank={crank} fill={fill} lag_samples={len(lags)} monitor={why or 'ok'}")
     time.sleep(2)

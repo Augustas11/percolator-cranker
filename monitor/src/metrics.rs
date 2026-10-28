@@ -163,6 +163,7 @@ pub fn render(s: &Value) -> String {
             "last_success_slot",
             "slots_since_last_success",
             "mark_lag_ms",
+            "mark_push_age_seconds",
         ] {
             emit(&format!("keeper_{field}"), vec![], &k[field], false);
         }
