@@ -543,6 +543,27 @@ targets):
 - [ ] Push a single commit to the owner-created repo. Tag `v0.1.0` once CI
       there is green.
 
+### R3. Liveness and solvency monitor — **DONE 2026-10-28 (local validator)**
+- [x] Read-only `monitor` bin (`cranker/src/monitor/`, `cranker/src/bin/monitor.rs`):
+      `/metrics`, `/snapshot.json`, dashboard at `/`, `--json` one-shot. No new
+      crates; tiny std HTTP server and JSON module.
+- [x] Metrics derived from source with engine `4db11a8c` citations
+      (`docs/MONITOR.md`): accounts and out-of-date reconciliation (portfolio
+      flags vs engine counters), keeper status, backing buckets including
+      Fresh-past-expiry-in-Live (the wedge), modes, resolved claims, unowned
+      collateral = engine `residual()` − `pnl_pos_tot` (all terms exact, raw
+      header read for `source_fresh_backing_total_num`), SPL vault vs engine
+      vault, funding.
+- [x] Opt-in keeper hooks: `CRANKER_STATUS_FILE` (atomic status file from
+      `cranker` and `live_shaped`), `CRANKER_FAULT_ACCOUNTS` (test hook,
+      `InjectedFault`, no tx). No cycle/scheduler semantics changed.
+- [x] `cranker/monitor/alerts.yml` (YAML-checked; promtool not installed).
+- [x] Validated on the local validator: injected-fault quarantine alert and
+      stopped-keeper alerts (status stale, no progress) both fire; evidence
+      in `docs/MONITOR.md` → Validation.
+- [x] Exported via `scripts/export_public.sh`; `check_public_tree.sh` passes.
+- [ ] Run `promtool check rules` where Prometheus is installed.
+
 ### M3. Pre-deployment readiness (only relevant once devnet deployment appears)
 - [ ] Real keeper portfolio funded on the target chain.
 - [ ] Oracle account subscriptions wired (not stubbed).

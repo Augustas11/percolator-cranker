@@ -86,6 +86,8 @@ The load scenario uses the running validator and never resets it:
 | `CRANKER_SCENARIO` | — | `live_shaped` runs the load scenario from the main binary |
 | `CRANKER_SCENARIO_SEED` / `_TRADERS` / `_ASSETS` | fixed / 40 / 3 | Scenario shape |
 | `CRANKER_SCENARIO_DUMP_DIR` | — | Save market and portfolio bytes whenever an account is quarantined |
+| `CRANKER_STATUS_FILE` | — | Write a JSON status file after every cycle (atomic). Read by the monitor. |
+| `CRANKER_FAULT_ACCOUNTS` | — | **Test hook.** `pk,pk,…` or `@file`: report `Failed{InjectedFault}` for these accounts without sending a tx |
 
 **Keys.** The keeper signs with `~/.config/solana/id.json`, a local
 validator key. The integration tests read `PERCOLATOR_TEST_PAYER` when it is
@@ -117,6 +119,12 @@ Quarantine events are single JSON lines:
 `plan_class` is the keeper's own label. The engine's chosen plan isn't
 visible from outside the transaction.
 
+### Monitoring
+
+The `monitor` binary is a read-only liveness and solvency monitor: it
+serves Prometheus `/metrics`, `/snapshot.json` and a dashboard, and ships
+alert rules. See [MONITOR.md](MONITOR.md).
+
 ## 7. Re-pinning when upstream moves
 
 1. Fetch upstream and diff the wrapper and engine source between the old
@@ -145,6 +153,7 @@ visible from outside the transaction.
     `Stale`. The account can't be refreshed or liquidated until the market
     resolves.
   - The keeper quarantines such accounts and keeps the rest progressing.
+    The monitor alerts on it (`FreshBucketPastExpiryInLive`).
     `live_shaped` reports the failure honestly.
 - **Residual value at CloseSlab.** Backing principal that lapses unused
   goes to the residual pool, and `CloseSlab` burns claim-free residue. The

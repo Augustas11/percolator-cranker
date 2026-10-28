@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keeper Monitor</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
+    --line: #e2e2dc; --ok: #1f7a4d; --warn: #9a6400; --bad: #b3261e;
+    --ok-bg: #e6f4ec; --warn-bg: #fdf1dc; --bad-bg: #fbe5e3;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --panel: #1f1f1d; --text: #ececea; --muted: #9a9a94;
+      --line: #33332f; --ok: #6fd39d; --warn: #f0b85a; --bad: #ff8a80;
+      --ok-bg: #18301f; --warn-bg: #36290f; --bad-bg: #3a1a17;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+  header { padding: 16px; border-bottom: 1px solid var(--line); display: flex;
+           flex-wrap: wrap; gap: 8px 24px; align-items: baseline; }
+  h1 { font-size: 18px; margin: 0; }
+  .meta { color: var(--muted); font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+  main { padding: 16px; display: grid; gap: 16px;
+         grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+            padding: 12px 14px; min-width: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+       margin: 0 0 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { padding: 3px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  td.n { text-align: right; font-family: var(--mono); white-space: nowrap; }
+  .scroll { overflow-x: auto; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+  .ok { color: var(--ok); background: var(--ok-bg); }
+  .warn { color: var(--warn); background: var(--warn-bg); }
+  .bad { color: var(--bad); background: var(--bad-bg); }
+  #alerts { grid-column: 1 / -1; }
+  #alerts ul { margin: 0; padding-left: 18px; }
+  .err { color: var(--bad); font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+  code { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Keeper monitor</h1>
+  <span class="meta" id="hdr">loading…</span>
+</header>
+<main>
+  <section id="alerts"><h2>Conditions</h2><div id="alert-body">…</div></section>
+  <section><h2>Market</h2><div id="market"></div></section>
+  <section><h2>Keeper</h2><div id="keeper"></div></section>
+  <section><h2>Accounts</h2><div id="accounts"></div></section>
+  <section><h2>Unowned collateral</h2><div id="unowned"></div></section>
+  <section><h2>Assets</h2><div class="scroll" id="assets"></div></section>
+  <section><h2>Backing buckets</h2><div class="scroll" id="buckets"></div></section>
+  <section><h2>Quarantined accounts</h2><div class="scroll" id="quarantine"></div></section>
+  <section><h2>Resolved claims</h2><div id="resolved"></div></section>
+</main>
+<script>
+// Thresholds mirror monitor/alerts.yml defaults.
+const T = { quarantineSeconds: 600, statusStaleSeconds: 120, noProgressSlots: 750 };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const kv = rows => '<table>' + rows.map(([k, v]) =>
+  `<tr><th>${esc(k)}</th><td class="n">${v === null || v === undefined ? '–' : esc(v)}</td></tr>`).join('') + '</table>';
+const table = (cols, rows) => rows.length === 0 ? '<span class="meta">none</span>' :
+  '<table><tr>' + cols.map(c => `<th>${esc(c)}</th>`).join('') + '</tr>' +
+  rows.map(r => '<tr>' + r.map(v => `<td class="n">${esc(v)}</td>`).join('') + '</tr>').join('') + '</table>';
+const short = pk => pk.length > 12 ? pk.slice(0, 6) + '…' + pk.slice(-4) : pk;
+
+function conditions(s) {
+  const out = [];
+  const c = s.chain, k = s.keeper, d = s.keeper_derived;
+  if (!c) out.push(['bad', 'chain read failed: ' + (s.chain_error || '')]);
+  if (s.keeper_error) out.push(['bad', 'status file: ' + s.keeper_error]);
+  if (d.status_age_seconds !== null && d.status_age_seconds > T.statusStaleSeconds)
+    out.push(['bad', `keeper status file stale: ${Math.round(d.status_age_seconds)} s`]);
+  if (d.slots_since_last_progress !== null && d.slots_since_last_progress > T.noProgressSlots)
+    out.push(['bad', `no successful crank for ${d.slots_since_last_progress} slots`]);
+  if (k) for (const q of k.quarantined) {
+    const age = (s.taken_unix_ms - q.since_unix_ms) / 1000;
+    out.push([age > T.quarantineSeconds ? 'bad' : 'warn',
+      `account ${short(q.account)} quarantined ${Math.round(age)} s (${q.error}, strike ${q.strike})`]);
+  }
+  if (c) {
+    const b = c.bucket_counts;
+    if (b.fresh_past_expiry_in_live > 0)
+      out.push(['bad', `${b.fresh_past_expiry_in_live} Fresh bucket(s) past expiry in Live` +
+        ` (${b.fresh_past_expiry_in_live_unreferenced} unreferenced)`]);
+    if (b.expiring_with_liens > 0)
+      out.push(['warn', `${b.expiring_with_liens} bucket(s) expiring with liens outstanding`]);
+    if (c.unowned_collateral.senior_shortfall !== '0' && c.unowned_collateral.senior_shortfall !== 0)
+      out.push(['bad', `senior claims exceed vault by ${c.unowned_collateral.senior_shortfall}`]);
+  }
+  return out;
+}
+
+function render(s) {
+  const c = s.chain, k = s.keeper, d = s.keeper_derived;
+  document.getElementById('hdr').textContent =
+    `market ${s.market} · ` + (c ? `slot ${c.slot} · ` : '') + new Date(s.taken_unix_ms).toLocaleTimeString();
+  const conds = conditions(s);
+  document.getElementById('alert-body').innerHTML = conds.length === 0
+    ? '<span class="pill ok">all clear</span>'
+    : '<ul>' + conds.map(([lvl, msg]) => `<li><span class="pill ${lvl}">${lvl === 'bad' ? 'alert' : 'watch'}</span> ${esc(msg)}</li>`).join('') + '</ul>';
+
+  document.getElementById('market').innerHTML = c ? kv([
+    ['mode', c.mode], ['chain slot', c.slot], ['engine current_slot', c.header_current_slot],
+  ]) : `<div class="err">${esc(s.chain_error)}</div>`;
+
+  document.getElementById('keeper').innerHTML = k ? kv([
+    ['status age (s)', d.status_age_seconds], ['cycle', k.cycle],
+    ['last cycle progress / idle / failed', `${k.last_cycle.progressed} / ${k.last_cycle.idle} / ${k.last_cycle.failed}`],
+    ['cycles progress / idle / failed', `${k.totals.cycles_progress} / ${k.totals.cycles_idle} / ${k.totals.cycles_failed}`],
+    ['crank CU p50 / max', `${d.cu_p50 ?? '–'} / ${d.cu_max ?? '–'}`],
+    ['last progress slot', k.last_progress_slot], ['slots since progress', d.slots_since_last_progress],
+    ['quarantined', k.quarantined.length],
+  ]) : `<span class="meta">${esc(s.keeper_error || 'no status file configured')}</span>`;
+
+  if (!c) return;
+  const a = c.accounts;
+  document.getElementById('accounts').innerHTML = kv([
+    ['total (discovered)', a.total], ['engine materialized_portfolio_count', a.materialized_portfolio_count],
+    ['out of date (any engine flag/leg)', a.out_of_date],
+    ['stale_state: portfolios / engine counter', `${a.stale_state} / ${a.stale_certificate_count}`],
+    ['b_stale_state: portfolios / engine counter', `${a.b_stale_state} / ${a.b_stale_account_count}`],
+    ['K/F stale cohort: legs / engine counts', `${a.kf_stale_cohort_observed} / ${a.kf_stale_cohort_engine}`],
+    ['keeper estimate liquidatable / pending', `${a.liquidatable_estimate} / ${a.pending_estimate}`],
+    ['legs with sub-atom F remainder (not work)', a.f_subatom_legs],
+  ]);
+  const u = c.unowned_collateral;
+  document.getElementById('unowned').innerHTML = kv([
+    ['engine vault', u.vault], ['SPL vault balance', u.spl_vault_balance],
+    ['SPL − engine vault', u.spl_vault_minus_engine_vault],
+    ['c_tot', u.c_tot], ['insurance', u.insurance],
+    ['backing provider earnings', u.backing_provider_earnings_total],
+    ['fresh backing (atoms)', u.source_fresh_backing_total_atoms],
+    ['residual', u.residual], ['pnl_pos_tot', u.pnl_pos_tot], ['pnl_pos_bound_tot', u.pnl_pos_bound_tot],
+    ['unowned = residual − pnl_pos_tot', u.unowned],
+    ['residual − pnl_pos_bound_tot', u.unowned_vs_bound],
+  ]);
+  document.getElementById('assets').innerHTML = table(
+    ['asset', 'lifecycle', 'last accrual', 'slots since', 'K/F stale L/S (engine)', 'legs L/S'],
+    c.assets.map(x => [x.asset, x.lifecycle, x.slot_last, x.slots_since_accrual,
+      `${x.stale_account_count_long}/${x.stale_account_count_short}`,
+      `${x.stale_legs_observed_long}/${x.stale_legs_observed_short}`]));
+  document.getElementById('buckets').innerHTML = table(
+    ['asset', 'side', 'status', 'slots to expiry', 'liened num', 'referenced'],
+    c.buckets.filter(b => b.status !== 'empty').map(b =>
+      [b.asset, b.side, b.status, b.status === 'fresh' ? b.slots_to_expiry : '–', b.valid_liened_backing_num, b.referenced]));
+  document.getElementById('quarantine').innerHTML = k ? table(
+    ['account', 'error', 'strike', 'until cycle', 'age (s)'],
+    k.quarantined.map(q => [short(q.account), q.error, q.strike, q.until_cycle,
+      Math.round((s.taken_unix_ms - q.since_unix_ms) / 1000)])) : '<span class="meta">–</span>';
+  const r = c.resolved_claims;
+  document.getElementById('resolved').innerHTML = r ? kv([
+    ['claimants not yet paid', r.claimants_unpaid], ['open / finalized receipts', `${r.receipts_open} / ${r.receipts_finalized}`],
+    ['receipt face remaining', r.receipt_face_remaining_atoms], ['claimable now (ledger rate)', r.receipt_claimable_now_atoms],
+    ['capital still held', r.capital_atoms], ['unreceipted positive PnL (face)', r.unreceipted_positive_pnl_atoms],
+    ['payout halted', r.ledger_payout_halted],
+  ]) : '<span class="meta">market is not Resolved</span>';
+}
+
+async function tick() {
+  try {
+    const res = await fetch('snapshot.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error(res.status + ' ' + (await res.text()));
+    render(await res.json());
+  } catch (e) {
+    document.getElementById('hdr').textContent = 'fetch failed: ' + e.message;
+  }
+}
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>

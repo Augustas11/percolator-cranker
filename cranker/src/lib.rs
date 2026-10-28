@@ -7,6 +7,7 @@
 pub mod binding;
 pub mod cycle;
 pub mod discovery;
+pub mod monitor;
 pub mod observation;
 pub mod plan_gate;
 pub mod quarantine;

@@ -51,6 +51,9 @@ put_dir() {
 put cranker/Cargo.toml          crates/cranker/Cargo.toml
 put_dir cranker/src             crates/cranker/src   -name '*.rs'
 put_dir cranker/tests           crates/cranker/tests -name '*.rs'
+# monitor assets (the dashboard is embedded in the `monitor` bin)
+put cranker/monitor/dashboard.html crates/cranker/monitor/dashboard.html
+put cranker/monitor/alerts.yml     crates/cranker/monitor/alerts.yml
 # M1 bring-up client
 put client/Cargo.toml           crates/bringup/Cargo.toml
 put_dir client/src              crates/bringup/src   -name '*.rs'
@@ -63,6 +66,8 @@ put scripts/pins.env            scripts/pins.env
 # the same CI pipeline as this repo (layout-neutral via scripts/env.sh;
 # public/scripts/env.sh sets the public layout)
 put .github/workflows/ci.yml    .github/workflows/ci.yml
+# monitor docs (shared with the private tree, not an overlay copy)
+put docs/MONITOR.md             docs/MONITOR.md
 # public-only overlay (README, docs, CI, workspace, env.sh, pins, fetch)
 (cd "$SRC/public" && find . -type f) | while read -r f; do
   put "public/${f#./}" "${f#./}"

@@ -50,6 +50,7 @@ use super::chain::{token_amount, Chain, TxError};
 use super::rng::SplitMix64;
 use crate::binding::{self, BindingSnapshot};
 use crate::cycle::{self, CrankCtx, CuStats, SubmissionRecord};
+use crate::monitor::status::StatusWriter;
 use crate::observation;
 use crate::quarantine::{Quarantine, QuarantineConfig};
 use crate::scheduler::CycleBudget;
@@ -1851,6 +1852,8 @@ pub fn run() -> Result<ScenarioReport> {
     let mut liquidatable: BTreeSet<Pubkey> = BTreeSet::new();
     let reward_key = w.reward;
     let exclude: Vec<Pubkey> = Vec::new();
+    // Opt-in keeper status file for the monitor (CRANKER_STATUS_FILE).
+    let mut status = StatusWriter::from_env(&w.market);
 
     for cycle in 0..w.cfg.cycles {
         let ph = w.phases;
@@ -1932,6 +1935,9 @@ pub fn run() -> Result<ScenarioReport> {
             };
             Some(cycle::run_one_cycle(&ctx, cycle, &budget, &mut quarantine, &mut records, &mut cu)?)
         };
+        if let (Some(st), Some(s)) = (status.as_mut(), summary.as_ref()) {
+            st.record(s, &records[first..], &quarantine);
+        }
         let after = fetch_portfolios(&rpc, &keys)?;
         let g = if w.report.close_slab { None } else { Some(w.observe_market(&f0)?) };
 

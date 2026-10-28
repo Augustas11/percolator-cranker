@@ -177,6 +177,36 @@ enum Plan {
     OwnerWindow,
     /// Could not build hints for this account. Failed, no tx.
     HintError(String),
+    /// TEST HOOK (`CRANKER_FAULT_ACCOUNTS`): report a synthetic failure for
+    /// this account without submitting anything.
+    InjectedFault,
+}
+
+/// Synthetic error reported for accounts named by the test hook.
+pub const INJECTED_FAULT_ERROR: &str = "InjectedFault";
+
+/// **Test hook, off unless set.** `CRANKER_FAULT_ACCOUNTS=<pk,pk,...>` makes
+/// the cycle report `Failed { error: "InjectedFault" }` for those accounts
+/// without sending a transaction, so monitoring and quarantine can be
+/// validated against a healthy market. `CRANKER_FAULT_ACCOUNTS=@<file>`
+/// reads the same comma/whitespace-separated list from a file, re-read every
+/// cycle, so a fault can be injected into a keeper that is already running.
+/// Unparseable entries are ignored. Real failure paths are untouched.
+pub fn injected_fault_accounts() -> Vec<Pubkey> {
+    let Ok(v) = std::env::var("CRANKER_FAULT_ACCOUNTS") else {
+        return Vec::new();
+    };
+    let list = match v.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
+        None => v,
+    };
+    parse_pubkey_list(&list)
+}
+
+fn parse_pubkey_list(s: &str) -> Vec<Pubkey> {
+    s.split(|c: char| c == ',' || c.is_whitespace())
+        .filter_map(|t| t.trim().parse::<Pubkey>().ok())
+        .collect()
 }
 
 /// Run one full cycle against `ctx.market`.
@@ -213,6 +243,7 @@ pub fn run_one_cycle(
         && now_slot.saturating_sub(group.resolved_slot) < cfg.force_close_delay_slots;
     let payer = ctx.payer.pubkey();
 
+    let faults = injected_fault_accounts();
     let mut plans = std::collections::HashMap::new();
     let mut candidates = Vec::with_capacity(ranked.len());
     for p in &ranked {
@@ -222,6 +253,7 @@ pub fn run_one_cycle(
         let owner = p.owner().unwrap_or_default();
         let (plan, plan_class) =
             match plan_hints(&group, &market_data, &p.account.data, ctx.pyth, now_slot) {
+                _ if faults.contains(&p.pubkey) => (Plan::InjectedFault, "test:injected-fault".to_string()),
                 Err(e) => (Plan::HintError(format!("HintError: {e}")), "hint-error".to_string()),
                 Ok(_) if owner_window && owner != payer => {
                     (Plan::OwnerWindow, "resolved:owner-window".to_string())
@@ -266,6 +298,15 @@ pub fn run_one_cycle(
             ),
             Some(Plan::OwnerWindow) | None => return Ok((Attempt::Idle { cu: 0 }, 0)),
             Some(Plan::HintError(e)) => return Ok((Attempt::Failed { error: e.clone(), cu: 0 }, 0)),
+            Some(Plan::InjectedFault) => {
+                return Ok((
+                    Attempt::Failed {
+                        error: INJECTED_FAULT_ERROR.into(),
+                        cu: 0,
+                    },
+                    0,
+                ))
+            }
         };
         let mut outcomes = Vec::new();
         let mut rpc_error = None;
@@ -391,6 +432,14 @@ mod tests {
             *program_cu = None;
         }
         assert_eq!(attempt_from(&[o], None), Attempt::Idle { cu: UNKNOWN_CU_CHARGE });
+    }
+
+    #[test]
+    fn fault_list_parses_commas_and_whitespace() {
+        let a = Pubkey::new_unique();
+        let b = Pubkey::new_unique();
+        assert_eq!(parse_pubkey_list(&format!("{a}, {b}\nnot-a-key")), vec![a, b]);
+        assert!(parse_pubkey_list("").is_empty());
     }
 
     #[test]

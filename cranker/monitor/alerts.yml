@@ -1,0 +1,82 @@
+# Prometheus rules for the reference keeper monitor (bin `monitor`).
+# Metric meanings and sources: docs/MONITOR.md.
+#
+# Tunable defaults (edit the literals):
+#   quarantine age            600 s   (10 minutes)
+#   unowned-collateral drift  1000 atoms per hour (recording rule below)
+#   no successful crank       750 slots (about 5 minutes at 400 ms slots)
+#   status file stale         120 s
+# `window_slots` on the bucket metrics is the monitor's --expiry-warn-slots.
+
+groups:
+  - name: percolator-keeper-recording
+    rules:
+      - record: percolator:unowned_collateral_drift_atoms_per_hour
+        expr: delta(percolator_unowned_collateral_atoms[1h])
+
+  - name: percolator-keeper-alerts
+    rules:
+      - alert: KeeperAccountQuarantined
+        expr: max by (market, account, error) (percolator_keeper_account_quarantined_seconds) > 600
+        labels:
+          severity: warning
+        annotations:
+          summary: "Account {{ $labels.account }} unrefreshable or quarantined for more than 10 minutes"
+          description: "Last error {{ $labels.error }}. The keeper keeps the rest of the market progressing; check the quarantine JSON lines and the account bytes."
+
+      - alert: UnownedCollateralDrift
+        expr: abs(percolator:unowned_collateral_drift_atoms_per_hour) > 1000
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unowned collateral moved {{ $value }} atoms in the last hour on {{ $labels.market }}"
+          description: "residual - pnl_pos_tot is drifting. Compare percolator_engine_header_atoms terms and the SPL vault balance."
+
+      - alert: BackingBucketExpiringWithLiens
+        expr: percolator_backing_buckets_expiring_with_liens > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} Fresh backing bucket(s) on {{ $labels.market }} expire within {{ $labels.window_slots }} slots with liens outstanding"
+          description: "Expiry turns liened Fresh backing into Impaired. See percolator_backing_bucket_slots_to_expiry and _valid_liened_num."
+
+      - alert: FreshBucketPastExpiryInLive
+        expr: percolator_backing_buckets_fresh_past_expiry_in_live > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} Fresh backing bucket(s) past expiry while {{ $labels.market }} is Live"
+          description: "Known engine-side wedge: an unreferenced lapsed bucket can block refresh until the market resolves (RUNBOOK, Known limitations). Unreferenced count: percolator_backing_buckets_fresh_past_expiry_in_live_unreferenced."
+
+      - alert: KeeperNoSuccessfulCrank
+        expr: percolator_keeper_slots_since_last_progress > 750
+        labels:
+          severity: warning
+        annotations:
+          summary: "No Progress crank on {{ $labels.market }} for {{ $value }} slots"
+          description: "Either the keeper is stuck or the market has no work. Check percolator_accounts_out_of_date and the keeper's last-cycle outcomes."
+
+      - alert: KeeperNeverProgressed
+        expr: percolator_keeper_status_ok == 1 unless on (market) percolator_keeper_last_progress_slot
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Keeper on {{ $labels.market }} has written status for 15 minutes without one Progress crank"
+
+      - alert: KeeperStatusFileStale
+        expr: percolator_keeper_status_age_seconds > 120 or percolator_keeper_status_ok == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Keeper status file on {{ $labels.market }} not updated for {{ $value }} s (or unreadable)"
+          description: "The keeper process has probably stopped. It rewrites the file after every cycle."
+
+      - alert: MonitorChainReadFailing
+        expr: percolator_monitor_chain_read_ok == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Monitor cannot read market {{ $labels.market }}"

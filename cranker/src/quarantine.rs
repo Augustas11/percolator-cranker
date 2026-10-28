@@ -198,6 +198,16 @@ impl Quarantine {
         &self.events
     }
 
+    /// Read-only view of one struck account: (last error, strikes,
+    /// until_cycle). `None` when the account has no strike. Used by the
+    /// opt-in status file; it does not change any quarantine decision.
+    pub fn struck_entry(&self, account: &Pubkey) -> Option<(&str, u32, u64)> {
+        self.entries
+            .get(account)
+            .filter(|e| e.strikes > 0)
+            .map(|e| (e.last_error.as_str(), e.strikes, e.until_cycle))
+    }
+
     /// Accounts that have ever been quarantined and are not cleared yet.
     pub fn struck_accounts(&self) -> Vec<Pubkey> {
         let mut v: Vec<Pubkey> = self

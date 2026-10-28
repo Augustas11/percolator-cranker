@@ -93,6 +93,8 @@ impl CycleBudget {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CycleSummary {
     pub cycle: u64,
+    /// Slot the cycle was planned at (the `slot` passed to `run_cycle`).
+    pub slot: u64,
     pub progressed: usize,
     pub idle: usize,
     pub failed: usize,
@@ -186,6 +188,7 @@ where
     let started = Instant::now();
     let mut s = CycleSummary {
         cycle,
+        slot,
         ..CycleSummary::default()
     };
     let ordered = apply_quiet_reserve(order_candidates(candidates, cycle), budget.max_submissions);

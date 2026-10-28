@@ -27,6 +27,7 @@ use percolator::AutoCrankPlanV16;
 use percolator_cranker::{
     binding::{self, SOURCE_LIEN_DRAIN_MAX_STEPS, V16_LAYOUT_DISCRIMINATOR},
     cycle::{self, CrankCtx, CuStats, SubmissionRecord, HINT_BUDGET},
+    monitor::status::StatusWriter,
     observation, plan_gate,
     quarantine::{Quarantine, QuarantineConfig},
     scheduler::CycleBudget,
@@ -140,6 +141,8 @@ fn main() -> Result<()> {
     };
     let mut records: Vec<SubmissionRecord> = Vec::new();
     let mut cu = CuStats::default();
+    // Opt-in keeper status file for the monitor (CRANKER_STATUS_FILE).
+    let mut status = StatusWriter::from_env(&env.market);
     let (mut progressed, mut idle, mut failed) = (0usize, 0usize, 0usize);
     for cycle in 0..cycles {
         println!("\n---- cycle {cycle} ----");
@@ -150,6 +153,9 @@ fn main() -> Result<()> {
             log_outcome(r);
         }
         println!("{}", summary.line());
+        if let Some(w) = status.as_mut() {
+            w.record(&summary, &records[first..], &quarantine);
+        }
         progressed += summary.progressed;
         idle += summary.idle;
         failed += summary.failed;
