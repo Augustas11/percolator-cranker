@@ -5,7 +5,7 @@ against your actual prep state. Edit freely; the watcher reads but does not
 overwrite. (The watcher may append a `## Watcher notes` block at the bottom each
 run with what changed wrapper-side relative to this state.)
 
-Last reviewed by you: **2026-06-23 — positioning locked: open-source reference cranker + service operator** · **M1 prototype completed same day** · **2026-06-26 — re-pinned M1 against wrapper `acd5c0c` + engine `83387267`, M2 plan revised for the new no-observation-progress surface.** · **2026-07-07 — absorbed 2026-07-01 + 2026-07-06 digests, re-pinned to wrapper `62c8abf` + engine `c8aab33`, M2 cranker built in `./cranker/` and validated end-to-end, Q4 answered (real `AssetOracleProfileV16` walk + Pyth PDA resolver added), Q5 CLOSED, Q6 CLOSED (cranker withdrawal identical to user withdrawal — 1200-atom fee accrual + 100-atom Withdraw verified end-to-end; no portfolio-owner-rotation instruction exists → operator key rotation costs a Close+Init cycle). Only Q1 (no `msg!` for plan variant) + Q2 (v1.52 tooling) remain open; both are low-priority observability/tooling issues.** · **2026-07-13 — drift inspection against upstream `master`/`main`: DRAFT PR #92 MERGED as `b97e174`/`970ddc5` on 2026-07-10, deleting `close_q` from `PermissionlessCrank`. Our client + cranker code now fails to compile against `origin/main`. Wrapper up 6 commits (`62c8abf → 186e9c6`), engine up 6 commits (`c8aab33 → 143e68c`), all inspected. Prep.md assumption block updated to reflect the merged shape; re-pin + code fix deferred pending user go/no-go.** · **2026-09-11 — executed revised M2.i: wrapper `d5e2ec6f` (#135) + engine pin `495a5590` (deliberate wrapper pin, one behind master tip `8eb7142a` / #195). `close_q` deleted; Deposit/Withdraw/Close*/fee-policy bind `portfolio_id` / sequence / `authority_epoch`; layout 18 + A6 one-domain drain loop. Dry-run only. M3 still NO-GO.**
+Last reviewed by you: **2026-06-23 — positioning locked: open-source reference cranker + service operator** · **M1 prototype completed same day** · **2026-06-26 — re-pinned M1 against wrapper `acd5c0c` + engine `83387267`, M2 plan revised for the new no-observation-progress surface.** · **2026-07-07 — absorbed 2026-07-01 + 2026-07-06 digests, re-pinned to wrapper `62c8abf` + engine `c8aab33`, M2 cranker built in `./cranker/` and validated end-to-end, Q4 answered (real `AssetOracleProfileV16` walk + Pyth PDA resolver added), Q5 CLOSED, Q6 CLOSED (cranker withdrawal identical to user withdrawal — 1200-atom fee accrual + 100-atom Withdraw verified end-to-end; no portfolio-owner-rotation instruction exists → operator key rotation costs a Close+Init cycle). Only Q1 (no `msg!` for plan variant) + Q2 (v1.52 tooling) remain open; both are low-priority observability/tooling issues.** · **2026-07-13 — drift inspection against upstream `master`/`main`: DRAFT PR #92 MERGED as `b97e174`/`970ddc5` on 2026-07-10, deleting `close_q` from `PermissionlessCrank`. Our client + cranker code now fails to compile against `origin/main`. Wrapper up 6 commits (`62c8abf → 186e9c6`), engine up 6 commits (`c8aab33 → 143e68c`), all inspected. Prep.md assumption block updated to reflect the merged shape; re-pin + code fix deferred pending user go/no-go.** · **2026-09-11 — executed revised M2.i: wrapper `d5e2ec6f` (#135) + engine pin `495a5590` (deliberate wrapper pin, one behind master tip `8eb7142a` / #195). `close_q` deleted; Deposit/Withdraw/Close*/fee-policy bind `portfolio_id` / sequence / `authority_epoch`; layout 18 + A6 one-domain drain loop. Dry-run only. M3 still NO-GO.** · **2026-10-28 — M2.j: re-pinned to wrapper `5cb331dd` + engine `4db11a8c` (prog #456 still draft; engine `68859b94` only as path-patched pre-merge preview). Resolved-mode backing hint, NonProgress = idle, per-account quarantine + cycle budget, `live_shaped` load scenario. Reference / dry-run only. M3 still NO-GO.**
 
 ---
 
@@ -317,6 +317,138 @@ once-only fix-up in `scripts/m1_bringup.sh` if this persists.
         `declare_id!`, RPC null). Fee shares remain test-only (bootstrap
         sets 5000 bps locally; upstream defaults still 0).
 
+- [x] **M2.j — Re-pin to the upstream "launch fixes" + stuck-account hardening. DONE 2026-10-28.**
+
+      **Pins (verified with `git rev-parse` + `Cargo.toml` on 2026-10-28):**
+
+      | Surface | Old (M2.i) | New default (Step A) | Pre-merge preview (Step B) |
+      |---|---|---|---|
+      | Wrapper `percolator-prog` | `d5e2ec6f` | `5cb331dde354517c6371a8acf92cecb194f3bb73` (`origin/main`) | `febc3731b7653544179a529e5a529ff137d5648f` (prog #456 head, `fix/repin-launch-fixes`) |
+      | Engine `percolator` rev | `495a5590` | `4db11a8cb0053815e23a35d3a7d3edc265d8d866` (wrapper Cargo pin) | `68859b94f58eb8e580ee685c933a49d3ccaffbfe` (master, 2026-10-27 merge batch), **path-patched** |
+
+      - Target rule: prog #456 is still an **open draft** (stack #452 → #454
+        → #456, none merged), so the default is Step A. Step B runs only via
+        `scripts/preview_launch_fixes.sh` (cwd-scoped `.cargo/config.toml`
+        `[patch]` under `.preview/`, gitignored). It is labeled "pre-merge
+        preview" and is never the default. When #456 merges: set `repo-prog`
+        to the new `origin/main`, copy its Cargo engine rev into
+        `cranker/Cargo.toml` + `client/Cargo.toml`, `cargo update -p
+        percolator`, re-run bring-up + 3 cycles.
+      - Stop-checks passed: `V16_LAYOUT_DISCRIMINATOR = 18` and the
+        `AutoCrankPlanV16` enum are byte-identical at `495a5590`, `4db11a8c`
+        and `68859b94`. No new plan class, chunk knob or phase enum.
+
+      **Upstream diff absorbed** (`git diff d5e2ec6f..5cb331dd -- src/v16_program.rs`;
+      engine `495a5590..4db11a8c` is 5 commits, `4db11a8c..68859b94` 60):
+      1. Resolved tag 5 takes ≤ 1 hint with `oracle_accounts == 0` →
+         `AutoCrankObservationV16 { asset_index, 0, 0 }`; engine advances one
+         backing bucket or returns NonProgress. Wire encoder unchanged; dispatch
+         now sends the due-bucket asset (`resolved.rs`, deadline =
+         `min(expiry_slot, resolved_slot + max(max_accrual_dt, h_max,
+         max_bankrupt_close_lifetime, 1))`, lapsed **Fresh** buckets only).
+         `EngineNonProgress` = idle. Resolved tag 5 routes through
+         `handle_close_resolved`, so account 0 = portfolio owner (signer only
+         inside `force_close_delay_slots`) and slots 3–6 carry the payout
+         (owner ATA, vault, vault authority, token program).
+         `CrankRoute::Resolved` builds that layout. Inside the window,
+         third-party portfolios are skipped as idle.
+      2. Recovery crank bumps `position_epoch` (`b40ffbd8`). Bindings are
+         re-read, never reused across cycles or after a mutating crank.
+         `SetMatcherConfig` now also binds `position_epoch` +
+         `asset_generation_frontier` (cranker doesn't send it).
+      3. No layout/plan change (above).
+      4. Exact funding (engine #227, only in `68859b94`): sub-atom F lag =
+         F-settled; `work::leg_f_settled` keeps such legs out of pending work.
+      5. Provider surplus withdraw (engine #223 / prog #454) rides the existing
+         `WithdrawBackingBucket` tag in Resolved mode when signed. Not a crank;
+         the cranker never calls it; nothing new to decode.
+      6. Live OI symmetry: nothing in cranker code/tests asserts it.
+
+      **Hardening:** per-account quarantine (same error × 3 → backoff 2, 4, 8 …
+      capped at 64 cycles, JSON event line); per-cycle wall/CU/tx budget with
+      liquidatable-first ordering and per-class rotation; Progress / Idle /
+      Failed reported separately in every cycle summary. Unit test
+      `scheduler::persistent_error_is_quarantined_and_others_progress` injects
+      a persistent `EngineCounterUnderflow` on one account for 20 cycles: the
+      5 others progress every cycle; the stuck one is tried < 10 times.
+
+      **Dry-run (2026-10-28):** `FORCE_SBF_REBUILD=1 ./scripts/m1_bringup.sh`
+      green; `CRANKER_CYCLES=3 cargo run --release --manifest-path
+      cranker/Cargo.toml` green (3 × idle). Preview script green (3 × idle).
+
+      **CU re-baseline (program CU, tx total in parens):**
+
+      | Path | Old pin | Step A | Step B preview |
+      |---|---|---|---|
+      | No-op `PermissionlessCrank` | 17,975 (18,299) | **18,565 (18,889)** | 18,820 (19,144) |
+      | No-op, 3 hints (live_shaped) | — | 41,695 (42,019) | 42,179 (42,503) |
+| Worst landed crank (live_shaped) | — | **409,225** | 402,701 |
+| Worst reverted crank (live_shaped) | — | 261,535 | 319,008 |
+
+      Upstream reference: prog #456 pins max-shape paths at ~566k
+      (`v16_cu`, 566_314 after `febc3731`).
+
+      **Load test `live_shaped`** (`scripts/live_shaped.sh`, or
+      `CRANKER_SCENARIO=live_shaped`). Seed `0x5eed1a7e20261028`, 40 traders
+      plus 3 makers, 3 AuthMark assets, 200 cycles, all driven by the real
+      `cycle::run_one_cycle`. Covered in the run: liquidations, lapsed
+      buckets, cross-asset netting, nonzero funding on all assets, asset 2
+      Recovery (shutdown and force-close), Resolve, every exit, and
+      CloseSlab. **Not reached:** an Impaired bucket, and market-wide
+      Recovery.
+
+      | Assertion | Step A (`4db11a8c`), 782 s | Preview (`68859b94`), 805 s |
+      |---|---|---|
+      | a. no account unrefreshable past the quarantine window | **FAIL**: 69 events, longest failure run 81 cycles against a bound of 67 (F1 + F1b) | **FAIL**: 72 events, all `EngineStale`, run 79 against a bound of 67 (F1 only) |
+      | b. every resolved claimant paid | **FAIL**: 1 of 44 (t28, equity 137,486) unpaid; it was wedged by F1 | PASS (43 owners paid) |
+      | c. vault holds only dust after exits | **FAIL**: 13,482,914 left against 8,000,528 allowed (lapsed principal + dust); ≈5.48M unexplained (F2) | **FAIL**: 9,127,703 left against 9,000,528 allowed + 48,674 insurance that couldn't be withdrawn; ≈78.5k unexplained; CloseSlab rejected `LockActive` |
+      | d. position epoch re-read after Recovery | PASS: epoch 1 → 2; ClosePortfolio with the stale epoch rejected `EngineStale`; re-read accepted | PASS |
+      | e. coverage | Impaired bucket missing | Impaired bucket missing |
+
+      Cranker totals (Step A): 2,079 txs; 634 progressed, 660 idle, 163
+      failed; 381 resolved hints sent. The failures sit on F1-wedged
+      accounts. Quarantine kept every other account progressing; that part
+      is what the cranker controls, and it held.
+
+      ### Found in load test (not filed upstream; owner decision)
+
+      Full write-ups, native replays and upstream cross-references are in
+      [`cranker/scenario-findings.md`](cranker/scenario-findings.md).
+
+      - **F1: a lapsed bucket that no account references wedges Live refresh
+        and liquidation (`EngineStale` 0x13).**
+        - **Trigger.** A Fresh bucket goes past `expiry_slot` and no account
+          references it. A refresh that would attribute a winner's new
+          positive PnL to that domain hits `validate_source_domain_ledger_current`,
+          which returns Stale. Every crank, liquidation and force-close on
+          that account then reverts until Resolve.
+        - **Why Live can't recover.** Only the Resolved `CloseResolved` arm
+          scans buckets at the asset level, so nothing in Live expires one.
+        - **Repro** (one asset is enough):
+          1. Open a long and a short.
+          2. `TopUpBackingBucket{domain: 1, expiry: now+20}`.
+          3. Wait past expiry, then push the mark +10%.
+          4. Crank the long: `0x13` every slot.
+        - **Replay.** Expiring that one bucket first makes the refresh pass,
+          and the account then shows `certified_liq_deficit = 3782`. So a
+          liquidatable account can't be liquidated.
+        - **Status.** Still present on `68859b94`. It belongs to the
+          engine #102/#173/#179/#196 and prog #204 family, but those landed
+          only account-scoped expiry. No open issue covers the
+          unreferenced-domain case.
+      - **F1b: `EngineLockActive` on the same accounts.** Gone on
+        `68859b94`; consistent with engine #216 (merged 2026-10-27).
+      - **F2: unexplained residue after every exit; CloseSlab burns it.**
+        - **Step A:** ≈5.48M atoms unexplained. Contributors:
+          - Resolved `WithdrawBackingBucket` on a never-lapsed domain
+            released 1 atom out of 1,000,000.
+          - `ClaimResolvedPayoutTopup` was rejected `EngineLockActive` 290
+            times.
+        - **Preview:** ≈78.5k unexplained, and CloseSlab was refused.
+        - **Related open upstream items:** engine #206/#209/#210, prog
+          #451/#454.
+        - No minimal repro yet.
+
 
 ---
 
@@ -476,7 +608,7 @@ watcher should re-check against the wrapper diff each run.
 ### Engine API the wrapper depends on
 - Single public crank entry point: `permissionless_auto_crank_not_atomic`
   (`percolator/src/v16.rs:11298`).
-- Plan variants (pin `495a5590`): `AutoCrankPlanV16 = NoAction |
+- Plan variants (pins `495a5590`, `4db11a8c`, `68859b94`; unchanged): `AutoCrankPlanV16 = NoAction |
   RefreshAccount | SettleBChunk | Liquidate | ReleaseSourceLiens |
   AdvanceClose | DeclareRecovery | FinalizeRecovery | CloseResolved`.
   Roster A1–A8 (`source_liens_releasable` = A6, `resolved_winner` = A8).

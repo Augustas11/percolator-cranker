@@ -7,6 +7,7 @@ Local prototype work against [aeyakovenko/percolator](https://github.com/aeyakov
 - [`cranker/`](cranker/) — M2 minimal permissionless cranker. Discovery, plan-classification gate, three-way response classifier, mirror-custody bookkeeping, real `AssetOracleProfileV16` walk + Pyth PDA resolver. See [`cranker/README.md`](cranker/README.md).
 - [`client/`](client/) — M1 bring-up client. End-to-end deploy → init market → deposit → `PermissionlessCrank` round-trip against `solana-test-validator`.
 - [`scripts/m1_bringup.sh`](scripts/m1_bringup.sh) — idempotent local-validator bring-up. Resets ledger, redeploys the wrapper, runs the M1 client.
+- [`scripts/preview_launch_fixes.sh`](scripts/preview_launch_fixes.sh) — Step B **pre-merge preview**: wrapper prog #456 head + engine `68859b94` via path patch, isolated under `.preview/`.
 - [`prep.md`](prep.md) — milestones (M1 done, M2 done, M3 blocked on devnet deployment), baked-in assumptions (with the byte-offset citations against upstream source), open questions Q1/Q2, and a running drift log tied to specific upstream commits.
 - [`cranker-strategic-questions.md`](cranker-strategic-questions.md) — running answers to fee-capture / latency-sensitivity / operational-complexity / differentiation-surface questions, informed by what M1/M2 empirically observed.
 - `digests/`, `signals.md`, `radar.md`, `contributors.md`, `watchlist.md`, `releases/`, `state/` — outputs from the sibling percolator-watch process that seeds prep.md and flags upstream drift. Kept alongside for context.
@@ -18,10 +19,13 @@ Local prototype work against [aeyakovenko/percolator](https://github.com/aeyakov
 
 ## Status
 
-- **M1**: end-to-end green on wrapper `d5e2ec6f` + engine `495a5590`. A fresh no-op `PermissionlessCrank` consumes **17,975 program CU** (tx total 18,299) — re-baselined 2026-09-11; do not assume ~42,817.
-- **M2**: loop green (discovery → plan gate including A6–A8 → submit → three-way classify → A6 one-domain drain). Fresh MANUAL deposit portfolios are already idle (`Ok(no-mut)`).
-- **M3**: no-go. Program id `Perco1ator111…` still returns `null` on both mainnet-beta and devnet. **This is a reference / dry-run cranker, not a paid live service.**
-- **Pins**: wrapper `d5e2ec6f` (`origin/main`, `#135`); engine `495a5590` (wrapper Cargo pin, one behind master tip `8eb7142a` / `#195`). Layout 18. Spec v16.9.1.
+**Reference / dry-run only; not a paid live service.** All fee, bounty and mainnet paths stay off: nothing here claims fees, and the local bootstrap's 5000 bps cranker share only exercises the ABI path.
+
+- **Pins (2026-10-28)**: wrapper `5cb331dd` (`origin/main`) + engine `4db11a8c` (the wrapper's Cargo pin). Upstream re-pin prog #456 is still a draft, so the engine launch-fix batch `68859b94` runs only as a **pre-merge preview** (`scripts/preview_launch_fixes.sh`, path-patched, never the default). Layout 18; `AutoCrankPlanV16` unchanged.
+- **M1**: end-to-end green on the new pin. A fresh no-op `PermissionlessCrank` consumes **18,565 program CU** (tx total 18,889); it was 17,975 on the old pin. Preview pin: 18,820 (19,144).
+- **M2**: loop green. It now covers the resolved-mode backing hint, `EngineNonProgress` counted as idle, per-account failure quarantine with capped backoff, and a per-cycle wall/CU/tx budget that puts liquidatable accounts first. See [`cranker/README.md`](cranker/README.md).
+- **Load test**: `CRANKER_SCENARIO=live_shaped` (see [`cranker/README.md`](cranker/README.md) and `prep.md`).
+- **M3**: NO-GO. `declare_id!` is still `Perco1ator111…`, there's no release tag, and fee shares default to 0.
 
 ## Attribution
 
