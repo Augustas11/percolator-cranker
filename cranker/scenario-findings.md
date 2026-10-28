@@ -1,9 +1,15 @@
 # live_shaped scenario findings
 
 Pins: wrapper `percolator-prog` 5cb331dd, engine `percolator` 4db11a8c.
-Nothing here was filed upstream.
+Only F1 was posted upstream (by the owner, as #243); nothing else here was filed.
 
 ## F1. A lapsed, never-liened backing bucket wedges refresh and liquidation in Live
+
+**Posted upstream by the owner:**
+[aeyakovenko/percolator#243](https://github.com/aeyakovenko/percolator/issues/243)
+([PARTIAL DoS]). The issue includes a LiteSVM repro that reproduces on both
+`5cb331dd`/`4db11a8c` and `febc3731`/`68859b94`. F1 is the only finding
+posted; F1b, F2 and everything else stay private.
 
 **Symptom.** In Live mode, `PermissionlessCrank` on some portfolios reverts
 with `EngineStale` (`0x13`) on every attempt, for as long as the market stays

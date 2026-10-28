@@ -59,6 +59,8 @@ pub enum CrankOutcome {
         /// Program CU from the preflight simulation logs, when the RPC
         /// returned them.
         program_cu: Option<u64>,
+        /// Whole-tx CU from the preflight simulation, when returned.
+        tx_cu: Option<u64>,
     },
     Ok {
         signature: Signature,
@@ -77,8 +79,14 @@ pub enum CrankOutcome {
         market_bytes_diff: Option<usize>,
         /// CU the percolator program itself consumed (from the tx logs).
         program_cu: Option<u64>,
-        /// CU for the whole tx, including the two compute-budget ixs.
+        /// CU for the whole tx, including the compute-budget ixs and (on the
+        /// Resolved route) the ATA create.
         tx_cu: Option<u64>,
+        /// The tx landed, but its post-state could not be read (the error).
+        /// The diffs above are then unknown, not zero. Classified as
+        /// Progress: the wrapper accepted it, and a confirmed tx must never
+        /// count as a failure.
+        unreconciled: Option<String>,
     },
 }
 
@@ -93,7 +101,8 @@ pub enum OutcomeClass {
 impl CrankOutcome {
     pub fn class(&self) -> OutcomeClass {
         match self {
-            CrankOutcome::Ok { mutated: true, .. } => OutcomeClass::Progress,
+            CrankOutcome::Ok { mutated: true, .. }
+            | CrankOutcome::Ok { unreconciled: Some(_), .. } => OutcomeClass::Progress,
             CrankOutcome::Ok { mutated: false, .. } => OutcomeClass::Idle,
             CrankOutcome::HardReject { error_name, .. } if is_non_progress(*error_name) => {
                 OutcomeClass::Idle
@@ -111,6 +120,13 @@ impl CrankOutcome {
                 Some(error.lines().next().unwrap_or("unknown").chars().take(120).collect())
             }
             CrankOutcome::Ok { .. } => None,
+        }
+    }
+
+    /// Whole-tx CU (what the cycle budget is charged), when known.
+    pub fn tx_cu(&self) -> Option<u64> {
+        match self {
+            CrankOutcome::Ok { tx_cu, .. } | CrankOutcome::HardReject { tx_cu, .. } => *tx_cu,
         }
     }
 
@@ -137,13 +153,18 @@ pub fn program_cu_from_logs(program_id: &Pubkey, logs: &[String]) -> Option<u64>
     })
 }
 
-fn preflight_logs(e: &ClientError) -> Option<&[String]> {
+/// `(program_cu, tx_cu)` from a preflight-simulation failure, when the RPC
+/// returned them.
+fn preflight_cu(e: &ClientError, program_id: &Pubkey) -> (Option<u64>, Option<u64>) {
     match e.kind() {
         ClientErrorKind::RpcError(RpcError::RpcResponseError {
             data: RpcResponseErrorData::SendTransactionPreflightFailure(sim),
             ..
-        }) => sim.logs.as_deref(),
-        _ => None,
+        }) => (
+            sim.logs.as_deref().and_then(|l| program_cu_from_logs(program_id, l)),
+            sim.units_consumed,
+        ),
+        _ => (None, None),
     }
 }
 
@@ -253,6 +274,7 @@ pub fn submit_crank(
         &CrankRoute::Live { reward_portfolio },
         observations,
         now_slot,
+        None,
     )
 }
 
@@ -289,6 +311,7 @@ pub fn submit_crank_routed(
     route: &CrankRoute<'_>,
     observations: &[FetchedObservation],
     now_slot: u64,
+    deadline: Option<std::time::Instant>,
 ) -> Result<CrankOutcome> {
     let reward_portfolio = match route {
         CrankRoute::Live { reward_portfolio } => *reward_portfolio,
@@ -305,7 +328,12 @@ pub fn submit_crank_routed(
     );
     // On the Resolved route a backing hint can make market-only progress
     // (expiring a bucket) without touching the target, so the market
-    // account is diffed too.
+    // account is diffed too. This cannot turn an unrelated market write into
+    // a false "progress": in `handle_close_resolved` any engine selection
+    // other than `CloseResolved` reverts with EngineNonProgress, and
+    // `CloseResolved` is always one state transition (`ProgressOnly` or
+    // `Closed`). A landed Resolved crank therefore always made progress; a
+    // no-progress one never lands, so it is classified Idle, never Ok.
     let track_market = matches!(route, CrankRoute::Resolved { .. });
 
     // Snapshot pre-state. Layout 18 is required on the decode path;
@@ -320,6 +348,7 @@ pub fn submit_crank_routed(
             ),
             error_name: Some("InvalidAccountLen"),
             program_cu: None,
+            tx_cu: None,
         });
     }
     let pre_reward = match reward_portfolio {
@@ -333,10 +362,18 @@ pub fn submit_crank_routed(
     };
     let pre_state_hash = fnv_hash(&pre_target);
 
-    // Submit with retry-on-blockhash-not-found (same pattern the M1 client
-    // uses; the test validator's RPC occasionally races the bank).
+    // Submit with retry-on-blockhash-not-found (the test validator's RPC
+    // occasionally races the bank). A retry resends the same, never-landed
+    // tx, so it stays within the one budget reservation the caller took;
+    // the deadline is re-checked before every send.
     let mut last_err: Option<String> = None;
     for attempt in 0..5 {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err(anyhow!(
+                "cycle deadline reached before send{}",
+                last_err.as_deref().map(|e| format!(" (last: {e})")).unwrap_or_default()
+            ));
+        }
         let (bh, _) = rpc
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
             .context("get_latest_blockhash")?;
@@ -348,52 +385,70 @@ pub fn submit_crank_routed(
         );
         match rpc.send_and_confirm_transaction(&tx) {
             Ok(signature) => {
-                // Post-state.
-                let post_target = rpc
-                    .get_account_data(target_portfolio)
-                    .context("read target portfolio post-state")?;
-                let post_reward = match reward_portfolio {
-                    Some(r) => Some(
-                        rpc.get_account_data(r)
-                            .context("read reward portfolio post-state")?,
-                    ),
-                    None => None,
-                };
-                let target_bytes_diff = byte_diff_count(&pre_target, &post_target);
-                let reward_bytes_diff = match (&pre_reward, &post_reward) {
-                    (Some(a), Some(b)) => Some(byte_diff_count(a, b)),
-                    _ => None,
-                };
-                let market_bytes_diff = match &pre_market {
-                    Some(a) => Some(byte_diff_count(
-                        a,
-                        &rpc.get_account_data(market).context("read market post-state")?,
-                    )),
-                    None => None,
-                };
-                let post_state_hash = fnv_hash(&post_target);
-                let mutated = target_bytes_diff > 0
-                    || reward_bytes_diff.map(|d| d > 0).unwrap_or(false)
-                    || market_bytes_diff.map(|d| d > 0).unwrap_or(false);
+                // The tx LANDED. From here on, read failures must not turn it
+                // into a failure (that would strike a healthy account and drop
+                // the record): keep a confirmed outcome and note what could
+                // not be reconciled.
                 let (program_cu, tx_cu) = if measure_cu() {
                     fetch_cu(rpc, program_id, &signature)
                 } else {
                     (None, None)
                 };
-                return Ok(CrankOutcome::Ok {
-                    signature,
-                    pre_state_hash,
-                    post_state_hash,
-                    mutated,
-                    target_bytes_diff,
-                    reward_bytes_diff,
-                    market_bytes_diff,
-                    program_cu,
-                    tx_cu,
+                let post = (|| -> Result<(Vec<u8>, Option<usize>, Option<usize>)> {
+                    let post_target = rpc
+                        .get_account_data(target_portfolio)
+                        .context("read target portfolio post-state")?;
+                    let reward_bytes_diff = match (reward_portfolio, &pre_reward) {
+                        (Some(r), Some(a)) => Some(byte_diff_count(
+                            a,
+                            &rpc.get_account_data(r).context("read reward portfolio post-state")?,
+                        )),
+                        _ => None,
+                    };
+                    let market_bytes_diff = match &pre_market {
+                        Some(a) => Some(byte_diff_count(
+                            a,
+                            &rpc.get_account_data(market).context("read market post-state")?,
+                        )),
+                        None => None,
+                    };
+                    Ok((post_target, reward_bytes_diff, market_bytes_diff))
+                })();
+                return Ok(match post {
+                    Ok((post_target, reward_bytes_diff, market_bytes_diff)) => {
+                        let target_bytes_diff = byte_diff_count(&pre_target, &post_target);
+                        let mutated = target_bytes_diff > 0
+                            || reward_bytes_diff.is_some_and(|d| d > 0)
+                            || market_bytes_diff.is_some_and(|d| d > 0);
+                        CrankOutcome::Ok {
+                            signature,
+                            pre_state_hash,
+                            post_state_hash: fnv_hash(&post_target),
+                            mutated,
+                            target_bytes_diff,
+                            reward_bytes_diff,
+                            market_bytes_diff,
+                            program_cu,
+                            tx_cu,
+                            unreconciled: None,
+                        }
+                    }
+                    Err(e) => CrankOutcome::Ok {
+                        signature,
+                        pre_state_hash,
+                        post_state_hash: pre_state_hash,
+                        mutated: false,
+                        target_bytes_diff: 0,
+                        reward_bytes_diff: None,
+                        market_bytes_diff: None,
+                        program_cu,
+                        tx_cu,
+                        unreconciled: Some(format!("{e:#}")),
+                    },
                 });
             }
             Err(e) => {
-                let program_cu = preflight_logs(&e).and_then(|l| program_cu_from_logs(program_id, l));
+                let (program_cu, tx_cu) = preflight_cu(&e, program_id);
                 let msg = format!("{e}");
                 if msg.contains("Blockhash not found") && attempt < 4 {
                     std::thread::sleep(std::time::Duration::from_millis(400));
@@ -401,7 +456,7 @@ pub fn submit_crank_routed(
                     continue;
                 }
                 let error_name = wrapper_error_name_for_ix(&msg, crank_ix_index);
-                return Ok(CrankOutcome::HardReject { error: msg, error_name, program_cu });
+                return Ok(CrankOutcome::HardReject { error: msg, error_name, program_cu, tx_cu });
             }
         }
     }
@@ -489,7 +544,9 @@ pub fn build_crank_instructions(
 }
 
 /// Like [`wrapper_error_name`], but only when the error came from the
-/// instruction at `ix_index` (the crank). A custom error from another
+/// instruction at `ix_index` (the crank). Best-effort: when the message
+/// carries no "Error processing Instruction N" text, the bare code is
+/// mapped as before and could in principle belong to another instruction. A custom error from another
 /// instruction in the tx (the ATA create, a token program) is not a
 /// wrapper error and gets no wrapper name.
 pub fn wrapper_error_name_for_ix(msg: &str, ix_index: usize) -> Option<&'static str> {
@@ -555,6 +612,7 @@ mod tests {
             error: "x".into(),
             error_name: name,
             program_cu: None,
+            tx_cu: None,
         }
     }
 
@@ -577,6 +635,7 @@ mod tests {
             market_bytes_diff: None,
             program_cu: None,
             tx_cu: None,
+            unreconciled: None,
         };
         assert_eq!(ok(false).class(), OutcomeClass::Idle);
         assert_eq!(ok(true).class(), OutcomeClass::Progress);

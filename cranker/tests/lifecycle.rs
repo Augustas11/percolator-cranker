@@ -37,11 +37,10 @@ const HINT_BUDGET: usize = 16;
 const ASSET_INDEX: u16 = 0;
 
 #[test]
+#[ignore = "needs a local validator: set PERCOLATOR_TEST_RPC + PERCOLATOR_PROGRAM_ID, run with --include-ignored"]
 fn crank_lifecycle_preserves_conservation() -> Result<()> {
-    let Some((rpc, program_id)) = common::rpc_and_program_from_env() else {
-        common::skip("crank_lifecycle_preserves_conservation");
-        return Ok(());
-    };
+    let (rpc, program_id) = common::rpc_and_program_from_env()
+        .ok_or_else(|| anyhow::anyhow!("PERCOLATOR_TEST_RPC / PERCOLATOR_PROGRAM_ID not set"))?;
     let payer = common::load_payer()?;
 
     // ---- one-shot bootstrap (main.rs analogue) ----

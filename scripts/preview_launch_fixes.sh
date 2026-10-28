@@ -12,7 +12,6 @@
 #
 # Usage (validator must already be up, e.g. after ./scripts/m1_bringup.sh):
 #   ./scripts/preview_launch_fixes.sh                  # build + deploy + 3 cycles
-#   CRANKER_SCENARIO=live_shaped ./scripts/preview_launch_fixes.sh
 #
 # Env:
 #   PREVIEW_PROG_REF   (default origin/fix/repin-launch-fixes)
@@ -39,6 +38,12 @@ fi
 ENGINE_GIT="https://github.com/aeyakovenko/percolator"
 
 mkdir -p "$PV"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/pins.env"
+# The wrapper checkout comes from fetch_upstream.sh; the engine clone is only
+# needed for the preview, so create it here when missing.
+[ -d "$REPO_ROOT/repo-prog/.git" ] || "$SCRIPT_DIR/fetch_upstream.sh"
+[ -d "$REPO_ROOT/repo/.git" ] || git clone -q "$PERCOLATOR_ENGINE_REPO" "$REPO_ROOT/repo"
 git -C "$REPO_ROOT/repo-prog" fetch -q origin
 git -C "$REPO_ROOT/repo" fetch -q origin
 
@@ -101,10 +106,5 @@ solana program deploy --url "$LOCAL_RPC" "$SO" --program-id "$KP" >/dev/null
 export PERCOLATOR_SKIP_PIN_CHECK=1
 echo "==> cranker (preview) CRANKER_CYCLES=${CRANKER_CYCLES:-3}"
 cd "$PV/cranker"
-if [ "${CRANKER_SCENARIO:-}" = "live_shaped" ]; then
-  PERCOLATOR_PROGRAM_ID="$PROG_ID" CRANKER_PREVIEW_LABEL="pre-merge preview" \
-    cargo run --release --bin live_shaped
-else
-  PERCOLATOR_PROGRAM_ID="$PROG_ID" CRANKER_CYCLES="${CRANKER_CYCLES:-3}" \
-    cargo run --release --bin cranker
-fi
+PERCOLATOR_PROGRAM_ID="$PROG_ID" CRANKER_CYCLES="${CRANKER_CYCLES:-3}" \
+  cargo run --release --bin cranker

@@ -47,7 +47,7 @@ put_dir() {
 }
 
 # ---- allowlist ----------------------------------------------------------
-# cranker crate (library, binaries, load scenario, integration tests)
+# cranker crate (library, binary, integration tests)
 put cranker/Cargo.toml          crates/cranker/Cargo.toml
 put cranker/build.rs            crates/cranker/build.rs
 put_dir cranker/src             crates/cranker/src   -name '*.rs'
@@ -58,7 +58,6 @@ put client/build.rs             crates/bringup/build.rs
 put_dir client/src              crates/bringup/src   -name '*.rs'
 # scripts usable outside this repo
 put scripts/m1_bringup.sh       scripts/m1_bringup.sh
-put scripts/live_shaped.sh      scripts/live_shaped.sh
 put scripts/check_public_tree.sh scripts/check_public_tree.sh
 put scripts/fetch_upstream.sh   scripts/fetch_upstream.sh
 put scripts/pins.env            scripts/pins.env
