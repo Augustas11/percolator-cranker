@@ -27,3 +27,6 @@ Thumbs.db
 
 # --- session scratch ---
 *.log
+
+# --- Step B pre-merge preview worktrees + crate copy (scripts/preview_launch_fixes.sh) ---
+/.preview/
