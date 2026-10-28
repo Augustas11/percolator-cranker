@@ -46,6 +46,16 @@ const DEFAULT_CYCLES: usize = 3;
 const CYCLE_INTERVAL: Duration = Duration::from_secs(3);
 
 fn main() -> Result<()> {
+    // `CRANKER_SCENARIO=live_shaped` runs the deterministic load scenario
+    // (its own market, same crank cycle) instead of the bootstrap loop.
+    if env::var("CRANKER_SCENARIO").as_deref() == Ok("live_shaped") {
+        let report = percolator_cranker::scenario::live_shaped::run()?;
+        print!("{}", report.render());
+        if !report.passed() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let program_id_str = env::var("PERCOLATOR_PROGRAM_ID").context(
         "PERCOLATOR_PROGRAM_ID must be set (the deployed program id — see \
          scripts/m1_bringup.sh for how to derive it from the SBF keypair)",

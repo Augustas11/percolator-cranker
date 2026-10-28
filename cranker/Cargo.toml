@@ -3,6 +3,8 @@ name = "percolator-cranker"
 version = "0.1.0"
 edition = "2021"
 publish = false
+# `src/bin/live_shaped.rs` is auto-discovered; plain `cargo run` stays the cranker.
+default-run = "cranker"
 
 [lib]
 name = "percolator_cranker"

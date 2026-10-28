@@ -11,6 +11,7 @@ pub mod observation;
 pub mod plan_gate;
 pub mod quarantine;
 pub mod resolved;
+pub mod scenario;
 pub mod scheduler;
 pub mod setup;
 pub mod submit;

@@ -219,9 +219,9 @@ pub fn bootstrap_with_fee(
     })
 }
 
-// -------- low-level helpers (mirror the client) --------
+// -------- low-level helpers (mirror the client; `pub` for the load scenario) --------
 
-fn rpc_airdrop(rpc: &RpcClient, to: &Pubkey, lamports: u64) -> Result<()> {
+pub fn rpc_airdrop(rpc: &RpcClient, to: &Pubkey, lamports: u64) -> Result<()> {
     let sig = rpc.request_airdrop(to, lamports)?;
     for _ in 0..40 {
         if let Ok(true) = rpc.confirm_transaction(&sig) {
@@ -232,7 +232,7 @@ fn rpc_airdrop(rpc: &RpcClient, to: &Pubkey, lamports: u64) -> Result<()> {
     bail!("airdrop {sig} not confirmed within timeout")
 }
 
-fn create_spl_mint(
+pub fn create_spl_mint(
     rpc: &RpcClient,
     payer: &Keypair,
     mint: &Keypair,
@@ -265,7 +265,7 @@ fn create_spl_mint(
     Ok(())
 }
 
-fn create_program_owned_account(
+pub fn create_program_owned_account(
     rpc: &RpcClient,
     payer: &Keypair,
     new_account: &Keypair,
@@ -291,7 +291,7 @@ fn create_program_owned_account(
     Ok(())
 }
 
-fn create_ata(rpc: &RpcClient, payer: &Keypair, owner: &Pubkey, mint: &Pubkey) -> Result<()> {
+pub fn create_ata(rpc: &RpcClient, payer: &Keypair, owner: &Pubkey, mint: &Pubkey) -> Result<()> {
     let ix = spl_associated_token_account::instruction::create_associated_token_account(
         &payer.pubkey(),
         owner,
@@ -305,7 +305,7 @@ fn create_ata(rpc: &RpcClient, payer: &Keypair, owner: &Pubkey, mint: &Pubkey) -
     Ok(())
 }
 
-fn mint_to(
+pub fn mint_to(
     rpc: &RpcClient,
     payer: &Keypair,
     mint: &Pubkey,
