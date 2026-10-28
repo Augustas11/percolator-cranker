@@ -18,10 +18,21 @@
 //!   and confirming the goal isn't already achieved. A6
 //!   (`ReleaseSourceLiens`) progresses one domain per call
 //!   (`V16_SOURCE_LIEN_RELEASE_CHUNK_DOMAINS = 1`); drain in a loop.
+//!
+//! For scheduling, those three collapse to `OutcomeClass`: Progress, Idle,
+//! Failed. A tx that reverts with `EngineNonProgress` (0x16) is **idle**:
+//! the wrapper's resolved branch and the Hybrid same-slot rule return it
+//! atomically when there is nothing to do. Only other reverts are failures.
 
 use anyhow::{anyhow, Context, Result};
 use percolator_prog::ix::{CrankObservationHint, Instruction as ProgInstruction};
-use solana_client::rpc_client::RpcClient;
+use solana_client::{
+    client_error::{ClientError, ClientErrorKind},
+    rpc_client::RpcClient,
+    rpc_config::RpcTransactionConfig,
+    rpc_request::{RpcError, RpcResponseErrorData},
+};
+use solana_transaction_status::{option_serializer::OptionSerializer, UiTransactionEncoding};
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     compute_budget::ComputeBudgetInstruction,
@@ -45,6 +56,9 @@ pub enum CrankOutcome {
         /// message matched a known variant. `None` for non-wrapper errors
         /// (RPC issues, blockhash timeouts, etc.).
         error_name: Option<&'static str>,
+        /// Program CU from the preflight simulation logs, when the RPC
+        /// returned them.
+        program_cu: Option<u64>,
     },
     Ok {
         signature: Signature,
@@ -58,7 +72,100 @@ pub enum CrankOutcome {
         /// Byte-diff count on the cranker reward portfolio, if provided.
         /// Non-zero indicates a fee share landed.
         reward_bytes_diff: Option<usize>,
+        /// CU the percolator program itself consumed (from the tx logs).
+        program_cu: Option<u64>,
+        /// CU for the whole tx, including the two compute-budget ixs.
+        tx_cu: Option<u64>,
     },
+}
+
+/// Scheduling view of a `CrankOutcome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutcomeClass {
+    Progress,
+    Idle,
+    Failed,
+}
+
+impl CrankOutcome {
+    pub fn class(&self) -> OutcomeClass {
+        match self {
+            CrankOutcome::Ok { mutated: true, .. } => OutcomeClass::Progress,
+            CrankOutcome::Ok { mutated: false, .. } => OutcomeClass::Idle,
+            CrankOutcome::HardReject { error_name, .. } if is_non_progress(*error_name) => {
+                OutcomeClass::Idle
+            }
+            CrankOutcome::HardReject { .. } => OutcomeClass::Failed,
+        }
+    }
+
+    /// Short error key for quarantine streaks: the wrapper variant name,
+    /// or the first line of the RPC error when the code is unknown.
+    pub fn error_key(&self) -> Option<String> {
+        match self {
+            CrankOutcome::HardReject { error_name: Some(n), .. } => Some((*n).to_string()),
+            CrankOutcome::HardReject { error, .. } => {
+                Some(error.lines().next().unwrap_or("unknown").chars().take(120).collect())
+            }
+            CrankOutcome::Ok { .. } => None,
+        }
+    }
+
+    pub fn program_cu(&self) -> Option<u64> {
+        match self {
+            CrankOutcome::Ok { program_cu, .. } | CrankOutcome::HardReject { program_cu, .. } => {
+                *program_cu
+            }
+        }
+    }
+}
+
+pub fn is_non_progress(error_name: Option<&str>) -> bool {
+    error_name == Some("EngineNonProgress")
+}
+
+/// Parse `Program <id> consumed N of M compute units` for `program_id`.
+/// Takes the last match: the top-level invocation logs its total last.
+pub fn program_cu_from_logs(program_id: &Pubkey, logs: &[String]) -> Option<u64> {
+    let prefix = format!("Program {program_id} consumed ");
+    logs.iter().rev().find_map(|l| {
+        let rest = l.strip_prefix(&prefix)?;
+        rest.split_whitespace().next()?.parse().ok()
+    })
+}
+
+fn preflight_logs(e: &ClientError) -> Option<&[String]> {
+    match e.kind() {
+        ClientErrorKind::RpcError(RpcError::RpcResponseError {
+            data: RpcResponseErrorData::SendTransactionPreflightFailure(sim),
+            ..
+        }) => sim.logs.as_deref(),
+        _ => None,
+    }
+}
+
+/// `(program_cu, tx_cu)` for a confirmed signature.
+pub fn fetch_cu(rpc: &RpcClient, program_id: &Pubkey, sig: &Signature) -> (Option<u64>, Option<u64>) {
+    let cfg = RpcTransactionConfig {
+        encoding: Some(UiTransactionEncoding::Json),
+        commitment: Some(CommitmentConfig::confirmed()),
+        max_supported_transaction_version: Some(0),
+    };
+    let Ok(tx) = rpc.get_transaction_with_config(sig, cfg) else {
+        return (None, None);
+    };
+    let Some(meta) = tx.transaction.meta else {
+        return (None, None);
+    };
+    let tx_cu = match meta.compute_units_consumed {
+        OptionSerializer::Some(v) => Some(v),
+        _ => None,
+    };
+    let program_cu = match &meta.log_messages {
+        OptionSerializer::Some(logs) => program_cu_from_logs(program_id, logs),
+        _ => None,
+    };
+    (program_cu, tx_cu)
 }
 
 /// Match the `Custom(N)` code in a wrapper error message to a
@@ -181,6 +288,7 @@ pub fn submit_crank(
                 "target portfolio layout_discriminator != {V16_LAYOUT_DISCRIMINATOR}"
             ),
             error_name: Some("InvalidAccountLen"),
+            program_cu: None,
         });
     }
     let pre_reward = match reward_portfolio {
@@ -223,6 +331,11 @@ pub fn submit_crank(
                 let post_state_hash = fnv_hash(&post_target);
                 let mutated = target_bytes_diff > 0
                     || reward_bytes_diff.map(|d| d > 0).unwrap_or(false);
+                let (program_cu, tx_cu) = if measure_cu() {
+                    fetch_cu(rpc, program_id, &signature)
+                } else {
+                    (None, None)
+                };
                 return Ok(CrankOutcome::Ok {
                     signature,
                     pre_state_hash,
@@ -230,9 +343,12 @@ pub fn submit_crank(
                     mutated,
                     target_bytes_diff,
                     reward_bytes_diff,
+                    program_cu,
+                    tx_cu,
                 });
             }
             Err(e) => {
+                let program_cu = preflight_logs(&e).and_then(|l| program_cu_from_logs(program_id, l));
                 let msg = format!("{e}");
                 if msg.contains("Blockhash not found") && attempt < 4 {
                     std::thread::sleep(std::time::Duration::from_millis(400));
@@ -240,11 +356,16 @@ pub fn submit_crank(
                     continue;
                 }
                 let error_name = wrapper_error_name(&msg);
-                return Ok(CrankOutcome::HardReject { error: msg, error_name });
+                return Ok(CrankOutcome::HardReject { error: msg, error_name, program_cu });
             }
         }
     }
     Err(anyhow!(last_err.unwrap_or_else(|| "unknown submit error".to_string())))
+}
+
+/// `CRANKER_MEASURE_CU=0` skips the extra `getTransaction` per crank.
+fn measure_cu() -> bool {
+    std::env::var("CRANKER_MEASURE_CU").ok().as_deref() != Some("0")
 }
 
 fn cu_ix() -> Instruction {
@@ -279,7 +400,52 @@ fn fnv_hash(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use percolator_prog::ix::{CrankObservationHint, Instruction as ProgInstruction};
+
+    fn reject(name: Option<&'static str>) -> CrankOutcome {
+        CrankOutcome::HardReject {
+            error: "x".into(),
+            error_name: name,
+            program_cu: None,
+        }
+    }
+
+    #[test]
+    fn non_progress_revert_is_idle_not_failed() {
+        assert_eq!(
+            wrapper_error_name("custom program error: 0x16"),
+            Some("EngineNonProgress")
+        );
+        assert_eq!(reject(Some("EngineNonProgress")).class(), OutcomeClass::Idle);
+        assert_eq!(reject(Some("EngineCounterUnderflow")).class(), OutcomeClass::Failed);
+        assert_eq!(reject(None).class(), OutcomeClass::Failed);
+        let ok = |mutated| CrankOutcome::Ok {
+            signature: Signature::default(),
+            pre_state_hash: 0,
+            post_state_hash: 0,
+            mutated,
+            target_bytes_diff: 0,
+            reward_bytes_diff: None,
+            program_cu: None,
+            tx_cu: None,
+        };
+        assert_eq!(ok(false).class(), OutcomeClass::Idle);
+        assert_eq!(ok(true).class(), OutcomeClass::Progress);
+    }
+
+    #[test]
+    fn program_cu_parses_top_level_line() {
+        let pid = Pubkey::new_unique();
+        let logs = vec![
+            "Program ComputeBudget111111111111111111111111111111 consumed 150 of 1400000 compute units".to_string(),
+            format!("Program {pid} invoke [1]"),
+            format!("Program {pid} consumed 17975 of 1399700 compute units"),
+            format!("Program {pid} success"),
+        ];
+        assert_eq!(program_cu_from_logs(&pid, &logs), Some(17_975));
+        assert_eq!(program_cu_from_logs(&Pubkey::new_unique(), &logs), None);
+    }
 
     #[test]
     fn permissionless_crank_wire_has_no_close_q() {

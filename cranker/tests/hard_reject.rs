@@ -64,7 +64,7 @@ fn hard_reject_leaves_target_bytes_unchanged() -> anyhow::Result<()> {
     let post = live.rpc.get_account_data(&target_pk)?;
 
     match outcome {
-        CrankOutcome::HardReject { error, error_name } => {
+        CrankOutcome::HardReject { error, error_name, .. } => {
             eprintln!("hard reject as expected: {error_name:?} ({error})");
             assert_eq!(pre, post, "hard reject must not mutate the target account");
         }

@@ -141,7 +141,7 @@ fn crank_lifecycle_preserves_conservation() -> Result<()> {
                         candidate.pubkey, mutated, target_bytes_diff, reward_bytes_diff
                     );
                 }
-                CrankOutcome::HardReject { error, error_name } => {
+                CrankOutcome::HardReject { error, error_name, .. } => {
                     hard_rejects += 1;
                     eprintln!("    {} -> HardReject({error_name:?}): {error}", candidate.pubkey);
                 }

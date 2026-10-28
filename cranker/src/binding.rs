@@ -14,7 +14,8 @@ use percolator_prog::state::{
     read_portfolio_matcher_sequence, read_portfolio_position_epoch,
 };
 
-/// Engine `V16_LAYOUT_DISCRIMINATOR` at pin `495a5590`. Not re-exported
+/// Engine `V16_LAYOUT_DISCRIMINATOR` at pins `495a5590`, `4db11a8c` and
+/// `68859b94` (unchanged across the launch-fix batch). Not re-exported
 /// from `percolator`'s default `lib.rs` surface; keep in lockstep with
 /// `repo/src/v16.rs`.
 pub const V16_LAYOUT_DISCRIMINATOR: u16 = 18;
@@ -90,6 +91,42 @@ pub fn portfolio_binding(data: &[u8]) -> Result<PortfolioBinding> {
     })
 }
 
+/// A `PortfolioBinding` plus when it was read.
+///
+/// Since wrapper `b40ffbd8` a Recovery crank that changes the position
+/// vector bumps `position_epoch` (`state::bump_portfolio_position_epoch`).
+/// So does any matcher fill. A binding read before a crank is therefore
+/// stale the moment that crank mutates the account, and it is never valid
+/// in a later cycle. Callers re-read with `portfolio_binding` on fresh
+/// account bytes whenever `usable` says no.
+#[derive(Debug, Clone, Copy)]
+pub struct BindingSnapshot {
+    pub binding: PortfolioBinding,
+    pub cycle: u64,
+    invalidated: bool,
+}
+
+impl BindingSnapshot {
+    pub fn read(data: &[u8], cycle: u64) -> Result<Self> {
+        Ok(Self {
+            binding: portfolio_binding(data)?,
+            cycle,
+            invalidated: false,
+        })
+    }
+
+    /// Call after every crank on this account. Any observed mutation
+    /// (including a Recovery step) may have moved `position_epoch` or
+    /// `sequence`.
+    pub fn note_crank(&mut self, mutated: bool) {
+        self.invalidated |= mutated;
+    }
+
+    pub fn usable(&self, cycle: u64) -> bool {
+        !self.invalidated && self.cycle == cycle
+    }
+}
+
 pub fn market_authority_binding(data: &[u8]) -> Result<MarketAuthorityBinding> {
     let seqs = read_asset_control_sequences(data, 0)
         .map_err(|e| anyhow!("read_asset_control_sequences: {e}"))?;
@@ -105,6 +142,29 @@ pub fn market_authority_binding(data: &[u8]) -> Result<MarketAuthorityBinding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snap(epoch: u64, cycle: u64) -> BindingSnapshot {
+        BindingSnapshot {
+            binding: PortfolioBinding {
+                portfolio_id: 1,
+                sequence: 1,
+                position_epoch: epoch,
+            },
+            cycle,
+            invalidated: false,
+        }
+    }
+
+    #[test]
+    fn binding_is_not_reused_after_mutation_or_across_cycles() {
+        let mut s = snap(4, 7);
+        assert!(s.usable(7));
+        s.note_crank(false);
+        assert!(s.usable(7), "idle crank leaves the binding valid");
+        assert!(!s.usable(8), "never reused in a later cycle");
+        s.note_crank(true);
+        assert!(!s.usable(7), "a mutating (e.g. Recovery) crank invalidates it");
+    }
 
     #[test]
     fn layout_const_is_eighteen() {
