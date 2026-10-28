@@ -342,6 +342,8 @@ pub fn run_one_cycle(
                         .downcast_ref::<submit::Unconfirmed>()
                         .map(|u| u.signature.to_string())
                         .unwrap_or_default();
+                    // Reported whatever the attempt's overall outcome.
+                    ab.note_unconfirmed(sig.clone());
                     interrupt = Some(Interrupt::Unconfirmed(sig));
                     break;
                 }

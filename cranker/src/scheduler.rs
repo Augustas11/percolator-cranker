@@ -155,6 +155,9 @@ pub struct AttemptBudget<'m> {
     /// class's remaining quota while other classes still have quota and
     /// candidates (so one class's drain can't eat another's share).
     cap: usize,
+    /// Signatures sent in this attempt whose fate is unknown. Reported in
+    /// the cycle summary whatever the attempt's overall outcome.
+    unconfirmed: Vec<String>,
 }
 
 impl AttemptBudget<'_> {
@@ -188,6 +191,12 @@ impl AttemptBudget<'_> {
 
     pub fn txs_sent(&self) -> usize {
         self.txs
+    }
+
+    /// Record a sent tx whose fate is unknown (reported even if earlier
+    /// steps of the same attempt progressed).
+    pub fn note_unconfirmed(&mut self, signature: String) {
+        self.unconfirmed.push(signature);
     }
 }
 
@@ -380,10 +389,12 @@ where
             txs: 0,
             open_reserve: 0,
             cap,
+            unconfirmed: Vec::new(),
         };
         // An unsettled tx (the closure bailed mid-tx) keeps its whole
         // reservation charged: the meter was debited in `begin_tx`.
         let result = submit(&cand, &mut ab);
+        let unconfirmed = std::mem::take(&mut ab.unconfirmed);
         let attempt = result.unwrap_or_else(|e| Attempt::Failed {
             error: format!("Rpc: {e}"),
             cu: 0,
@@ -396,13 +407,39 @@ where
         let charged = cu_before - meter.cu_left;
         s.cu_spent = s.cu_spent.saturating_add(charged);
         s.max_attempt_cu = s.max_attempt_cu.max(charged);
-        if attempt == Attempt::Deferred {
-            // Unsent for lack of budget: keep this account (and its class)
-            // first in line next cycle, exactly like an unvisited deferral.
+        for signature in unconfirmed {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "unconfirmed",
+                    "account": cand.pubkey.to_string(),
+                    "signature": signature,
+                    "cycle": cycle,
+                    "slot": slot,
+                    "plan_class": cand.plan_class,
+                })
+            );
+            s.unconfirmed.push((cand.pubkey, signature));
+        }
+        let deferred = attempt == Attempt::Deferred;
+        record(&mut s, quarantine, budget, &cand, attempt, cycle, slot);
+        if deferred {
+            // Unsent because the cycle budget ran out mid-attempt: keep this
+            // account (and its class) first in line next cycle, and stop the
+            // cycle here so no later candidate can overwrite that.
             visited[c] = prev_visited;
             turn = pos;
+            for q in queues.iter_mut() {
+                for rest in q.drain(..) {
+                    if quarantine.is_blocked(&rest.pubkey, cycle) {
+                        s.quarantined_skipped += 1;
+                    } else {
+                        s.budget_deferred += 1;
+                    }
+                }
+            }
+            break;
         }
-        record(&mut s, quarantine, budget, &cand, attempt, cycle, slot);
     }
     let st = quarantine.schedule_state_mut();
     for c in 0..3 {
@@ -453,20 +490,9 @@ fn record(
         Attempt::Deferred => {
             s.budget_deferred += 1;
         }
-        Attempt::Unconfirmed { signature } => {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "event": "unconfirmed",
-                    "account": cand.pubkey.to_string(),
-                    "signature": signature,
-                    "cycle": cycle,
-                    "slot": slot,
-                    "plan_class": cand.plan_class,
-                })
-            );
-            s.unconfirmed.push((cand.pubkey, signature));
-        }
+        // Signatures are reported via `AttemptBudget::note_unconfirmed`;
+        // here only the account-health effect matters: none.
+        Attempt::Unconfirmed { .. } => {}
         Attempt::Failed { error, .. } => {
             s.failed += 1;
             if let Some(ev) = quarantine.record_failure(FailureReport {
@@ -578,21 +604,44 @@ mod tests {
             let mut a = cand(pk(1), Priority::Quiet);
             a.pending_work = true;
             let cands = vec![a, cand(pk(2), Priority::Quiet)];
-            let s = run(cycle, cands, &budget, &mut q, |c, _| {
+            let s = run(cycle, cands, &budget, &mut q, |c, ab| {
                 order.push(c.pubkey.to_bytes()[0]);
                 Ok(match (cycle, c.pubkey.to_bytes()[0]) {
-                    (0, 1) => Attempt::Deferred,
-                    (0, _) => Attempt::Unconfirmed { signature: "sig".into() },
+                    (0, 2) => {
+                        ab.note_unconfirmed("sig".into());
+                        Attempt::Unconfirmed { signature: "sig".into() }
+                    }
+                    (0, _) => Attempt::Deferred,
                     _ => Attempt::Idle { cu: 0 },
                 })
             });
             if cycle == 0 {
-                assert_eq!((s.idle, s.failed, s.budget_deferred, s.unconfirmed.len()), (0, 0, 1, 1));
+                // pk(2) (Unconfirmed) goes first only if pk(1) was deferred
+                // in a *previous* cycle; here pk(1) is first and defers, which
+                // ends the cycle: pk(2) is counted as deferred, not run.
+                assert_eq!((s.idle, s.failed, s.budget_deferred, s.unconfirmed.len()), (0, 0, 2, 0));
                 assert_eq!(s.idle_pending_stuck, 0);
             }
         }
-        // pk(1) was deferred in cycle 0, so it is still first in cycle 1.
-        assert_eq!(order, vec![1, 2, 1, 2]);
+        // pk(1) deferred in cycle 0 and ended it; it is still first in cycle 1.
+        assert_eq!(order, vec![1, 1, 2]);
+    }
+
+    /// Re-audit finding: an unconfirmed tail after earlier drain progress
+    /// must still be reported, alongside the Progress.
+    #[test]
+    fn unconfirmed_tail_is_reported_even_after_progress() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let s = run(0, vec![cand(pk(1), Priority::Pending)], &CycleBudget::default(), &mut q, |_, ab| {
+            assert!(ab.begin_tx());
+            ab.settle_tx(Some(1));
+            assert!(ab.begin_tx());
+            ab.settle_tx(None);
+            ab.note_unconfirmed("tail-sig".into());
+            Ok(Attempt::Progress { cu: 1, steps: 1 })
+        });
+        assert_eq!(s.progressed, 1);
+        assert_eq!(s.unconfirmed, vec![(pk(1), "tail-sig".to_string())]);
     }
 
     /// Audit finding: position cursors broke when class membership changed.
