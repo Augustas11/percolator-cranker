@@ -49,10 +49,12 @@ put_dir() {
 # ---- allowlist ----------------------------------------------------------
 # cranker crate (library, binaries, load scenario, integration tests)
 put cranker/Cargo.toml          crates/cranker/Cargo.toml
+put cranker/build.rs            crates/cranker/build.rs
 put_dir cranker/src             crates/cranker/src   -name '*.rs'
 put_dir cranker/tests           crates/cranker/tests -name '*.rs'
 # M1 bring-up client
 put client/Cargo.toml           crates/bringup/Cargo.toml
+put client/build.rs             crates/bringup/build.rs
 put_dir client/src              crates/bringup/src   -name '*.rs'
 # scripts usable outside this repo
 put scripts/m1_bringup.sh       scripts/m1_bringup.sh
