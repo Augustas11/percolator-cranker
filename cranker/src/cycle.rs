@@ -88,9 +88,10 @@ fn plan_hints(
     portfolio_data: &[u8],
     pyth: &PythFeedResolver,
     now_slot: u64,
+    rotation: u64,
 ) -> Result<(Vec<FetchedObservation>, &'static str)> {
     if group.mode == MarketModeV16::Resolved {
-        let hints = resolved::resolved_crank_hints(group, now_slot);
+        let hints = resolved::resolved_crank_hints(group, now_slot, rotation);
         let class = if hints.is_empty() {
             "resolved:close"
         } else {
@@ -188,6 +189,8 @@ pub fn run_one_cycle(
     records: &mut Vec<SubmissionRecord>,
     cu: &mut CuStats,
 ) -> Result<CycleSummary> {
+    // The wall budget covers the whole cycle, discovery and planning included.
+    let started = std::time::Instant::now();
     let all = discovery::discover_portfolios(ctx.rpc, ctx.program_id)?;
     let reward = ctx.reward_portfolio.copied().unwrap_or_default();
     let ranked: Vec<_> = discovery::rank_by_staleness(all, ctx.market, &reward)
@@ -216,12 +219,20 @@ pub fn run_one_cycle(
     let mut plans = std::collections::HashMap::new();
     let mut candidates = Vec::with_capacity(ranked.len());
     for p in &ranked {
-        let priority = read_portfolio(&p.account.data)
-            .map(|pf| work::assess(&pf, &group).priority)
+        let decoded = read_portfolio(&p.account.data).ok();
+        let priority = decoded
+            .as_ref()
+            .map(|pf| work::assess(pf, &group).priority)
             .unwrap_or(Priority::Pending);
+        // A Resolved claimant with value left is still owed work: persistent
+        // idle on it is reported as stuck, not hidden as "idle".
+        let owed = resolved
+            && decoded.as_ref().is_some_and(|pf| {
+                pf.capital.get() != 0 || pf.pnl.get() != 0 || pf.reserved_pnl.get() != 0
+            });
         let owner = p.owner().unwrap_or_default();
         let (plan, plan_class) =
-            match plan_hints(&group, &market_data, &p.account.data, ctx.pyth, now_slot) {
+            match plan_hints(&group, &market_data, &p.account.data, ctx.pyth, now_slot, cycle) {
                 Err(e) => (Plan::HintError(format!("HintError: {e}")), "hint-error".to_string()),
                 Ok(_) if owner_window && owner != payer => {
                     (Plan::OwnerWindow, "resolved:owner-window".to_string())
@@ -236,15 +247,17 @@ pub fn run_one_cycle(
                     (Plan::Submit { route_owner, hints }, plan_class)
                 }
             };
+        let pending_work = owed && matches!(plan, Plan::Submit { .. });
         plans.insert(p.pubkey, plan);
         candidates.push(Candidate {
             pubkey: p.pubkey,
             priority,
             plan_class,
+            pending_work,
         });
     }
 
-    let summary = scheduler::run_cycle(cycle, now_slot, candidates, budget, quarantine, |c, allowance| {
+    let summary = scheduler::run_cycle(cycle, now_slot, started, candidates, budget, quarantine, |c, ab| {
         let (route, hints) = match plans.get(&c.pubkey) {
             Some(Plan::Submit { route_owner: None, hints }) => (
                 CrankRoute::Live {
@@ -264,13 +277,18 @@ pub fn run_one_cycle(
                 },
                 hints.as_slice(),
             ),
-            Some(Plan::OwnerWindow) | None => return Ok((Attempt::Idle { cu: 0 }, 0)),
-            Some(Plan::HintError(e)) => return Ok((Attempt::Failed { error: e.clone(), cu: 0 }, 0)),
+            Some(Plan::OwnerWindow) | None => return Ok(Attempt::Idle { cu: 0 }),
+            Some(Plan::HintError(e)) => return Ok(Attempt::Failed { error: e.clone(), cu: 0 }),
         };
         let mut outcomes = Vec::new();
         let mut rpc_error = None;
         let mut slot = now_slot;
-        for _ in 0..SOURCE_LIEN_DRAIN_MAX_STEPS.min(allowance.max(1)) {
+        // Every tx is admitted by the budget first (wall, CU reserve, tx
+        // count, per-attempt cap) and counted whatever its outcome.
+        for _ in 0..SOURCE_LIEN_DRAIN_MAX_STEPS {
+            if !ab.begin_tx() {
+                break;
+            }
             let o = match submit::submit_crank_routed(
                 ctx.rpc,
                 ctx.program_id,
@@ -283,10 +301,13 @@ pub fn run_one_cycle(
             ) {
                 Ok(o) => o,
                 Err(e) => {
+                    // Unknown CU: the full reservation stays charged.
+                    ab.settle_tx(None);
                     rpc_error = Some(e.to_string());
                     break;
                 }
             };
+            ab.settle_tx(o.program_cu());
             cu.observe(&o);
             // Keep draining only while the TARGET moved (A6 one domain per
             // call); a reward-portfolio byte diff alone is not drain progress.
@@ -305,7 +326,6 @@ pub fn run_one_cycle(
             }
         }
         let attempt = attempt_from(&outcomes, rpc_error.as_deref());
-        let sent = outcomes.len().max(1);
         for o in outcomes {
             records.push(SubmissionRecord {
                 cycle,
@@ -314,7 +334,7 @@ pub fn run_one_cycle(
                 outcome: o,
             });
         }
-        Ok((attempt, sent))
+        Ok(attempt)
     });
     Ok(summary)
 }
@@ -332,6 +352,7 @@ mod tests {
             mutated,
             target_bytes_diff: 0,
             reward_bytes_diff: None,
+            market_bytes_diff: None,
             program_cu: Some(cu),
             tx_cu: None,
         }

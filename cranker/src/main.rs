@@ -20,7 +20,12 @@
 //! Deliberate omissions (see cranker/README.md for the full stub inventory):
 //!   * No `SyncMaintenanceFee` submission in the loop (M1 proved fee routing).
 //!   * No priority-fee logic. No leader-slot prediction. No jito-bundle.
-//!   * No fee, bounty or mainnet path. Nothing here claims fees.
+//!   * Fees: Live cranks append the keeper's own reward portfolio, so when a
+//!     market enables a liquidation cranker share (the local bootstrap sets
+//!     5000 bps; upstream defaults are 0) that share **accrues** into the
+//!     keeper's portfolio. Nothing withdraws it by default: the only withdraw
+//!     path is the opt-in `CRANKER_WITHDRAWAL_TEST=1` spot-check against the
+//!     local validator. No bounty path, no mainnet path.
 
 use anyhow::{anyhow, Context, Result};
 use percolator::AutoCrankPlanV16;

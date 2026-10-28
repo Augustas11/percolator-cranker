@@ -36,36 +36,60 @@ pub fn resolved_bucket_deadline(group: &MarketGroupV16, expiry_slot: u64) -> u64
     expiry_slot.min(group.resolved_slot.saturating_add(horizon))
 }
 
-/// The asset whose backing bucket is due to expire at `now_slot`, if any.
+/// The asset to name in the single Resolved-mode hint at `now_slot`, if any.
 ///
 /// Domains are `asset_index * 2 + side`. Only `Fresh` buckets qualify: the
 /// engine's hint path (`first_lapsed_source_backing_for_asset_at_slot`) acts
 /// on lapsed Fresh buckets only. Expiry turns a liened Fresh bucket into
 /// `Impaired` and keeps its old `expiry_slot`, so counting Impaired here
-/// would pin the single hint on a bucket the engine has already handled and
-/// starve the one that is actually due. Among due buckets the earliest
-/// deadline wins, ties broken by lower asset index.
-pub fn resolved_backing_hint(group: &MarketGroupV16, now_slot: u64) -> Option<u16> {
+/// would pin the hint on a bucket the engine has already handled.
+///
+/// Which deadline? Engine `4db11a8c` (the default pin) checks the **raw**
+/// `expiry_slot <= now` (`repo/src/v16.rs` ~9546). Engine `68859b94` also
+/// caps it at `resolved_slot + H` (#224). So:
+/// 1. assets with a bucket lapsed by its raw expiry come first: every
+///    engine rev acts on those;
+/// 2. only if there are none, assets due by the horizon cap (the preview
+///    engine acts on these; the default one answers NonProgress, i.e. idle);
+/// 3. within the chosen set, `rotation` (the cycle number) picks the asset
+///    round-robin, so several due assets are served in turn and a wrong
+///    guess on one can never starve another.
+pub fn resolved_backing_hint(group: &MarketGroupV16, now_slot: u64, rotation: u64) -> Option<u16> {
     if group.mode != MarketModeV16::Resolved {
         return None;
     }
     let slots = group.config.max_market_slots as usize;
-    group
+    let fresh: Vec<(usize, u64)> = group
         .source_backing_buckets
         .iter()
         .enumerate()
-        .filter(|(domain, _)| domain / 2 < slots)
-        .filter(|(_, b)| b.status == BackingBucketStatusV16::Fresh)
-        .map(|(domain, b)| (resolved_bucket_deadline(group, b.expiry_slot), domain / 2))
-        .filter(|(deadline, _)| *deadline <= now_slot)
-        .min()
-        .and_then(|(_, asset)| u16::try_from(asset).ok())
+        .filter(|(domain, b)| domain / 2 < slots && b.status == BackingBucketStatusV16::Fresh)
+        .map(|(domain, b)| (domain / 2, b.expiry_slot))
+        .collect();
+    let mut due: Vec<usize> = fresh
+        .iter()
+        .filter(|(_, expiry)| *expiry <= now_slot)
+        .map(|(a, _)| *a)
+        .collect();
+    if due.is_empty() {
+        due = fresh
+            .iter()
+            .filter(|(_, expiry)| resolved_bucket_deadline(group, *expiry) <= now_slot)
+            .map(|(a, _)| *a)
+            .collect();
+    }
+    due.sort_unstable();
+    due.dedup();
+    if due.is_empty() {
+        return None;
+    }
+    u16::try_from(due[(rotation as usize) % due.len()]).ok()
 }
 
 /// Hints to attach to a crank on a Resolved market: zero or one
 /// oracle-less observation.
-pub fn resolved_crank_hints(group: &MarketGroupV16, now_slot: u64) -> Vec<FetchedObservation> {
-    resolved_backing_hint(group, now_slot)
+pub fn resolved_crank_hints(group: &MarketGroupV16, now_slot: u64, rotation: u64) -> Vec<FetchedObservation> {
+    resolved_backing_hint(group, now_slot, rotation)
         .map(|asset_index| FetchedObservation {
             asset_index,
             oracle_accounts: Vec::new(),
@@ -102,21 +126,42 @@ mod tests {
     fn no_hint_outside_resolved() {
         let mut g = group_with(&[(2, BackingBucketStatusV16::Fresh, 10)]);
         g.mode = MarketModeV16::Live;
-        assert_eq!(resolved_backing_hint(&g, 1_000_000), None);
+        assert_eq!(resolved_backing_hint(&g, 1_000_000, 0), None);
     }
 
     #[test]
-    fn earliest_due_bucket_wins() {
-        // asset 1 short (domain 3) due at 50, asset 2 long (domain 4) due at 40,
-        // asset 0 long (domain 0) not due yet.
+    fn raw_lapsed_assets_are_served_in_rotation() {
+        // asset 1 short (domain 3) lapsed at 50, asset 2 long (domain 4) at 40,
+        // asset 0 long (domain 0) far in the future.
         let g = group_with(&[
             (0, BackingBucketStatusV16::Fresh, 5_000_000),
             (3, BackingBucketStatusV16::Fresh, 50),
             (4, BackingBucketStatusV16::Fresh, 40),
         ]);
-        assert_eq!(resolved_backing_hint(&g, 60), Some(2));
-        assert_eq!(resolved_backing_hint(&g, 45), Some(2));
-        assert_eq!(resolved_backing_hint(&g, 39), None);
+        assert_eq!(resolved_backing_hint(&g, 60, 0), Some(1));
+        assert_eq!(resolved_backing_hint(&g, 60, 1), Some(2));
+        assert_eq!(resolved_backing_hint(&g, 60, 2), Some(1));
+        assert_eq!(resolved_backing_hint(&g, 45, 0), Some(2));
+        assert_eq!(resolved_backing_hint(&g, 45, 1), Some(2));
+        // Nothing raw-lapsed and the horizon cap (resolved_slot 1000 + H) not reached.
+        assert_eq!(resolved_backing_hint(&g, 39, 0), None);
+    }
+
+    /// Review finding (default pin 4db11a8c checks the RAW expiry): once
+    /// past the horizon cap, a far-dated bucket on a lower asset ties with
+    /// a genuinely lapsed one. The lapsed one must win on every cycle, or
+    /// the hint lands NonProgress forever and the lapsed bucket never expires.
+    #[test]
+    fn raw_lapsed_bucket_beats_horizon_tie_on_default_pin() {
+        let g = group_with(&[
+            (0, BackingBucketStatusV16::Fresh, 5_000_000), // asset 0, not lapsed
+            (5, BackingBucketStatusV16::Fresh, 1_500),     // asset 2, lapsed
+        ]);
+        let now = 2_000;
+        assert!(resolved_bucket_deadline(&g, 5_000_000) <= now, "both are horizon-due");
+        for rotation in 0..4 {
+            assert_eq!(resolved_backing_hint(&g, now, rotation), Some(2));
+        }
     }
 
     #[test]
@@ -125,7 +170,7 @@ mod tests {
             (0, BackingBucketStatusV16::Expired, 10),
             (2, BackingBucketStatusV16::Empty, 10),
         ]);
-        assert_eq!(resolved_backing_hint(&g, 1_000_000), None);
+        assert_eq!(resolved_backing_hint(&g, 1_000_000, 0), None);
     }
 
     /// Review finding: an Impaired bucket keeps its old (earliest) expiry.
@@ -136,7 +181,7 @@ mod tests {
             (1, BackingBucketStatusV16::Impaired, 10),
             (7, BackingBucketStatusV16::Fresh, 50),
         ]);
-        assert_eq!(resolved_backing_hint(&g, 60), Some(3));
+        assert_eq!(resolved_backing_hint(&g, 60, 0), Some(3));
     }
 
     #[test]
@@ -144,8 +189,10 @@ mod tests {
         let g = group_with(&[(6, BackingBucketStatusV16::Fresh, u64::MAX)]);
         let deadline = resolved_bucket_deadline(&g, u64::MAX);
         assert!(deadline > g.resolved_slot && deadline < u64::MAX);
-        assert_eq!(resolved_backing_hint(&g, deadline - 1), None);
-        assert_eq!(resolved_backing_hint(&g, deadline), Some(3));
+        // Never raw-lapsed: only the horizon-cap fallback names it (the
+        // preview engine acts on it; the default pin answers NonProgress).
+        assert_eq!(resolved_backing_hint(&g, deadline - 1, 0), None);
+        assert_eq!(resolved_backing_hint(&g, deadline, 0), Some(3));
     }
 
     /// Wire: the resolved hint is an ordinary tag-5 hint with zero oracle
@@ -153,7 +200,7 @@ mod tests {
     #[test]
     fn resolved_hint_encodes_as_single_oracle_less_tag5_hint() {
         let g = group_with(&[(3, BackingBucketStatusV16::Fresh, 10)]);
-        let hints = resolved_crank_hints(&g, 20);
+        let hints = resolved_crank_hints(&g, 20, 0);
         assert_eq!(hints.len(), 1);
         let ix = ProgInstruction::PermissionlessCrank {
             now_slot: 20,

@@ -72,6 +72,9 @@ pub enum CrankOutcome {
         /// Byte-diff count on the cranker reward portfolio, if provided.
         /// Non-zero indicates a fee share landed.
         reward_bytes_diff: Option<usize>,
+        /// Byte-diff count on the market account (Resolved route only):
+        /// non-zero when a backing hint expired a bucket.
+        market_bytes_diff: Option<usize>,
         /// CU the percolator program itself consumed (from the tx logs).
         program_cu: Option<u64>,
         /// CU for the whole tx, including the two compute-budget ixs.
@@ -291,73 +294,19 @@ pub fn submit_crank_routed(
         CrankRoute::Live { reward_portfolio } => *reward_portfolio,
         CrankRoute::Resolved { .. } => None,
     };
-    // Sanity: hint counts must match the fetched oracle accounts, otherwise
-    // the wrapper consumes the wrong number of tail accounts per hint.
-    let hints: Vec<CrankObservationHint> = observations
-        .iter()
-        .map(|obs| CrankObservationHint {
-            asset_index: obs.asset_index,
-            oracle_accounts: obs.oracle_account_count(),
-        })
-        .collect();
-
-    let mut pre_ixs = vec![cu_ix(), heap_ix()];
-    let accounts = match route {
-        // Live: payer, market, portfolio, then oracle accounts in hint
-        // order, then optional reward portfolio.
-        CrankRoute::Live { reward_portfolio } => {
-            let mut accounts = vec![
-                AccountMeta::new(payer.pubkey(), true),
-                AccountMeta::new(*market, false),
-                AccountMeta::new(*target_portfolio, false),
-            ];
-            for obs in observations {
-                for oracle_ai in &obs.oracle_accounts {
-                    accounts.push(AccountMeta::new_readonly(*oracle_ai, false));
-                }
-            }
-            if let Some(reward) = reward_portfolio {
-                accounts.push(AccountMeta::new(**reward, false));
-            }
-            accounts
-        }
-        CrankRoute::Resolved {
-            owner,
-            mint,
-            vault,
-            vault_authority,
-        } => {
-            let owner_ata =
-                spl_associated_token_account::get_associated_token_address(owner, mint);
-            pre_ixs.push(
-                spl_associated_token_account::instruction::create_associated_token_account_idempotent(
-                    &payer.pubkey(),
-                    owner,
-                    mint,
-                    &spl_token::ID,
-                ),
-            );
-            vec![
-                AccountMeta::new_readonly(*owner, *owner == payer.pubkey()),
-                AccountMeta::new(*market, false),
-                AccountMeta::new(*target_portfolio, false),
-                AccountMeta::new(owner_ata, false),
-                AccountMeta::new(*vault, false),
-                AccountMeta::new_readonly(*vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ]
-        }
-    };
-
-    let ix = ProgInstruction::PermissionlessCrank {
+    let (ixs, crank_ix_index) = build_crank_instructions(
+        program_id,
+        &payer.pubkey(),
+        market,
+        target_portfolio,
+        route,
+        observations,
         now_slot,
-        observations: hints,
-    };
-    let instruction = Instruction {
-        program_id: *program_id,
-        accounts,
-        data: ix.encode(),
-    };
+    );
+    // On the Resolved route a backing hint can make market-only progress
+    // (expiring a bucket) without touching the target, so the market
+    // account is diffed too.
+    let track_market = matches!(route, CrankRoute::Resolved { .. });
 
     // Snapshot pre-state. Layout 18 is required on the decode path;
     // a stale-layout account is a hard reject, not a crank.
@@ -377,6 +326,11 @@ pub fn submit_crank_routed(
         Some(r) => Some(rpc.get_account_data(r).context("read reward portfolio pre-state")?),
         None => None,
     };
+    let pre_market = if track_market {
+        Some(rpc.get_account_data(market).context("read market pre-state")?)
+    } else {
+        None
+    };
     let pre_state_hash = fnv_hash(&pre_target);
 
     // Submit with retry-on-blockhash-not-found (same pattern the M1 client
@@ -386,8 +340,6 @@ pub fn submit_crank_routed(
         let (bh, _) = rpc
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
             .context("get_latest_blockhash")?;
-        let mut ixs = pre_ixs.clone();
-        ixs.push(instruction.clone());
         let tx = Transaction::new_signed_with_payer(
             &ixs,
             Some(&payer.pubkey()),
@@ -412,9 +364,17 @@ pub fn submit_crank_routed(
                     (Some(a), Some(b)) => Some(byte_diff_count(a, b)),
                     _ => None,
                 };
+                let market_bytes_diff = match &pre_market {
+                    Some(a) => Some(byte_diff_count(
+                        a,
+                        &rpc.get_account_data(market).context("read market post-state")?,
+                    )),
+                    None => None,
+                };
                 let post_state_hash = fnv_hash(&post_target);
                 let mutated = target_bytes_diff > 0
-                    || reward_bytes_diff.map(|d| d > 0).unwrap_or(false);
+                    || reward_bytes_diff.map(|d| d > 0).unwrap_or(false)
+                    || market_bytes_diff.map(|d| d > 0).unwrap_or(false);
                 let (program_cu, tx_cu) = if measure_cu() {
                     fetch_cu(rpc, program_id, &signature)
                 } else {
@@ -427,6 +387,7 @@ pub fn submit_crank_routed(
                     mutated,
                     target_bytes_diff,
                     reward_bytes_diff,
+                    market_bytes_diff,
                     program_cu,
                     tx_cu,
                 });
@@ -439,7 +400,7 @@ pub fn submit_crank_routed(
                     last_err = Some(msg);
                     continue;
                 }
-                let error_name = wrapper_error_name(&msg);
+                let error_name = wrapper_error_name_for_ix(&msg, crank_ix_index);
                 return Ok(CrankOutcome::HardReject { error: msg, error_name, program_cu });
             }
         }
@@ -447,13 +408,115 @@ pub fn submit_crank_routed(
     Err(anyhow!(last_err.unwrap_or_else(|| "unknown submit error".to_string())))
 }
 
+/// The tx's instruction list: compute-budget ixs, (Resolved route) an
+/// idempotent owner-ATA create, then the crank. Returns the crank's index,
+/// which error attribution needs. Pure: no RPC.
+pub fn build_crank_instructions(
+    program_id: &Pubkey,
+    payer: &Pubkey,
+    market: &Pubkey,
+    target_portfolio: &Pubkey,
+    route: &CrankRoute<'_>,
+    observations: &[FetchedObservation],
+    now_slot: u64,
+) -> (Vec<Instruction>, usize) {
+    // Hint counts must match the fetched oracle accounts, otherwise the
+    // wrapper consumes the wrong number of tail accounts per hint.
+    let hints: Vec<CrankObservationHint> = observations
+        .iter()
+        .map(|obs| CrankObservationHint {
+            asset_index: obs.asset_index,
+            oracle_accounts: obs.oracle_account_count(),
+        })
+        .collect();
+    let mut ixs = vec![cu_ix(), heap_ix()];
+    let accounts = match route {
+        // Live: payer, market, portfolio, then oracle accounts in hint
+        // order, then optional reward portfolio.
+        CrankRoute::Live { reward_portfolio } => {
+            let mut accounts = vec![
+                AccountMeta::new(*payer, true),
+                AccountMeta::new(*market, false),
+                AccountMeta::new(*target_portfolio, false),
+            ];
+            for obs in observations {
+                for oracle_ai in &obs.oracle_accounts {
+                    accounts.push(AccountMeta::new_readonly(*oracle_ai, false));
+                }
+            }
+            if let Some(reward) = reward_portfolio {
+                accounts.push(AccountMeta::new(**reward, false));
+            }
+            accounts
+        }
+        CrankRoute::Resolved {
+            owner,
+            mint,
+            vault,
+            vault_authority,
+        } => {
+            let owner_ata = spl_associated_token_account::get_associated_token_address(owner, mint);
+            ixs.push(
+                spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                    payer,
+                    owner,
+                    mint,
+                    &spl_token::ID,
+                ),
+            );
+            vec![
+                AccountMeta::new_readonly(*owner, owner == payer),
+                AccountMeta::new(*market, false),
+                AccountMeta::new(*target_portfolio, false),
+                AccountMeta::new(owner_ata, false),
+                AccountMeta::new(*vault, false),
+                AccountMeta::new_readonly(*vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ]
+        }
+    };
+    let crank_index = ixs.len();
+    ixs.push(Instruction {
+        program_id: *program_id,
+        accounts,
+        data: ProgInstruction::PermissionlessCrank {
+            now_slot,
+            observations: hints,
+        }
+        .encode(),
+    });
+    (ixs, crank_index)
+}
+
+/// Like [`wrapper_error_name`], but only when the error came from the
+/// instruction at `ix_index` (the crank). A custom error from another
+/// instruction in the tx (the ATA create, a token program) is not a
+/// wrapper error and gets no wrapper name.
+pub fn wrapper_error_name_for_ix(msg: &str, ix_index: usize) -> Option<&'static str> {
+    let marker = "Error processing Instruction ";
+    if let Some(i) = msg.find(marker) {
+        let n: String = msg[i + marker.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if n.parse::<usize>().ok() != Some(ix_index) {
+            return None;
+        }
+    }
+    wrapper_error_name(msg)
+}
+
+/// Compute-unit limit requested by every crank tx. The scheduler reserves
+/// this much CU budget before each tx.
+pub const TX_CU_LIMIT: u32 = 1_400_000;
+
 /// `CRANKER_MEASURE_CU=0` skips the extra `getTransaction` per crank.
 fn measure_cu() -> bool {
     std::env::var("CRANKER_MEASURE_CU").ok().as_deref() != Some("0")
 }
 
 fn cu_ix() -> Instruction {
-    ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)
+    ComputeBudgetInstruction::set_compute_unit_limit(TX_CU_LIMIT)
 }
 
 fn heap_ix() -> Instruction {
@@ -511,11 +574,90 @@ mod tests {
             mutated,
             target_bytes_diff: 0,
             reward_bytes_diff: None,
+            market_bytes_diff: None,
             program_cu: None,
             tx_cu: None,
         };
         assert_eq!(ok(false).class(), OutcomeClass::Idle);
         assert_eq!(ok(true).class(), OutcomeClass::Progress);
+    }
+
+    /// Review finding: the Resolved route had no account-meta test. The
+    /// wrapper's close_resolved branch reads exactly this layout.
+    #[test]
+    fn resolved_route_account_layout() {
+        let (program, payer, market, target) = (
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+        );
+        let (owner, mint, vault, vault_auth) = (
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+        );
+        let route = CrankRoute::Resolved { owner, mint, vault, vault_authority: vault_auth };
+        let hint = FetchedObservation { asset_index: 2, oracle_accounts: vec![] };
+        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route, &[hint], 9);
+        assert_eq!(idx, 3, "cu, heap, ATA create, crank");
+        assert_eq!(ixs[2].program_id, spl_associated_token_account::ID);
+        let crank = &ixs[idx];
+        assert_eq!(crank.program_id, program);
+        let keys: Vec<_> = crank.accounts.iter().map(|m| (m.pubkey, m.is_signer, m.is_writable)).collect();
+        let owner_ata = spl_associated_token_account::get_associated_token_address(&owner, &mint);
+        assert_eq!(
+            keys,
+            vec![
+                (owner, false, false),
+                (market, false, true),
+                (target, false, true),
+                (owner_ata, false, true),
+                (vault, false, true),
+                (vault_auth, false, false),
+                (spl_token::ID, false, false),
+            ]
+        );
+        // Payer is not a signer of the crank unless it owns the portfolio.
+        let route_self = CrankRoute::Resolved { owner: payer, mint, vault, vault_authority: vault_auth };
+        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route_self, &[], 9);
+        assert!(ixs[idx].accounts[0].is_signer);
+        // Wire: one oracle-less hint for asset 2.
+        let (ixs, idx) = build_crank_instructions(
+            &program, &payer, &market, &target, &route,
+            &[FetchedObservation { asset_index: 2, oracle_accounts: vec![] }], 9,
+        );
+        assert_eq!(&ixs[idx].data[9..], &[1, 2, 0, 0]);
+    }
+
+    #[test]
+    fn live_route_account_layout() {
+        let (program, payer, market, target, reward, oracle) = (
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+        );
+        let route = CrankRoute::Live { reward_portfolio: Some(&reward) };
+        let obs = FetchedObservation { asset_index: 0, oracle_accounts: vec![oracle] };
+        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route, &[obs], 1);
+        assert_eq!(idx, 2);
+        let keys: Vec<_> = ixs[idx].accounts.iter().map(|m| m.pubkey).collect();
+        assert_eq!(keys, vec![payer, market, target, oracle, reward]);
+        assert!(ixs[idx].accounts[0].is_signer);
+    }
+
+    #[test]
+    fn error_names_only_for_the_crank_instruction() {
+        let ours = "Error processing Instruction 3: custom program error: 0x16";
+        let ata = "Error processing Instruction 2: custom program error: 0x1";
+        assert_eq!(wrapper_error_name_for_ix(ours, 3), Some("EngineNonProgress"));
+        assert_eq!(wrapper_error_name_for_ix(ata, 3), None);
+        // No instruction index in the message: fall back to the code.
+        assert_eq!(wrapper_error_name_for_ix("custom program error: 0x13", 3), Some("EngineStale"));
     }
 
     #[test]

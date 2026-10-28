@@ -19,7 +19,7 @@ Local prototype work against [aeyakovenko/percolator](https://github.com/aeyakov
 
 ## Status
 
-**Reference / dry-run only; not a paid live service.** All fee, bounty and mainnet paths stay off: nothing here claims fees, and the local bootstrap's 5000 bps cranker share only exercises the ABI path.
+**Reference / dry-run only; not a paid live service.** No bounty or mainnet path. Live cranks append the keeper's reward portfolio, so on a market that enables a liquidation cranker share (the local bootstrap sets 5000 bps; upstream defaults are 0) that share accrues into the keeper's own portfolio. Nothing withdraws it by default; the only withdraw path is the opt-in `CRANKER_WITHDRAWAL_TEST=1` local spot-check.
 
 - **Pins (2026-10-28)**: wrapper `5cb331dd` (`origin/main`) + engine `4db11a8c` (the wrapper's Cargo pin). Upstream re-pin prog #456 is still a draft, so the engine launch-fix batch `68859b94` runs only as a **pre-merge preview** (`scripts/preview_launch_fixes.sh`, path-patched, never the default). Layout 18; `AutoCrankPlanV16` unchanged.
 - **M1**: end-to-end green on the new pin. A fresh no-op `PermissionlessCrank` consumes **18,565 program CU** (tx total 18,889); it was 17,975 on the old pin. Preview pin: 18,820 (19,144).

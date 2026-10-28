@@ -352,8 +352,14 @@ once-only fix-up in `scripts/m1_bringup.sh` if this persists.
          (owner ATA, vault, vault authority, token program).
          `CrankRoute::Resolved` builds that layout. Inside the window,
          third-party portfolios are skipped as idle.
-      2. Recovery crank bumps `position_epoch` (`b40ffbd8`). Bindings are
-         re-read, never reused across cycles or after a mutating crank.
+      2. Recovery crank bumps `position_epoch` (`b40ffbd8`).
+         - The production crank path takes no binding (tag 5 has no epoch).
+           Owner instructions re-read the binding from fresh bytes before
+           sending.
+         - Tested by `live_shaped` check d: a Recovery-asset force-close
+           bumps the epoch, the stale binding is rejected, and the fresh one
+           is accepted.
+         - Not reached: the market-wide Recovery crank path itself.
          `SetMatcherConfig` now also binds `position_epoch` +
          `asset_generation_frontier` (cranker doesn't send it).
       3. No layout/plan change (above).
@@ -404,6 +410,22 @@ once-only fix-up in `scripts/m1_bringup.sh` if this persists.
       | c. vault holds only dust after exits | **FAIL**: 13,482,914 left against 8,000,528 allowed (lapsed principal + dust); ≈5.48M unexplained (F2) | **FAIL**: 9,127,703 left against 9,000,528 allowed + 48,674 insurance that couldn't be withdrawn; ≈78.5k unexplained; CloseSlab rejected `LockActive` |
       | d. position epoch re-read after Recovery | PASS: epoch 1 → 2; ClosePortfolio with the stale epoch rejected `EngineStale`; re-read accepted | PASS |
       | e. coverage | Impaired bucket missing | Impaired bucket missing |
+
+      **Re-run after the PR #1 review fixes (Step A, 200 cycles).** Changes
+      since the table above: assertions tightened, keys seeded, and a
+      keeper-only Resolved cohort added (check f). Results:
+      - a PASS (longest failure run 35 cycles; bound 67);
+      - b PASS: no senior-capital shortfall;
+      - c FAIL: 1,543,750 atoms unexplained, and the market account was not
+        closed;
+      - d PASS;
+      - e FAIL: no Impaired bucket;
+      - f: 7 of 8 cohort members closed through the keeper's Resolved route,
+        each paid at least its capital. The eighth was already terminal at
+        resolve, a check bug that is now fixed and re-passed at 40 cycles.
+
+      These numbers move from run to run with validator slot timing. The
+      action-plan digest pins the inputs.
 
       Cranker totals (Step A): 2,079 txs; 634 progressed, 660 idle, 163
       failed; 381 resolved hints sent. The failures sit on F1-wedged

@@ -34,10 +34,16 @@ PROG_SO="$PROG_DIR/target/deploy/percolator_prog.so"
 
 if [ ! -f "$PROG_SO" ] || [ "${FORCE_SBF_REBUILD:-0}" = "1" ]; then
   echo "==> building percolator_prog.so (cargo build-sbf --tools-version v1.52)"
+  # cargo-build-sbf 2.0.x unwraps read_dir(~/.cache/solana) before it would
+  # download platform-tools, so a fresh machine (or CI runner) needs the dir.
+  mkdir -p "$HOME/.cache/solana"
   ( cd "$PROG_DIR" && cargo build-sbf --tools-version v1.52 )
 fi
 
 PROG_ID="$(solana-keygen pubkey "$PROG_KEYPAIR")"
+# Every cluster command names the local validator explicitly: never rely on
+# the global Solana config, which may point at devnet or mainnet.
+LOCAL_RPC="http://127.0.0.1:8899"
 export PERCOLATOR_PROGRAM_ID="$PROG_ID"
 echo "program id: $PROG_ID"
 
@@ -59,29 +65,32 @@ if [ "${KEEP_VALIDATOR:-0}" != "1" ]; then
     > /tmp/solana-test-validator.log 2>&1 &
   echo $! > /tmp/solana-test-validator.pid
   for i in $(seq 1 30); do
-    if solana cluster-version >/dev/null 2>&1; then
-      echo "==> validator up (slot=$(solana epoch-info | awk '/^Slot:/ {print $2}'))"
+    if solana cluster-version --url "$LOCAL_RPC" >/dev/null 2>&1; then
+      echo "==> validator up (slot=$(solana epoch-info --url "$LOCAL_RPC" | awk '/^Slot:/ {print $2}'))"
       break
     fi
     sleep 1
   done
 fi
 
-solana config set --url http://127.0.0.1:8899 >/dev/null
 if [ ! -f "$HOME/.config/solana/id.json" ]; then
   solana-keygen new --no-bip39-passphrase --silent --outfile "$HOME/.config/solana/id.json"
 fi
 
-PAYER_BAL_LAMPORTS="$(solana balance --lamports | awk '{print $1}')"
+if ! solana cluster-version --url "$LOCAL_RPC" >/dev/null 2>&1; then
+  echo "no local validator on $LOCAL_RPC" >&2
+  exit 2
+fi
+PAYER_BAL_LAMPORTS="$(solana balance --url "$LOCAL_RPC" --lamports | awk '{print $1}')"
 if [ "$PAYER_BAL_LAMPORTS" -lt 100000000000 ]; then
   echo "==> airdrop payer"
-  solana airdrop 100 >/dev/null
+  solana airdrop --url "$LOCAL_RPC" 100 >/dev/null
 fi
 
 # Deploy (re-deploys cheap if program already at this id)
-if ! solana program show "$PROG_ID" >/dev/null 2>&1; then
+if ! solana program show --url "$LOCAL_RPC" "$PROG_ID" >/dev/null 2>&1; then
   echo "==> deploying program $PROG_ID"
-  solana program deploy "$PROG_SO" --program-id "$PROG_KEYPAIR" >/dev/null
+  solana program deploy --url "$LOCAL_RPC" "$PROG_SO" --program-id "$PROG_KEYPAIR" >/dev/null
 fi
 
 echo "==> running client/m1_bringup"
