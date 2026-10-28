@@ -126,7 +126,8 @@ fn poll(
         // Look up the latest landed-crank signature's slot until one lookup succeeds, then
         // cache it; the previous slot stays in place meanwhile. History search, so a
         // monitor restarted on an old log still finds it.
-        if keeper.signature != *cached_sig {
+        // Also after log truncation, which resets the slot but may keep the same signature.
+        if keeper.signature != *cached_sig || keeper.last_success_slot.is_none() {
             let found = keeper
                 .signature
                 .as_ref()

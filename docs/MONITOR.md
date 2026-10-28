@@ -105,10 +105,13 @@ v16_program.rs:318, engine `ResolvedPayoutLedgerV16`, v16.rs:5954).
   still reported then.
 - `{component="receipt_face_remaining"}`: exact Σ `face − paid_effective`, the
   ceiling before the rate haircut.
-- `{component="unreceipted_equity_upper_bound"}`: Σ `max(capital + pnl, 0)` for
-  portfolios with no receipt. **An upper bound, not exact owed**: the resolved
-  close (v16.rs:~19452) still settles fees and K/F, and the receipt's
-  positive face is then paid at the haircut rate.
+- `{component="unreceipted_stored_equity"}`: stored equity before settlement,
+  Σ `max(capital + pnl, 0)` for portfolios with no receipt. **Not exact owed and
+  not a bound**: the resolved close (v16.rs:~19452) still settles fees and K/F,
+  which can move it either way, and the receipt's positive face is then paid at
+  the haircut rate. The unpaid-claimant count uses the same stored values.
+  If a receipt's `paid_effective` exceeds its rate-adjusted face (two reads mixed),
+  `receipt_claimable_now` is omitted rather than reported as 0.
 - `resolved_payout_halted`: ledger `payout_halted`.
 Decode failures are
 counted and excluded from sums; inspect `accounts_decode_errors` alongside them.

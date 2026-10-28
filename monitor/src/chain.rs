@@ -90,8 +90,9 @@ pub fn mul_div_floor(a: u128, b: u128, d: u128) -> Option<u128> {
 
 /// Resolved-market claims. Open receipts are exact at the current payout rate, as
 /// engine `resolved_receipt_claimable_against_ledger` (v16.rs:18365). A portfolio
-/// with no receipt yet reports `max(capital + pnl, 0)`: an upper bound only, since
-/// the close path still settles fees and K/F and haircuts positive PnL.
+/// with no receipt yet reports its stored equity before settlement, `max(capital + pnl, 0)`:
+/// not a bound, since the close path still settles fees and K/F (either way) and
+/// haircuts positive PnL.
 pub fn resolved_sums<'a>(
     ledger: Option<&ResolvedPayoutLedgerV16>,
     portfolios: impl IntoIterator<Item = &'a PortfolioAccountV16Account>,
@@ -101,7 +102,7 @@ pub fn resolved_sums<'a>(
     let mut claimable = Some(0u128);
     let Some(ledger) = ledger else {
         return Ok(json!({"claimants_unpaid":0,"payout_halted":false,"owed_atoms":{
-            "receipt_face_remaining":"0","receipt_claimable_now":"0","unreceipted_equity_upper_bound":"0"}}));
+            "receipt_face_remaining":"0","receipt_claimable_now":"0","unreceipted_stored_equity":"0"}}));
     };
     let (num, den) = (ledger.current_payout_rate_num, ledger.current_payout_rate_den);
     for p in portfolios {
@@ -117,7 +118,9 @@ pub fn resolved_sums<'a>(
                 if !ledger.payout_halted {
                     claimable = claimable.and_then(|sum| {
                         let gross = mul_div_floor(face_total, num, den)?;
-                        sum.checked_add(gross.saturating_sub(paid))
+                        // gross < paid only from mixing reads (rate vs receipt): omit, as
+                        // the engine's checked_sub would error.
+                        sum.checked_add(gross.checked_sub(paid)?)
                     });
                 }
             }
@@ -133,7 +136,7 @@ pub fn resolved_sums<'a>(
     }
     Ok(json!({"claimants_unpaid":unpaid,"payout_halted":ledger.payout_halted,"owed_atoms":{
         "receipt_face_remaining":face.to_string(),"receipt_claimable_now":claimable.map(|c| c.to_string()),
-        "unreceipted_equity_upper_bound":equity.to_string()}}))
+        "unreceipted_stored_equity":equity.to_string()}}))
 }
 
 pub fn fetch(rpc: &RpcClient, program: &Pubkey, market: &Pubkey, window: u64) -> Result<Value> {
@@ -264,7 +267,7 @@ mod tests {
         let mut ledger = ResolvedPayoutLedgerV16::EMPTY;
         ledger.current_payout_rate_num = 1;
         ledger.current_payout_rate_den = 2;
-        // No receipt: capital 9 + pnl 12 = 21 upper bound.
+        // No receipt: capital 9 + pnl 12 = 21 stored equity.
         let mut a = PortfolioAccountV16Account::default();
         a.capital = V16PodU128::new(9);
         a.pnl = V16PodI128::new(12);
@@ -281,10 +284,14 @@ mod tests {
         assert_eq!(v["claimants_unpaid"], 2);
         assert_eq!(
             v["owed_atoms"],
-            json!({"receipt_face_remaining":"70","receipt_claimable_now":"20","unreceipted_equity_upper_bound":"21"})
+            json!({"receipt_face_remaining":"70","receipt_claimable_now":"20","unreceipted_stored_equity":"21"})
         );
         assert_eq!(mul_div_floor(u128::MAX, 3, 4), Some(u128::MAX / 4 * 3 + 2));
         assert_eq!(mul_div_floor(7, 1, 0), None);
+        // Inconsistent reads (paid above face at the current rate): omitted, not 0.
+        let mut d = b;
+        d.resolved_payout_receipt.paid_effective = V16PodU128::new(75);
+        assert!(resolved_sums(Some(&ledger), [&d]).unwrap()["owed_atoms"]["receipt_claimable_now"].is_null());
         ledger.payout_halted = true;
         let v = resolved_sums(Some(&ledger), [&b]).unwrap();
         assert_eq!(v["owed_atoms"]["receipt_claimable_now"], "0");

@@ -15,7 +15,7 @@
 <section><h2>Resolved claims</h2><div id="resolved"></div></section></div>
 <script>
 'use strict';
-const QUARANTINE_SLOTS=1500, DRIFT_ATOMS_PER_HOUR=1000, NO_SUCCESS_SLOTS=750, LOG_STALE_SECONDS=120;
+const QUARANTINE_SLOTS=1500, DRIFT_ATOMS_PER_HOUR=1000, NO_SUCCESS_SLOTS=750, LOG_STALE_SECONDS=120, SNAPSHOT_STALE_SECONDS=60;
 const POLL_MS=5000, HOUR_SECONDS=3600;
 let history=[],lastMarket;
 function text(value){return value===null||value===undefined?'—':String(value);}
@@ -36,6 +36,7 @@ function render(s){
   if(s.mode==='live'&&k?.slots_since_last_success>NO_SUCCESS_SLOTS)alerts.push(`KeeperNoSuccessfulCrank: ${k.slots_since_last_success} slots`);
   if(k&&(k.log_age_seconds>LOG_STALE_SECONDS||!k.log_ok))alerts.push('KeeperLogStale');
   if(s.chain_read_ok===0)alerts.push('MonitorChainReadFailing (fires after 5m)');
+  if(Date.now()/1000-s.snapshot_unix_seconds>SNAPSHOT_STALE_SECONDS)alerts.push('MonitorSnapshotStale');
   if(lastMarket!==s.market){history=[];lastMarket=s.market;}
   if(s.chain_read_ok===1&&c){
     const t=s.snapshot_unix_seconds;
