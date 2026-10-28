@@ -1,0 +1,98 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      e2e:
+        description: "Run the SBF build + local-validator end-to-end job"
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SOLANA_VERSION: "2.0.21"
+
+jobs:
+  host:
+    name: build + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: host-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/pins.env') }}
+      - name: fetch pinned wrapper
+        run: ./scripts/fetch_upstream.sh
+      - name: build
+        run: cargo build --release --workspace --all-targets
+      - name: unit tests (integration tests self-skip without a validator)
+        run: cargo test --release --workspace
+
+  # The SBF build and local validator are heavier and not yet proven on
+  # hosted runners. The job runs on manual dispatch, or on every push when
+  # the repository variable RUN_E2E is "true". Until it has a green run, the
+  # README does not claim it.
+  e2e:
+    name: SBF build + bring-up + live_shaped (50 cycles)
+    needs: host
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.e2e) || vars.RUN_E2E == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            upstream/percolator-prog/target
+          key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/pins.env') }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/solana
+            ~/.cache/solana
+          key: solana-${{ runner.os }}-${{ env.SOLANA_VERSION }}-platform-tools-v1.52
+      - name: install Solana CLI
+        run: |
+          if [ ! -x "$HOME/.local/share/solana/install/active_release/bin/solana" ]; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          fi
+      - name: fetch pinned wrapper
+        run: ./scripts/fetch_upstream.sh
+      - name: SBF build + local bring-up
+        run: FORCE_SBF_REBUILD=1 ./scripts/m1_bringup.sh
+      - name: keeper dry-run (3 cycles)
+        run: |
+          source scripts/env.sh
+          export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey upstream/percolator-prog/target/deploy/percolator_prog-keypair.json)
+          CRANKER_CYCLES=3 cargo run --release -p percolator-cranker --bin cranker
+      - name: integration tests against the validator
+        run: |
+          source scripts/env.sh
+          export PERCOLATOR_TEST_RPC=http://127.0.0.1:8899
+          export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey upstream/percolator-prog/target/deploy/percolator_prog-keypair.json)
+          cargo test --release -p percolator-cranker --test lifecycle
+      # The scenario's liveness assertion currently fails on these pins
+      # because of the engine-side issue in docs/RUNBOOK.md → Known
+      # limitations. The step runs and uploads its report, but it does not
+      # gate the job; it is marked as such instead of being faked green.
+      - name: live_shaped (50 cycles) — known upstream issue, non-gating
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          CRANKER_CYCLES=50 ./scripts/live_shaped.sh 2>&1 | tee live-shaped-run.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-shaped-report
+          path: live-shaped-run.log

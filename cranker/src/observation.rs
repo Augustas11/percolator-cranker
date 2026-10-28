@@ -110,8 +110,8 @@ pub const PYTH_MAINNET_CANONICAL_SHARD: u16 = 0;
 /// * **`overrides`**: an explicit `feed_id → account` map. Populated by
 ///   the operator from their own tracking (a Pyth-receiver-crawling
 ///   indexer, a hand-curated table, or a Pyth-hosted API). Takes
-///   precedence when set. This is the operational-data edge from
-///   Q4/strategic-questions.
+///   precedence when set. This is operator-supplied data: market state
+///   alone does not name the Pyth account.
 ///
 /// * **`pda_shard`**: fallback derivation using the canonical
 ///   `PDA(seeds=[shard_le_bytes, feed_id], program_id=RECEIVER)`

@@ -22,8 +22,9 @@ spl-token = { version = "4.0", features = ["no-entrypoint"] }
 spl-associated-token-account = { version = "2.0", features = ["no-entrypoint"] }
 # Match the wrapper's engine pin exactly — otherwise two `percolator` crates
 # get linked into the graph with mismatched types. Wrapper `5cb331dd`
-# (origin/main, 2026-09-22) pins engine `4db11a8c`. See prep.md "Pins" for the
-# optional #456 pre-merge preview against engine `68859b94`.
+# (origin/main, 2026-09-22) pins engine `4db11a8c`. The optional
+# pre-merge preview against engine `68859b94` is
+# scripts/preview_launch_fixes.sh.
 percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "4db11a8cb0053815e23a35d3a7d3edc265d8d866" }
 percolator-prog = { path = "../repo-prog" }
 solana-transaction-status = "1.18"

@@ -23,7 +23,7 @@ if ! solana cluster-version --url http://127.0.0.1:8899 >/dev/null 2>&1; then
 fi
 
 if [ -z "${PERCOLATOR_PROGRAM_ID:-}" ]; then
-  PERCOLATOR_PROGRAM_ID="$(solana-keygen pubkey "$REPO_ROOT/repo-prog/target/deploy/percolator_prog-keypair.json")"
+  PERCOLATOR_PROGRAM_ID="$(solana-keygen pubkey "${PERCOLATOR_PROG_DIR:-$REPO_ROOT/repo-prog}/target/deploy/percolator_prog-keypair.json")"
 fi
 export PERCOLATOR_PROGRAM_ID
 if ! solana program show "$PERCOLATOR_PROGRAM_ID" --url http://127.0.0.1:8899 >/dev/null 2>&1; then
@@ -31,4 +31,4 @@ if ! solana program show "$PERCOLATOR_PROGRAM_ID" --url http://127.0.0.1:8899 >/
   exit 2
 fi
 
-CRANKER_SCENARIO=live_shaped exec cargo run --release --manifest-path "$REPO_ROOT/cranker/Cargo.toml"
+CRANKER_SCENARIO=live_shaped exec cargo run --release --manifest-path "${CRANKER_MANIFEST:-$REPO_ROOT/cranker/Cargo.toml}"

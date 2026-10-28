@@ -1706,7 +1706,7 @@ impl<'a> World<'a> {
     fn observe_market(&mut self, f0: &[(i128, i128)]) -> Result<MarketGroupV16> {
         let (_, _, g) = read_mkt(self.rpc, &self.market)?;
         for (d, b) in g.source_backing_buckets.iter().enumerate().take(2 * self.cfg.assets) {
-            // Engine finding (see cranker/scenario-findings.md): in Live, a
+            // Known engine-side gap (RUNBOOK → Known limitations): in Live, a
             // Fresh bucket past expiry that no portfolio references is never
             // normalized, and blocks refreshes that would newly attribute
             // positive PnL to that domain.
