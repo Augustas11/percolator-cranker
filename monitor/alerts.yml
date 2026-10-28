@@ -27,7 +27,9 @@ groups:
         annotations:
           summary: 'Fresh backing bucket with liens is near or past expiry'
       - alert: KeeperNoSuccessfulCrank
-        expr: percolator_keeper_slots_since_last_success > 750
+        # Live only: in Resolved mode a healthy keeper may land nothing (owner window,
+        # EngineNonProgress). KeeperLogStale still catches a stopped keeper there.
+        expr: percolator_keeper_slots_since_last_success > 750 and on(market) percolator_market_mode{mode="live"} == 1
         for: 1m
         labels:
           severity: warning
@@ -55,3 +57,11 @@ groups:
           severity: critical
         annotations:
           summary: 'Monitor scrape failing or monitor metrics absent'
+      # A hung poll loop would keep serving its last snapshot.
+      - alert: MonitorSnapshotStale
+        expr: time() - percolator_monitor_snapshot_unix_seconds > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Monitor snapshot older than 60 seconds'

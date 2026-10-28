@@ -165,22 +165,30 @@ every line used here.
 
 ## Alerts
 
-Load `monitor/alerts.yml` into Prometheus (group `percolator-monitor`).
+Load `monitor/alerts.yml` into Prometheus (group `percolator-monitor`). Name
+the scrape job `percolator-monitor`: MonitorDown matches `up{job="percolator-monitor"}`.
 
 | Alert | Threshold | Hold / severity |
 |---|---|---|
 | KeeperAccountUnrefreshable | `max by (market, account)` quarantined slots > 1500 (≈10 min at 400 ms/slot) | 1m / warning |
 | UnownedCollateralDrift | abs(delta(unowned[1h])) > 1000 atoms; tune per market | 1m / warning |
 | BackingBucketExpiringWithLiens | expiring with liens > 0 | 1m / warning |
-| KeeperNoSuccessfulCrank | slots since last landed crank > 750 | 1m / warning |
+| KeeperNoSuccessfulCrank | slots since last landed crank > 750, Live mode only | 1m / warning |
 | KeeperLogStale | log age > 120s or log read fails | 1m / critical |
 | MonitorChainReadFailing | chain read fails | 5m / critical |
 | MonitorDown | scrape `up == 0` or monitor metrics absent | 5m / critical |
+| MonitorSnapshotStale | snapshot older than 60 s (hung poll loop) | 2m / critical |
 
 The recording rule is `percolator:unowned_collateral_drift_atoms_per_hour =
-delta(percolator_unowned_collateral_atoms[1h])`. Idle cranks count as
-successful, so a quiet market does not trip KeeperNoSuccessfulCrank; progress
-is tracked separately in `keeper_attempts_total`. The dashboard lists threshold conditions before Prometheus hold
+delta(percolator_unowned_collateral_atoms[1h])`. Idle landed cranks count as
+successful, so a quiet Live market does not trip KeeperNoSuccessfulCrank;
+progress is tracked separately in `keeper_attempts_total`. The alert is gated
+to Live mode: in Resolved mode drip may send nothing (owner window) or get only
+`EngineNonProgress` rejects, which land no transaction. KeeperLogStale covers
+a stopped keeper in every mode. The 1000 atoms/h drift default is a
+placeholder: trading moves `pnl_pos_tot`, so set it per market before relying
+on it. The owner-window skip prints nothing, so it cannot clear a quarantine
+entry; drip's next landed crank or `EngineNonProgress` reject does. The dashboard lists threshold conditions before Prometheus hold
 times. Its hourly drift uses an hour of local browser samples and boundary
 interpolation; Prometheus remains authoritative for scrape-based delta and
 alert hold durations. Threshold constants match the rules.
@@ -197,7 +205,7 @@ contributors' public repos, and Prometheus exporter and alerting conventions.
   - Unit suffixes (`_atoms`, `_slots`, `_seconds`), `_total` only on counters,
     and gauges for engine counts that can fall.
   - A signed unowned value plus a separate `senior_shortfall_atoms`, matching
-    the engine's `validate_header_aggregate_totals` (v16.rs:8578), which treats
+    the engine's `validate_header_aggregate_totals` (v16.rs:8579), which treats
     senior claims above vault as invalid state.
   - `for:` holds, severity labels, and a monitor-down alert.
 - **Rejected:**
