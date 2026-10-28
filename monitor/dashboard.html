@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Percolator monitor</title>
+<style>
+:root{color-scheme:light dark;font:14px system-ui,sans-serif}body{max-width:1200px;margin:2rem auto;padding:0 1rem}h1{font-size:1.5rem}h2{font-size:1.1rem}section{border:1px solid #8886;border-radius:6px;padding:1rem;margin:1rem 0;overflow:auto}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.4rem;border-bottom:1px solid #8884;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}#conditions{border-color:#b87916}#error{color:#cf493c}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(350px,1fr));gap:1rem}.grid section{margin:0}small{opacity:.75}
+</style>
+<h1>Percolator · read-only monitor</h1><pre id="header">Loading…</pre><p id="error" role="status"></p>
+<section id="conditions"><h2>Conditions</h2><ul id="alerts"></ul><small>Threshold conditions; Prometheus applies the hold times in alerts.yml. Hourly drift needs an hour of dashboard samples.</small></section>
+<div class="grid"><section><h2>Accounts</h2><div id="accounts"></div></section>
+<section><h2>Keeper</h2><div id="keeper"></div></section>
+<section><h2>Quarantined accounts</h2><div id="quarantine"></div></section>
+<section><h2>Backing buckets</h2><div id="buckets"></div></section>
+<section><h2>Assets</h2><div id="assets"></div></section>
+<section><h2>Unowned collateral (atoms)</h2><div id="collateral"></div></section>
+<section><h2>Resolved claims</h2><div id="resolved"></div></section></div>
+<script>
+'use strict';
+const QUARANTINE_SLOTS=1500, DRIFT_ATOMS_PER_HOUR=1000, NO_SUCCESS_SLOTS=750, LOG_STALE_SECONDS=120, SNAPSHOT_STALE_SECONDS=60;
+const POLL_MS=5000, HOUR_SECONDS=3600;
+let history=[],lastMarket;
+function text(value){return value===null||value===undefined?'—':String(value);}
+function table(id,headers,rows){
+  const node=document.getElementById(id),t=document.createElement('table'),head=document.createElement('tr');
+  for(const label of headers){const th=document.createElement('th');th.textContent=label;head.append(th);}t.append(head);
+  for(const row of rows){const tr=document.createElement('tr');for(const value of row){const td=document.createElement('td');td.textContent=text(value);tr.append(td);}t.append(tr);}
+  node.replaceChildren(t);
+}
+function pairs(object){return Object.entries(object||{});}
+function render(s){
+  const k=s.keeper,b=s.buckets,c=s.collateral,r=s.resolved_claims;
+  document.getElementById('header').textContent=`Market: ${text(s.market)}\nSlot: ${text(s.chain_slot)} · Mode: ${text(s.mode)} · Chain OK: ${s.chain_read_ok===1?'yes':'NO'} · Keeper log age: ${text(k?.log_age_seconds?.toFixed(1))} s`;
+  document.getElementById('error').textContent=[s.chain_error,k?.log_error].filter(Boolean).join('\n');
+  const alerts=[];
+  for(const q of k?.quarantined_accounts||[])if(q.slots>QUARANTINE_SLOTS)alerts.push(`KeeperAccountUnrefreshable: ${q.account} (${q.slots} slots, ${q.error})`);
+  if(b?.expiring_with_liens>0)alerts.push(`BackingBucketExpiringWithLiens: ${b.expiring_with_liens}`);
+  if(s.mode==='live'&&k?.slots_since_last_success>NO_SUCCESS_SLOTS)alerts.push(`KeeperNoSuccessfulCrank: ${k.slots_since_last_success} slots`);
+  if(k&&(k.log_age_seconds>LOG_STALE_SECONDS||!k.log_ok))alerts.push('KeeperLogStale');
+  if(s.chain_read_ok===0)alerts.push('MonitorChainReadFailing (fires after 5m)');
+  if(Date.now()/1000-s.snapshot_unix_seconds>SNAPSHOT_STALE_SECONDS)alerts.push('MonitorSnapshotStale');
+  if(lastMarket!==s.market){history=[];lastMarket=s.market;}
+  if(s.chain_read_ok===1&&c){
+    const t=s.snapshot_unix_seconds;
+    if(!history.length||history.at(-1).t!==t)history.push({t,v:BigInt(c.unowned_collateral_atoms)});
+    while(history.length>2&&history[1].t<=t-HOUR_SECONDS)history.shift();
+    if(history.length>1&&history[0].t<=t-HOUR_SECONDS){
+      const a=history[0],z=history[1],span=z.t-a.t;
+      const start=a.v+(z.v-a.v)*BigInt(t-HOUR_SECONDS-a.t)/BigInt(span||1);
+      const drift=BigInt(c.unowned_collateral_atoms)-start;
+      if(drift>BigInt(DRIFT_ATOMS_PER_HOUR)||drift< -BigInt(DRIFT_ATOMS_PER_HOUR))alerts.push(`UnownedCollateralDrift: ${drift} atoms/hour (dashboard samples)`);
+    }
+  }
+  const list=document.getElementById('alerts');list.replaceChildren();
+  for(const message of alerts.length?alerts:['No threshold conditions observed']){const li=document.createElement('li');li.textContent=message;list.append(li);}
+  table('accounts',['Metric','Value'],[['Portfolios (engine)',s.accounts?.total],['Portfolios discovered',s.accounts?.discovered],['Decode errors',s.accounts?.decode_errors],...pairs(s.accounts?.out_of_date)]);
+  table('keeper',['Metric','Value'],k?[['Log OK',k.log_ok],['Last cycle',k.last_cycle],...pairs(k.last_cycle_attempts).map(([a,v])=>[`Last ${a}`,v]),...pairs(k.attempts_total).map(([a,v])=>[`Total ${a}`,v]),...pairs(k.cycles_total).map(([a,v])=>[`Cycles ${a}`,v]),['Cycle CU',k.last_cycle_cu],['CU p50',k.crank_cu?.p50],['CU max',k.crank_cu?.max],['Last landed crank slot',k.last_success_slot],['Slots since landed crank',k.slots_since_last_success]]:[['Keeper log','Not configured']]);
+  table('quarantine',['Account','Error','Strike','Slots'],(k?.quarantined_accounts||[]).map(q=>[q.account,q.error,q.strike,q.slots]));
+  table('buckets',['Asset / side','Status','Expiry','Slots left','Lien numerator'],[
+    ...pairs(b?.counts).map(([name,n])=>['All',name,n,'','']),
+    ...(b?.rows||[]).map(row=>[`${row.asset} / ${row.side}`,row.status,row.expiry_slot,row.slots_to_expiry,row.valid_liened_backing_num])]);
+  table('assets',['Asset','Lifecycle','Funding slot','K/F stale long / short'],(s.assets||[]).map(a=>{
+    const rows=s.accounts?.asset_kf_stale||[];
+    return[a.asset,a.lifecycle,a.funding_last_accrual_slot,['long','short'].map(side=>rows.find(r=>r.asset===a.asset&&r.side===side)?.count??0).join(' / ')];
+  }));
+  table('collateral',['Term','Atoms'],[...pairs(c?.terms),...['residual_atoms','unowned_collateral_atoms','senior_shortfall_atoms'].map(key=>[key,c?.[key]])]);
+  table('resolved',['Component','Value'],[['Unpaid claimants',r?.claimants_unpaid],['Payout halted',r?.payout_halted],...pairs(r?.owed_atoms)]);
+}
+async function refresh(){try{const response=await fetch('snapshot.json',{cache:'no-store'});if(!response.ok)throw Error(`HTTP ${response.status}`);render(await response.json());}catch(error){document.getElementById('error').textContent=`Snapshot fetch failed: ${error.message}`;}}
+refresh();setInterval(refresh,POLL_MS);
+</script></html>
