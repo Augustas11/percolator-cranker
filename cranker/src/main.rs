@@ -169,6 +169,9 @@ fn main() -> Result<()> {
     );
     for r in &records {
         let (label, tgt, rwd) = match &r.outcome {
+            CrankOutcome::Ok { unreconciled: Some(_), .. } => {
+                ("Ok(unreconciled)", "?".into(), "?".into())
+            }
             CrankOutcome::Ok {
                 mutated,
                 target_bytes_diff,
@@ -385,7 +388,13 @@ fn log_outcome(r: &SubmissionRecord) {
             program_cu,
             ..
         } => {
-            let variant = if *mutated { "Ok(mut)" } else { "Ok(no-mut)" };
+            let variant = if r.outcome.class() == percolator_cranker::submit::OutcomeClass::Progress && !*mutated {
+                "Ok(unreconciled)"
+            } else if *mutated {
+                "Ok(mut)"
+            } else {
+                "Ok(no-mut)"
+            };
             println!(
                 "  {} [{}] ← {variant}: sig={signature} target_diff={target_bytes_diff} reward_diff={:?} program_cu={:?}",
                 r.target, r.plan_class, reward_bytes_diff, program_cu

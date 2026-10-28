@@ -53,14 +53,6 @@ pub enum Attempt {
     Failed { error: String, cu: u64 },
 }
 
-impl Attempt {
-    fn cu(&self) -> u64 {
-        match self {
-            Attempt::Progress { cu, .. } | Attempt::Idle { cu } | Attempt::Failed { cu, .. } => *cu,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct CycleBudget {
     pub max_wall: Duration,
@@ -152,13 +144,17 @@ pub struct AttemptBudget<'m> {
     meter: &'m mut Meter,
     txs: usize,
     open_reserve: u64,
+    /// Max txs for this attempt: the per-attempt cap, further limited to the
+    /// class's remaining quota while other classes still have quota and
+    /// candidates (so one class's drain can't eat another's share).
+    cap: usize,
 }
 
 impl AttemptBudget<'_> {
     /// Admit one more tx: counts it immediately and reserves the worst-case
     /// CU. A tx that is begun is counted whatever happens to it afterwards.
     pub fn begin_tx(&mut self) -> bool {
-        if self.open_reserve != 0 || self.txs >= self.meter.per_attempt || !self.meter.can_send() {
+        if self.open_reserve != 0 || self.txs >= self.cap || !self.meter.can_send() {
             return false;
         }
         self.meter.txs_left -= 1;
@@ -213,7 +209,7 @@ pub struct CycleSummary {
 impl CycleSummary {
     pub fn line(&self) -> String {
         format!(
-            "cycle {} summary: progressed={} idle={} failed={} quarantined_skipped={} deferred={} new_quarantine={} idle_pending_stuck={} txs={} cu={} max_tx_cu={}",
+            "cycle {} summary: progressed={} idle={} failed={} quarantined_skipped={} deferred={} new_quarantine={} idle_pending_stuck={} txs={} cu={} max_attempt_cu={}",
             self.cycle,
             self.progressed,
             self.idle,
@@ -362,10 +358,17 @@ where
         visited[c] = Some(cand.pubkey);
         let txs_before = meter.txs_left;
         let cu_before = meter.cu_left;
+        let others_need = (0..3).any(|o| o != c && !queues[o].is_empty() && used[o] < quotas[o]);
+        let cap = if others_need {
+            meter.per_attempt.min(quotas[c].saturating_sub(used[c]).max(1))
+        } else {
+            meter.per_attempt
+        };
         let mut ab = AttemptBudget {
             meter: &mut meter,
             txs: 0,
             open_reserve: 0,
+            cap,
         };
         // An unsettled tx (the closure bailed mid-tx) keeps its whole
         // reservation charged: the meter was debited in `begin_tx`.
@@ -377,8 +380,11 @@ where
         let sent = txs_before - meter.txs_left;
         used[c] += sent;
         s.txs += sent;
-        s.cu_spent = s.cu_spent.saturating_add(cu_before - meter.cu_left);
-        s.max_attempt_cu = s.max_attempt_cu.max(attempt.cu());
+        // Charged = what the meter actually kept (measured CU, or the full
+        // reservation when unknown), so the summary agrees with the budget.
+        let charged = cu_before - meter.cu_left;
+        s.cu_spent = s.cu_spent.saturating_add(charged);
+        s.max_attempt_cu = s.max_attempt_cu.max(charged);
         record(&mut s, quarantine, budget, &cand, attempt, cycle, slot);
     }
     let st = quarantine.schedule_state_mut();
@@ -494,6 +500,35 @@ mod tests {
             });
         }
         assert_eq!(order, vec![0, 1, 2, 3, 4, 0]);
+    }
+
+    /// Audit finding: with 8 txs and 4-tx drains (quotas 4/2/2), a pending
+    /// drain used to take 4 txs and leave quiet accounts nothing. A drain is
+    /// now capped at its class's remaining quota while others still need it.
+    #[test]
+    fn drains_cannot_eat_another_class_quota() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let budget = CycleBudget { max_submissions: 8, max_txs_per_attempt: 4, ..CycleBudget::default() };
+        let mut quiet_txs = 0usize;
+        for cycle in 0..5 {
+            let cands = vec![
+                cand(pk(1), Priority::Liquidatable),
+                cand(pk(2), Priority::Pending),
+                cand(pk(3), Priority::Quiet),
+            ];
+            run(cycle, cands, &budget, &mut q, |c, ab| {
+                let mut n = 0;
+                while n < 4 && ab.begin_tx() {
+                    ab.settle_tx(Some(1));
+                    n += 1;
+                }
+                if c.priority == Priority::Quiet {
+                    quiet_txs += n;
+                }
+                Ok(Attempt::Progress { cu: 1, steps: n })
+            });
+        }
+        assert!(quiet_txs >= 5 * 2, "quiet got {quiet_txs} txs over 5 cycles");
     }
 
     /// Audit finding: position cursors broke when class membership changed.

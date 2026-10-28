@@ -461,6 +461,43 @@ pub fn submit_crank_routed(
                     last_err = Some(msg);
                     continue;
                 }
+                // Definitive: the preflight simulation rejected it, or the tx
+                // executed and failed. Anything else (transport error, status
+                // poll failure, "unable to confirm") is UNCERTAIN: the tx may
+                // have landed. Ask for its status once before assigning blame.
+                let definitive = matches!(
+                    e.kind(),
+                    ClientErrorKind::TransactionError(_)
+                        | ClientErrorKind::RpcError(RpcError::RpcResponseError {
+                            data: RpcResponseErrorData::SendTransactionPreflightFailure(_),
+                            ..
+                        })
+                );
+                if !definitive {
+                    let signature = tx.signatures[0];
+                    match rpc.get_signature_status(&signature) {
+                        Ok(Some(Ok(()))) => {
+                            return Ok(CrankOutcome::Ok {
+                                signature,
+                                pre_state_hash,
+                                post_state_hash: pre_state_hash,
+                                mutated: false,
+                                target_bytes_diff: 0,
+                                reward_bytes_diff: None,
+                                market_bytes_diff: None,
+                                program_cu: None,
+                                tx_cu: None,
+                                unreconciled: Some(format!("landed, but confirmation errored: {msg}")),
+                            })
+                        }
+                        Ok(Some(Err(te))) => {
+                            let error = format!("{te}");
+                            let error_name = wrapper_error_name_for_ix(&error, crank_ix_index);
+                            return Ok(CrankOutcome::HardReject { error, error_name, program_cu, tx_cu });
+                        }
+                        _ => return Err(Unconfirmed { signature, error: msg }.into()),
+                    }
+                }
                 let error_name = wrapper_error_name_for_ix(&msg, crank_ix_index);
                 return Ok(CrankOutcome::HardReject { error: msg, error_name, program_cu, tx_cu });
             }
@@ -581,6 +618,23 @@ impl std::fmt::Display for DeadlineReached {
 }
 
 impl std::error::Error for DeadlineReached {}
+
+/// The tx was sent but its fate is unknown (confirmation errored and the
+/// status query gave no answer). Not an account failure: the caller keeps
+/// the CU reservation charged and does not strike the account.
+#[derive(Debug, Clone)]
+pub struct Unconfirmed {
+    pub signature: Signature,
+    pub error: String,
+}
+
+impl std::fmt::Display for Unconfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tx {} unconfirmed: {}", self.signature, self.error)
+    }
+}
+
+impl std::error::Error for Unconfirmed {}
 
 /// Compute-unit limit requested by every crank tx. The scheduler reserves
 /// this much CU budget before each tx.

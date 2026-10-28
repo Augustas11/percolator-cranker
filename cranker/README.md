@@ -30,8 +30,10 @@ Pre-merge preview of the upstream launch fixes (not the default):
 ```
 
 **CU (2026-10-28, wrapper `5cb331dd` / engine `4db11a8c`):** a fresh no-op
-`PermissionlessCrank` consumes **18,565 program CU** (tx total 18,889),
-+590 over the 17,975 measured on `d5e2ec6f` / `495a5590`. Pre-merge preview
+`PermissionlessCrank` with the reward portfolio appended (fee opt-in, the
+shape of the old baseline) consumes **18,565 program CU** (tx total 18,889),
++590 over the 17,975 measured on `d5e2ec6f` / `495a5590`. Without the
+reward portfolio (the default since fees are opt-in): 18,363. Pre-merge preview
 (prog #456 head + engine `68859b94`): 18,820 (19,144). The run prints
 `cu: noop_min=… worst_ok=…` from the tx logs; set `CRANKER_MEASURE_CU=0`
 to skip the extra `getTransaction` per crank.

@@ -68,8 +68,9 @@ impl CuStats {
     pub fn observe(&mut self, o: &CrankOutcome) {
         let Some(cu) = o.program_cu() else { return };
         match o {
-            CrankOutcome::Ok { mutated, tx_cu, .. } => {
-                if !mutated && self.noop_min.map_or(true, |m| cu < m) {
+            CrankOutcome::Ok { mutated, tx_cu, unreconciled, .. } => {
+                // An unreconciled outcome's effect is unknown: never a no-op sample.
+                if !mutated && unreconciled.is_none() && self.noop_min.map_or(true, |m| cu < m) {
                     self.noop_min = Some(cu);
                     self.noop_tx = *tx_cu;
                 }
@@ -313,6 +314,13 @@ pub fn run_one_cycle(
                 Some(deadline),
             ) {
                 Ok(o) => o,
+                Err(e) if e.is::<submit::Unconfirmed>() => {
+                    // Sent, fate unknown: keep the reservation charged, stop
+                    // this drain, and do not strike the account.
+                    ab.settle_tx(None);
+                    println!("  {} {e}", c.pubkey);
+                    break;
+                }
                 Err(e) if e.is::<submit::DeadlineReached>() => {
                     // Not sent: refund the reservation and stop. This is the
                     // budget running out (deferral), not an account failure.
