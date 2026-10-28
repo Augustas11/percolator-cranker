@@ -1,0 +1,56 @@
+groups:
+  - name: percolator-monitor
+    rules:
+      - record: percolator:unowned_collateral_drift_atoms_per_hour
+        expr: delta(percolator_unowned_collateral_atoms[1h])
+      - alert: KeeperAccountUnrefreshable
+        expr: percolator_keeper_account_quarantined_slots > 1500
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Keeper account unrefreshable for over 1500 slots'
+      # Tune the drift threshold per market.
+      - alert: UnownedCollateralDrift
+        expr: abs(percolator:unowned_collateral_drift_atoms_per_hour) > 1000
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Unowned collateral changed by over 1000 atoms/hour'
+      - alert: BackingBucketExpiringWithLiens
+        expr: percolator_backing_buckets_expiring_with_liens > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Fresh backing bucket with liens is near or past expiry'
+      - alert: KeeperNoSuccessfulCrank
+        expr: percolator_keeper_slots_since_last_success > 750
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'No landed keeper crank for over 750 slots'
+      - alert: KeeperLogStale
+        expr: percolator_keeper_log_age_seconds > 120 or percolator_keeper_log_ok == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Keeper log is unreadable or older than 120 seconds'
+      - alert: MonitorChainReadFailing
+        expr: percolator_monitor_chain_read_ok == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Monitor chain reads have failed for five minutes'
+      # The monitor itself: a silent monitor must page like a finding.
+      - alert: MonitorDown
+        expr: up{job="percolator-monitor"} == 0 or absent(percolator_monitor_chain_read_ok)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Monitor scrape failing or monitor metrics absent'
