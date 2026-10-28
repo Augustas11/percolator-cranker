@@ -177,8 +177,8 @@ A config that fails the engine check comes back as `InvalidAccountData`.
 
 The recommended values below pass the engine check at the pin. They were
 run through `V16Config::validate_public_user_fund` with `n = 3`. The "tested"
-column is the set the load scenario uses
-(`crates/cranker/src/scenario/live_shaped.rs`, `init_market_params`).
+column is the parameter set the load test ran with on these pins (that
+load test is maintained separately from this tree).
 Staging widens accrual and close lifetime for devnet latency.
 
 | Field | Meaning and limits | Tested | **Staging** | Reasoning |
