@@ -32,7 +32,7 @@ use drip::{
     quarantine::{Quarantine, QuarantineConfig},
     scheduler::CycleBudget,
     setup,
-    submit::{self, CrankRoute},
+    submit::{self, CrankRoute, OutcomeClass},
 };
 use percolator::{BackingBucketStatusV16 as Bucket, MarketModeV16, BOUND_SCALE, MAX_VAULT_TVL};
 use percolator_prog::{
@@ -157,6 +157,8 @@ struct Staging {
     fee_bps: u64,
     phase: Phase,
     resolved_ticks: u64,
+    /// The lifecycle finished (SOL relisted); a run that enables it must.
+    relisted: bool,
 }
 
 impl Staging {
@@ -312,6 +314,7 @@ impl Staging {
             fee_bps: env_or("STAGING_TRADE_FEE_BPS", 0u64),
             phase: Phase::Live,
             resolved_ticks: 0,
+            relisted: false,
         };
         st.open_market()?;
         Ok(st)
@@ -634,11 +637,18 @@ impl Staging {
     /// portfolios (paid out to the owners), open a fresh SOL-PERP market.
     fn relist_when_closed(&mut self) -> Result<Option<String>> {
         self.resolved_ticks += 1;
-        let closed = |pf: &Pubkey| {
-            let p = self.rpc.get_account_data(pf).ok().and_then(|d| read_portfolio(&d).ok());
-            p.map_or(true, |p| p.capital.get() == 0 && p.pnl.get() == 0)
+        // Read errors fail the step: only a confirmed-absent account or a
+        // read, settled portfolio counts as closed.
+        let closed = |pf: &Pubkey| -> Result<bool> {
+            match self.rpc.get_account_with_commitment(pf, CommitmentConfig::confirmed())?.value {
+                None => Ok(true),
+                Some(a) => {
+                    let p = read_portfolio(&a.data).map_err(|e| anyhow!("read_portfolio {pf}: {e:?}"))?;
+                    Ok(p.capital.get() == 0 && p.pnl.get() == 0)
+                }
+            }
         };
-        if !(closed(&self.lp_pf) && closed(&self.trader_pf)) {
+        if !(closed(&self.lp_pf)? && closed(&self.trader_pf)?) {
             if self.resolved_ticks > 100 {
                 bail!("portfolios still open {} ticks after resolve", self.resolved_ticks);
             }
@@ -646,6 +656,7 @@ impl Staging {
         }
         let old = self.market;
         self.open_market()?;
+        self.relisted = true;
         Ok(Some(format!("SOL relisted: market {old} -> {}", self.market)))
     }
 }
@@ -662,7 +673,7 @@ fn summary(tick: u64, started: Instant, st: &Staging, roles: &[(&str, &Role)], k
     let (ins, vault) = st.read().map(|(_, g, _)| (g.insurance, g.vault)).unwrap_or_default();
     let roles: Vec<String> = roles.iter().map(|(n, r)| format!("\"{n}\":{}", r.json())).collect();
     format!(
-        "{{\"summary\":{},\"tick\":{tick},\"elapsed_s\":{},\"sol_usd_e6\":{},\"phase\":\"{:?}\",\"market\":\"{}\",{},\"keeper\":{},\"crank\":{{\"progressed\":{},\"idle\":{},\"failed\":{}}},\"insurance\":{ins},\"vault\":{vault}}}",
+        "{{\"summary\":{},\"tick\":{tick},\"elapsed_s\":{},\"sol_usd_e6\":{},\"phase\":\"{:?}\",\"market\":\"{}\",{},\"keeper\":{},\"crank\":{{\"progressed\":{},\"idle\":{},\"failed\":{}}},\"insurance_balance\":{ins},\"vault\":{vault}}}",
         if last { "\"final\"" } else { "\"periodic\"" },
         started.elapsed().as_secs(),
         st.mark,
@@ -715,7 +726,8 @@ fn main() -> Result<()> {
         tick += 1;
         let t0 = Instant::now();
         let l = lifecycle.record(match st.phase {
-            Phase::Live if tick == lifecycle_tick => st.shutdown(),
+            // From its tick on, SHUTDOWN is retried until it lands.
+            Phase::Live if lifecycle_tick != 0 && tick >= lifecycle_tick && !st.relisted => st.shutdown(),
             Phase::Recovery => st.resolve(),
             Phase::Resolved => st.relist_when_closed(),
             Phase::Live => Ok(None),
@@ -744,8 +756,11 @@ fn main() -> Result<()> {
                 keeper.progressed += s.progressed as u64;
                 keeper.idle += s.idle as u64;
                 keeper.failed += s.failed as u64;
-                if s.failed > 0 || !s.unconfirmed.is_empty() {
-                    bail!("{} failed, {} unconfirmed: {:?}", s.failed, s.unconfirmed.len(), s.failures);
+                // A failed crank inside an attempt that also progressed is
+                // classed Progress by the keeper; staging still counts it.
+                let failed_txs = records.iter().filter(|r| r.outcome.class() == OutcomeClass::Failed).count();
+                if s.failed > 0 || failed_txs > 0 || !s.unconfirmed.is_empty() {
+                    bail!("{} failed ({failed_txs} failed txs), {} unconfirmed: {:?}", s.failed, s.unconfirmed.len(), s.failures);
                 }
                 Ok(Some(format!("p{}/i{}", s.progressed, s.idle)))
             }),
@@ -766,6 +781,10 @@ fn main() -> Result<()> {
     println!("{}", summary(tick, started, &st, &roles, &keeper, true));
     if abnormal {
         eprintln!("staging: ABNORMAL failure rate, see the summary");
+        std::process::exit(1);
+    }
+    if lifecycle_tick != 0 && !st.relisted {
+        eprintln!("staging: lifecycle did not complete (shutdown -> resolve -> relist)");
         std::process::exit(1);
     }
     println!("staging: OK");

@@ -100,7 +100,8 @@ PROG_DIR="${PERCOLATOR_PROG_DIR:?}"
 
 # 2. build
 SO="$PROG_DIR/target/deploy/percolator_prog.so"
-[ -f "$SO" ] || run cargo build-sbf --manifest-path "$PROG_DIR/Cargo.toml" --tools-version v1.52
+# Always build: an existing .so may come from another revision.
+run cargo build-sbf --manifest-path "$PROG_DIR/Cargo.toml" --tools-version v1.52
 run cargo build --release --manifest-path "$REPO_ROOT/staging/Cargo.toml"
 
 # 3. deploy (first deploy only; upgrades are a separate, deliberate step)

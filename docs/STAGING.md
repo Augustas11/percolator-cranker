@@ -113,18 +113,21 @@ Every `STAGING_SUMMARY_EVERY` ticks, and at the end, one JSON line:
 {"summary":"final","tick":7200,"elapsed_s":21600,"sol_usd_e6":150120000,
  "phase":"Live","market":"...","push":{"ok":..,"fail":..,"max_consec_fail":..},
  "trade":{..},"backing":{..},"insurance":{..},"lifecycle":{..},"keeper":{..},
- "crank":{"progressed":..,"idle":..,"failed":..},"insurance":..,"vault":..}
+ "crank":{"progressed":..,"idle":..,"failed":..},"insurance_balance":..,"vault":..}
 ```
 
 - `fail` counts failed attempts per role; `max_consec_fail` is the longest
   run of failures in a row. `lifecycle.ok` is 3 after a full lifecycle.
-- `crank.failed` counts failed crank attempts inside the keeper cycles; any
-  failure or unconfirmed crank counts as a keeper failure.
-- `insurance` and `vault` are the current market's balances in USDC atoms.
+- `crank.failed` counts failed crank attempts inside the keeper cycles. Any
+  failed or unconfirmed crank transaction counts as a keeper failure, even
+  inside an attempt that also made progress.
+- `insurance_balance` and `vault` are the current market's balances in USDC atoms.
 
-**Exit code.** 0 when the run reached its end normally. 1 as soon as a role
-fails `STAGING_MAX_CONSEC_FAIL` times in a row, or more than 5% of its
-attempts (after 20), so an unattended run is judged by the exit code and the
+**Exit code.** 0 when the run reached its end normally and, unless
+`STAGING_LIFECYCLE_TICK=0`, the lifecycle completed (SHUTDOWN is retried
+from its tick on until it lands; SOL must be relisted before the end). 1 as
+soon as a role fails `STAGING_MAX_CONSEC_FAIL` times in a row, or more than
+5% of its attempts (after 20), or when the lifecycle did not complete, so an unattended run is judged by the exit code and the
 final summary line. The script prints that line again at the end.
 
 ## Known upstream issues
