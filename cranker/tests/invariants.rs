@@ -19,7 +19,7 @@ fn market_snapshot_satisfies_conservation() -> anyhow::Result<()> {
             let (rpc, program_id) = common::rpc_and_program_from_env().ok_or_else(|| {
                 anyhow::anyhow!("PERCOLATOR_TEST_RPC / PERCOLATOR_PROGRAM_ID not set")
             })?;
-            let env = percolator_cranker::setup::bootstrap_with_fee(
+            let env = drip::setup::bootstrap_with_fee(
                 &rpc,
                 &program_id,
                 common::load_payer()?,

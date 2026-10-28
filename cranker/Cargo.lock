@@ -1280,6 +1280,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "drip"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "percolator",
+ "percolator-prog",
+ "serde_json",
+ "solana-account-decoder",
+ "solana-client",
+ "solana-program 1.18.26",
+ "solana-sdk",
+ "solana-transaction-status",
+ "spl-associated-token-account",
+ "spl-token",
+]
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2665,24 +2683,6 @@ version = "0.1.1"
 source = "git+https://github.com/aeyakovenko/percolator?rev=4db11a8cb0053815e23a35d3a7d3edc265d8d866#4db11a8cb0053815e23a35d3a7d3edc265d8d866"
 dependencies = [
  "bytemuck",
-]
-
-[[package]]
-name = "percolator-cranker"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "percolator",
- "percolator-prog",
- "serde_json",
- "solana-account-decoder",
- "solana-client",
- "solana-program 1.18.26",
- "solana-sdk",
- "solana-transaction-status",
- "spl-associated-token-account",
- "spl-token",
 ]
 
 [[package]]

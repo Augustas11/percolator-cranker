@@ -2,7 +2,7 @@
 
 ```
 crates/
-  cranker/            library + the `cranker` binary
+  cranker/            library + the `drip` binary
     src/
       discovery.rs    getProgramAccounts (header memcmp) → market-scoped candidates
       binding.rs      portfolio_id / sequence / position_epoch bindings, layout check
@@ -15,7 +15,7 @@ crates/
       submit.rs       tx build (Live / Resolved account routes), send, classify, CU from logs
       cycle.rs        one discover → hint → schedule → submit cycle (shared by everything)
       setup.rs        one-asset market bootstrap for the binary and tests
-      main.rs         binary `cranker`
+      main.rs         binary `drip`
     tests/            validator-gated integration tests (conservation, rollback, lifecycle)
   bringup/            local smoke test: init market → deposit → crank → fee routing
 ```

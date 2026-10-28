@@ -29,7 +29,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use percolator::AutoCrankPlanV16;
-use percolator_cranker::{
+use drip::{
     binding::{self, SOURCE_LIEN_DRAIN_MAX_STEPS, V16_LAYOUT_DISCRIMINATOR},
     cycle::{self, CrankCtx, CuStats, SubmissionRecord, HINT_BUDGET},
     observation, plan_gate,
@@ -396,7 +396,7 @@ fn log_outcome(r: &SubmissionRecord) {
             program_cu,
             ..
         } => {
-            let variant = if r.outcome.class() == percolator_cranker::submit::OutcomeClass::Progress && !*mutated {
+            let variant = if r.outcome.class() == drip::submit::OutcomeClass::Progress && !*mutated {
                 "Ok(unreconciled)"
             } else if *mutated {
                 "Ok(mut)"

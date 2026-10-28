@@ -71,7 +71,7 @@ and ours disagree.
 FORCE_SBF_REBUILD=1 ./scripts/m1_bringup.sh # local validator + deploy + smoke test
 source scripts/env.sh
 export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey upstream/percolator-prog/target/deploy/percolator_prog-keypair.json)
-CRANKER_CYCLES=3 cargo run --release -p percolator-cranker --bin cranker
+CRANKER_CYCLES=3 cargo run --release -p drip --bin drip
 ```
 
 Prerequisites, configuration and how to read the output are covered in

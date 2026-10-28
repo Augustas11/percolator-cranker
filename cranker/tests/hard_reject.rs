@@ -17,8 +17,8 @@
 
 mod common;
 
-use percolator_cranker::setup;
-use percolator_cranker::submit::{submit_crank, CrankOutcome};
+use drip::setup;
+use drip::submit::{submit_crank, CrankOutcome};
 
 #[test]
 #[ignore = "needs a local validator: set PERCOLATOR_TEST_RPC + PERCOLATOR_PROGRAM_ID, run with --include-ignored"]
