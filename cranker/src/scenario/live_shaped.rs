@@ -171,6 +171,10 @@ pub struct ScenarioReport {
     pub liquidatable_seen: usize,
     pub crank_leg_reductions: usize,
     pub buckets_expired: BTreeSet<usize>,
+    /// Backing principal topped up per domain (atoms).
+    pub backing_topped_up: BTreeMap<usize, u128>,
+    /// Backing principal withdrawn per domain (atoms).
+    pub backing_withdrawn: BTreeMap<usize, u128>,
     pub buckets_impaired: BTreeSet<usize>,
     /// Live-mode domains seen Fresh past expiry: domain → (first, last) slot.
     pub lapsed_unnormalized_live: BTreeMap<usize, (u64, u64)>,
@@ -889,7 +893,10 @@ impl<'a> World<'a> {
             self.chain.send(&[ix], &[&self.admin]).map(|_| ())
         })();
         match r {
-            Ok(()) => println!("top-up backing domain {domain}: {amount} atoms, expiry slot {expiry_slot}"),
+            Ok(()) => {
+                *self.report.backing_topped_up.entry(domain).or_default() += amount;
+                println!("top-up backing domain {domain}: {amount} atoms, expiry slot {expiry_slot}")
+            }
             Err(e) => {
                 println!("top-up backing domain {domain} rejected: {e}");
                 self.reject("backing-top-up", &e);
@@ -956,6 +963,9 @@ impl<'a> World<'a> {
         }
         match self.chain.send(&[self.withdraw_backing_ix(domain, mid, s.authority_epoch, amt, earnings)], &[&self.admin]) {
             Ok(_) => {
+                if !earnings {
+                    *self.report.backing_withdrawn.entry(domain).or_default() += amt;
+                }
                 println!("withdraw backing{} domain {domain}: {amt}", if earnings { " earnings" } else { "" });
                 amt
             }
@@ -2078,16 +2088,31 @@ pub fn run() -> Result<ScenarioReport> {
         ),
     });
 
-    // c: vault dust.
+    // c: vault dust. CloseSlab burns whatever is left, so "CloseSlab
+    // succeeded" proves nothing about stranded value. The residue BEFORE
+    // CloseSlab must fit in the rounding-dust bound plus backing principal
+    // that lapsed unused (forfeited by design: expired unliened principal
+    // goes to the residual pool). Anything above that is stranded value.
     let rep = &mut w.report;
     rep.vault_after = token_amount(&rpc, &w.vault);
     rep.dust_bound = (w.cfg.assets as u64) * (w.actors.len() as u64) * DUST_ATOMS_PER_ASSET_ACCOUNT;
+    let forfeited: u128 = rep
+        .buckets_expired
+        .iter()
+        .map(|d| {
+            rep.backing_topped_up.get(d).copied().unwrap_or(0)
+                .saturating_sub(rep.backing_withdrawn.get(d).copied().unwrap_or(0))
+        })
+        .sum();
+    let residue = if rep.close_slab { rep.vault_before_close_slab } else { rep.vault_after };
+    let allowed = (rep.dust_bound as u128).saturating_add(forfeited);
     rep.checks.push(Check {
         id: "c",
-        passed: exits_done && (rep.close_slab || rep.vault_after <= rep.dust_bound),
+        passed: exits_done && (residue as u128) <= allowed,
         detail: format!(
-            "exits_done={} close_slab={} vault before CloseSlab={} after={} atoms, dust bound={} (= assets × portfolios × {DUST_ATOMS_PER_ASSET_ACCOUNT}); CloseSlab swept {} to marketauth",
-            exits_done, rep.close_slab, rep.vault_before_close_slab, rep.vault_after, rep.dust_bound, rep.swept_to_admin
+            "exits_done={} residue before CloseSlab={} atoms; allowed={} (dust bound {} = assets × portfolios × {DUST_ATOMS_PER_ASSET_ACCOUNT}, + lapsed backing principal {}); unexplained={}; close_slab={} after={} swept_to_marketauth={}",
+            exits_done, residue, allowed, rep.dust_bound, forfeited,
+            (residue as u128).saturating_sub(allowed), rep.close_slab, rep.vault_after, rep.swept_to_admin
         ),
     });
 
