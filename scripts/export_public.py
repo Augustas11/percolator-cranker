@@ -4,8 +4,9 @@
     export_public.py <target-dir>
 
 * <target-dir> must NOT exist. The tree is built in a fresh temporary
-  directory next to it and renamed into place only after every check
-  passes, so a failed export leaves nothing behind and never touches
+  directory next to it and published only after every check passes, by an
+  atomic mkdir of <target-dir> (fails if anything exists there) and moving
+  the entries in. A failed export leaves nothing behind and never touches
   existing files.
 * HEAD is resolved once. Exactly the files in scripts/public_manifest.txt
   (as committed at that HEAD) are exported, read from that commit with
@@ -13,7 +14,8 @@
 * Every file committed at that HEAD under the exported directories must be
   listed in the manifest; a new file reaches the public tree only by being
   added on purpose.
-* Destinations are normalized and must stay inside the tree, outside the
+* Destinations are unique (case-insensitively), normalized, and must stay
+  inside the tree, outside the
   directories the gate skips (target/, upstream/), and free of dot
   components other than .github / .gitignore.
 * Layout rewrites are explicit and anchored; then the content gate runs
@@ -82,7 +84,7 @@ def main(argv):
 
     head = git("rev-parse", "--verify", "HEAD^{commit}").strip()
     manifest = git("cat-file", "blob", f"{head}:scripts/public_manifest.txt")
-    entries, listed = [], set()
+    entries, listed, dests = [], set(), set()
     for raw in manifest.splitlines():
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -92,6 +94,9 @@ def main(argv):
             die(f"bad manifest line: {raw!r}")
         src, to = parts
         check_dest(to)
+        if to.lower() in dests:  # lower(): case-insensitive filesystems collide too
+            die(f"duplicate manifest destination: {to}")
+        dests.add(to.lower())
         entries.append((src, to))
         listed.add(src)
     committed = git("ls-tree", "-r", "-z", "--name-only", head, "--", *SCANNED_DIRS).split("\0")
@@ -159,7 +164,16 @@ def main(argv):
         gate += [tmp, os.path.join(HERE, "public_denylist.txt")]
         if subprocess.run(gate).returncode != 0:
             die("content gate failed")
-        os.rename(tmp, dest)
+        # No-replace publication: mkdir is atomic and fails if anything now
+        # exists at dest (a plain rename could replace an empty directory
+        # created meanwhile). Then move the entries into the directory we own.
+        try:
+            os.mkdir(dest)
+        except FileExistsError:
+            die(f"{dest} appeared during the export; not replacing it")
+        for name in os.listdir(tmp):
+            os.rename(os.path.join(tmp, name), os.path.join(dest, name))
+        os.rmdir(tmp)
         ok = True
         print(f"exported to {dest}")
         return 0

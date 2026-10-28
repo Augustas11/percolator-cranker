@@ -215,5 +215,68 @@ class Gate(unittest.TestCase):
         self.assertEqual(rc, 0, out)
 
 
+class GateRound3(Gate):
+    """Round-3 audit bypasses."""
+
+    def test_gate_scripts_are_scanned_too(self):
+        self.put("scripts/check_public_tree.py", f"# seed phrase = alpha beta gamma\n# {OWNER}\n")
+        self.put("scripts/check_public_tree.sh", f"# {OWNER}\n")
+        out = self.assertFails()
+        self.assertIn("scripts/check_public_tree.py", out)
+        self.assertIn("scripts/check_public_tree.sh", out)
+
+    def test_real_gate_source_passes_its_own_rules(self):
+        shutil.copy(GATE, os.path.join(self.root, "check.py"))
+        shutil.copy(os.path.join(HERE, "check_public_tree.sh"), os.path.join(self.root, "check.sh"))
+        rc, out = run_gate(self.root)
+        self.assertEqual(rc, 0, out)
+
+    def test_rust_key_array_forms(self):
+        vals = [str(i) for i in range(64)]
+        self.put("a.rs", "const K: [u8; 64] = [" + ", ".join(vals) + ",];\n")
+        self.put("b.rs", "const K: [u8; 64] = [" + ", ".join(hex(i) for i in range(64)) + "];\n")
+        self.put("c.rs", "const K: [u8; 64] = [" + ", ".join(v + "u8" for v in vals) + "];\n")
+        self.put("d.rs", "const K = [0, /* comment */ " + ", ".join(vals[1:]) + "];\n")
+        out = self.assertFails("keypair-like")
+        self.assertEqual(out.count("keypair-like"), 4, out)
+
+    def test_recovery_markers_any_separator_and_multiline(self):
+        self.put("a.md", 'seed_phrase = "alpha"\n')
+        self.put("b.md", "seed-phrase: alpha\n")
+        self.put("c.md", "seed\nphrase: alpha beta\n")
+        self.put("d.md", "recovery phrase alpha\n")
+        out = self.assertFails("private key marker")
+        self.assertEqual(out.count("private key marker"), 4, out)
+
+    def test_github_traversal(self):
+        self.put("g.md", "\n".join([
+            "https://github.com/aeyakovenko/percolator/../../other/private",
+            "https://github.com/aeyakovenko/percolator/%2e%2e/%2e%2e/other/private",
+            "https://github.com/aeyakovenko/percolator/issues/../../../other/x",
+            "github.com/aeyakovenko/percolator/../../other/private",
+        ]) + "\n")
+        out = self.assertFails()
+        self.assertGreaterEqual(out.count("g.md"), 4, out)
+
+    def test_fixture_cannot_exempt_github_or_empty_host(self):
+        m = "// public-check: allow-test-fixture"
+        self.put("crates/c/tests/a.rs", f"github.com/other-owner/private-repo {m}\n")
+        self.put("crates/c/tests/b.rs", f'"http:///realhost.com/private" {m}\n')
+        out = self.assertFails()
+        self.assertIn("a.rs", out)
+        self.assertIn("b.rs", out)
+
+    def test_cargo_lock_github_mentions_checked(self):
+        self.put("Cargo.lock", "# github.com/other-owner/private-repo\n")
+        self.assertFails("github mention")
+
+    def test_trailing_newline_name_and_fifo(self):
+        self.put("note.md\n", "x\n")
+        os.mkfifo(os.path.join(self.root, "pipe.md"))
+        out = self.assertFails()
+        self.assertIn("bad file name", out)
+        self.assertIn("not a regular file", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

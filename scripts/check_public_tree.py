@@ -10,15 +10,18 @@ Fails (exit 1, every hit listed) on:
     text without NUL bytes (the WHOLE file is decoded, so late binary or
     UTF-16 content cannot hide);
   * secret-looking file names (.env*, id.json*, *keypair*.json,
-    wallet*.json, *.pem, *.key), 64-number byte arrays (across any
-    whitespace), private-key / seed-phrase / mnemonic markers;
-  * absolute local paths (case-insensitive /Users, /home, /root, /Volumes,
-    /private/var|tmp, C:\\Users);
+    wallet*.json, *.pem, *.key), 64-element byte arrays (decimal or hex,
+    optional u8 suffix and trailing comma, across whitespace and comments),
+    and private-key / wallet-word-list markers, matched over the whole text;
+  * absolute local paths (user home, root and volume directories, macOS
+    private temp dirs, Windows user profiles), case-insensitive;
   * email addresses (except --allow-email ADDR, only in SECURITY.md);
-  * URLs whose parsed host/path is not on the allowlist, and every
-    github.com/<owner>/<repo> mention that is not an allowed repository;
+  * URLs whose parsed host/path is not on the allowlist (dot segments,
+    literal or percent-encoded, are rejected), and every GitHub
+    owner/repo mention that is not an allowed repository (Cargo.lock
+    included);
   * operator-stack paths (private by owner decision), case-insensitive;
-  * unreplaced @PLACEHOLDERS@ (unless --draft);
+  * unreplaced template placeholders (unless --draft);
   * denylist patterns (case-insensitive fixed strings) in contents and in
     file names. The denylist itself is never exported.
 
@@ -26,29 +29,41 @@ Exemption: a line ending in "// public-check: allow-test-fixture" inside
 crates/*/tests/ may contain URLs/emails whose hosts are loopback or
 documentation placeholders (*.example, *.example.com, *.invalid, *.evil).
 
-Only <dir>/target, <dir>/upstream and <dir>/.git (top level) and the gate's
-own two files are skipped.
+Only <dir>/target, <dir>/upstream and <dir>/.git (top level) are skipped.
+The gate scans its own files like any other: its source is written so that
+none of its patterns match itself.
 """
 
 import os
 import re
+import stat
 import sys
 from urllib.parse import urlsplit
 
 SKIP_TOP = {"target", "upstream", ".git"}
-SELF = {"scripts/check_public_tree.sh", "scripts/check_public_tree.py"}
 DOT_OK = {".github", ".gitignore"}
-NAME_OK = re.compile(r"^[A-Za-z0-9._/-]+$")
+NAME_OK = re.compile(r"[A-Za-z0-9._/-]+")  # used with fullmatch
 FIXTURE = "// public-check: allow-test-fixture"
 PLACEHOLDER_HOST = re.compile(r"(\.example|\.example\.com|\.invalid|\.evil)$")
 LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 SECRET_NAME = re.compile(
     r"^(\.env.*|id\.json.*|.*keypair.*\.json|wallet.*\.json|.*\.pem|.*\.key)$", re.I)
-KEY_ARRAY = re.compile(r"\[(\d{1,3},){63}\d{1,3}\]")
-KEY_MARKER = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY|seed\s*phrase|\bmnemonic\b", re.I)
+_BYTE = r"(?:0x[0-9a-f_]+|[0-9][0-9_]*)(?:u8)?"
+KEY_ARRAY = re.compile(r"\[(?:" + _BYTE + r",){63}" + _BYTE + r",?\]", re.I)
+# Built from fragments so the gate's own source never matches its patterns.
+KEY_MARKER = re.compile(
+    "-" * 5 + "BEGIN [A-Z ]*PRIV" + "ATE KEY"
+    + r"|(seed|recovery)[\s_-]*phr" + "ase"
+    + r"|\bmnemo" + r"nic\b",
+    re.I)
 ABS_PATH = re.compile(
-    r"/(users|home)/[A-Za-z]|/root/|/volumes/|/private/(var|tmp)/|c:\\users\\", re.I)
+    "/" + "(us" + "ers|ho" + "me)/[a-z]"
+    + "|/" + "ro" + "ot/"
+    + "|/" + "vol" + "umes/"
+    + "|/" + "priv" + "ate/(var|tmp)/"
+    + r"|c:\\" + "us" + r"ers\\",
+    re.I)
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s)\"'`<>]+", re.I)
 GITHUB = re.compile(r"github\.com/([A-Za-z0-9_.-]+)(?:/([A-Za-z0-9_.-]+))?", re.I)
@@ -67,7 +82,8 @@ OPERATOR = re.compile(
     r"backing[_-]?manager)[a-z0-9_.-]*$"
     r"|(^|/)(alerts|dashboard)\.[a-z]+$",
     re.I)
-PLACEHOLDER = re.compile(r"@[A-Z][A-Z_]+@")
+PLACEHOLDER = re.compile("@" + "[A-Z][A-Z_]+" + "@")
+DOT_SEGMENT = re.compile(r"(^|/)(\.|%2e){1,2}(/|$)", re.I)
 
 
 def norm_repo(r):
@@ -81,6 +97,8 @@ def url_ok(url):
     except ValueError:
         return False
     if u.scheme.lower() not in ("http", "https") or u.username or u.password:
+        return False
+    if DOT_SEGMENT.search(u.path):
         return False
     host = (u.hostname or "").lower()
     if host in LOOPBACK:
@@ -100,14 +118,19 @@ def fixture_ok(rel, line):
     for url in URL.findall(line):
         try:
             u = urlsplit(url)
-            hosts.append((u.hostname or "").lower())
-            if u.username:  # userinfo is itself the fixture's subject; its host must be a placeholder too
-                hosts.append(u.username.lower())
         except ValueError:
             return False
+        if u.scheme.lower() not in ("http", "https", "ftp"):
+            return False
+        hosts.append((u.hostname or "").lower())
+        if u.username:  # userinfo is the fixture's subject; it must be a placeholder too
+            hosts.append(u.username.lower())
     for m in EMAIL.finditer(line):
         hosts.append(m.group(0).split("@", 1)[1].lower())
-    return all(h in LOOPBACK or PLACEHOLDER_HOST.search(h) for h in hosts if h)
+    if GITHUB.search(line):
+        return False  # GitHub mentions are never exempt
+    # every host must be present and be loopback or a documentation placeholder
+    return all(h and (h in LOOPBACK or PLACEHOLDER_HOST.search(h)) for h in hosts)
 
 
 def main(argv):
@@ -160,10 +183,8 @@ def main(argv):
 
     texts = {}
     for rel in sorted(files):
-        if rel in SELF:
-            continue
         full = os.path.join(root, rel)
-        if not NAME_OK.match(rel):
+        if not NAME_OK.fullmatch(rel):
             hit(f"bad file name (allowed: A-Za-z0-9._/-): {rel!r}")
             continue
         comps = rel.split("/")
@@ -171,8 +192,16 @@ def main(argv):
         if bad_dot:
             hit(f"dot path component not allowed: {rel}")
             continue
-        if os.path.islink(full):
+        try:
+            st = os.lstat(full)
+        except OSError as e:
+            hit(f"SCAN ERROR (stat): {rel}: {e}")
+            continue
+        if stat.S_ISLNK(st.st_mode):
             hit(f"symlink: {rel}")
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            hit(f"not a regular file: {rel}")
             continue
         try:
             data = open(full, "rb").read()
@@ -192,8 +221,13 @@ def main(argv):
         lines = text.splitlines()
         if SECRET_NAME.match(base):
             hit(f"secret-looking file: {rel}")
-        if KEY_ARRAY.search(re.sub(r"\s+", "", text)):
+        flat = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        flat = re.sub(r"//[^\n]*", "", flat)
+        if KEY_ARRAY.search(re.sub(r"\s+", "", flat)):
             hit(f"keypair-like 64-byte array: {rel}")
+        for m in KEY_MARKER.finditer(text):
+            n = text.count("\n", 0, m.start()) + 1
+            hit(f"private key marker: {rel}:{n}: {m.group(0)!r}")
         if OPERATOR.search(rel):
             hit(f"operator-stack path: {rel}")
         for pat in deny:
@@ -202,8 +236,6 @@ def main(argv):
         is_lock = base == "Cargo.lock"
         for n, line in enumerate(lines, 1):
             loc = f"{rel}:{n}"
-            if KEY_MARKER.search(line):
-                hit(f"private key marker: {loc}: {line.strip()}")
             if ABS_PATH.search(line):
                 hit(f"absolute path: {loc}: {line.strip()}")
             fixture = fixture_ok(rel, line)
@@ -217,7 +249,12 @@ def main(argv):
                     url = url.rstrip(".,;:")
                     if not url_ok(url):
                         hit(f"url not allowlisted: {loc}: {url}")
+            if not fixture:  # GitHub mentions are checked everywhere, Cargo.lock included
                 for m in GITHUB.finditer(line):
+                    tail = line[m.end():]
+                    if DOT_SEGMENT.search(tail.split()[0] if tail.split() else ""):
+                        hit(f"github path traversal: {loc}: {m.group(0)}{tail.split()[0]}")
+                        continue
                     owner, repo = m.group(1).lower(), norm_repo(m.group(2) or "").lower()
                     if (owner, repo) not in ALLOWED_REPOS:
                         hit(f"github mention outside the allowed repos: {loc}: {m.group(0)}")
