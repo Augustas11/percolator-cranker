@@ -94,7 +94,7 @@ $407k/day (`--capital-usd 50000`). Lean saves capital, not volume.
    before the matcher raises any limit.
 5. **Backing roll. It can fail, so start early.** A Fresh bucket only takes
    top-ups at its *existing* expiry (`E 3400-3406`). A new expiry needs the
-   bucket to be Empty first, which needs:
+   bucket to be Empty (or Expired) first, which needs:
    - all principal withdrawn;
    - no valid liens (`E 3447-3464`);
    - the Live health gate open (`P 10625-10635`);
@@ -105,11 +105,19 @@ $407k/day (`--capital-usd 50000`). Lean saves capital, not volume.
    - If liens remain at `expiry − 1 day`, put the matcher on reduce-only for
      that side, so liens can unwind.
    - If the bucket still can't be emptied by `expiry − 6 hours`: page the
-     owner. The options are to accept that the liened part becomes
-     **Impaired** at expiry (`E 3476-3501`), or to resolve the market in an
-     orderly way.
+     owner. The liened part becomes **Impaired** at expiry (`E 3476-3501`).
    - **Never let a bucket lapse unused** (percolator #243): withdraw all
      unliened principal before expiry, even when a roll is impossible.
+   - **If the gate stays shut through expiry, the unliened principal is
+     lost too.** Expiry zeroes fresh unliened principal (`E 3476-3493`), and
+     the withdrawal needs the Live gate and `now < expiry`
+     (`P 10625-10657`). Resolution does not rescue it: a resolved withdrawal
+     also needs every portfolio closed and `c_tot == 0` first
+     (`P 10627-10631`). So treat backing principal as **at risk for the
+     length of a gate lock**.
+   - Keep expiries **longer than the assumed lock** (`--lock-days`, 14 days)
+     plus the roll lead. If the gate has been shut for most of
+     `expiry − lock-days`, begin an orderly wind-down early.
 6. **SOL.** Refill a bot when it is below 1 day of fees. Page when it is
    below 12 hours.
 7. **Scale up** only after 7 days with no incident and net P&L ≥ 0, and

@@ -4,7 +4,7 @@
 
 | | We are the only LP | Outside LP + rebate |
 |---|---:|---:|
-| Break-even | **$440k/day** | **$305k/day** |
+| Break-even | **$437k/day** | **$306k/day** |
 | Net per month at $100k/day | −$2.4k | −$1.9k |
 | Net per month at $1M/day | +$3.9k | +$6.4k |
 | Net per month at $10M/day | +$67k | +$90k |
@@ -138,7 +138,7 @@ Budgets go to `insurance_authority` only once every portfolio is closed and
 - **Capital is held fixed at $100k in every column.** That capital only
   carries $100k of LP inventory. At $10M/day the limits and capital would
   likely grow several times (say $360k). The extra opportunity cost is
-  ~$37/day, small next to the fees, but the capacity itself is *to verify*.
+  ~$36/day, small next to the fees, but the capacity itself is *to verify*.
 
 ### Scenario B: an outside professional LP, paid a rebate
 
@@ -196,8 +196,9 @@ anywhere keeps it shut (fact 4). How long it stays shut is unknown; measure
 it in staging. While it is shut:
 
 - **Scenario A:** fee income accrues in insurance, and half of it came out
-  of our LP capital. At $1M/day, 14 shut days lock $14k, of which $7k is
-  drained from LP capital.
+  of our LP capital. At $1M/day, 14 shut days lock $14k of trade fees, of which
+  $7k is drained from LP capital. Backing earnings and the non-keeper share
+  of liquidation and maintenance fees add a little more.
 - **Scenario B:** rebates are owed in cash while the fee income is locked.
   At $1M/day, 14 days is $10.6k of rebates.
 - **Backing earnings** are locked behind the same gate.

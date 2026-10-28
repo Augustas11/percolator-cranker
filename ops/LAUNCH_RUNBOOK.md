@@ -154,7 +154,7 @@ market pause.
 |---|---|---|---|
 | **Matcher reduce-only** | Ops, seconds | We stop adding risk; users can still close against us | first response to any doubt |
 | **Matcher stopped** | Ops, seconds | We stop all fills, so our takers cannot close either | minutes only, for example a suspected oracle problem |
-| **`DRAIN_ONLY` on asset 0** | multisig | Engine blocks every risk-increasing trade from **anyone** (`P 12800-12806`, gate at `E 15431-15443`, `E 20787-20798`). Reducing trades still work | the real market-wide brake. **One-way:** there is no path back to Active (`E 19671-19689`), so next comes resolution or relisting. *To verify* in staging |
+| **`DRAIN_ONLY` on asset 0** | multisig | Engine blocks every risk-increasing trade from **anyone** (`P 12800-12806`, gate at `E 15431-15443`, `E 20787-20798`). Reducing trades still work | the real market-wide brake. **One-way:** there is no path back to Active (`E 19671-19689`); only an *empty* asset can be retired or restarted fresh (`E 19691-19724`, `E 19791-19828`), so next comes resolution or relisting. *To verify* in staging |
 | **`ResolveMarket`** | multisig | Ends trading; users exit through the resolved close and claim path | full stop |
 
 - **Rollback before T-0** (no external funds): `ResolveMarket`, then close
@@ -213,7 +213,7 @@ market pause.
   impossible (playbook: `E 4316-4325`, `E 14595-14614`). **It cannot be
   undone.**
 - Do:
-  - matcher reduce-only (plus `DRAIN_ONLY` if outside flow continues);
+  - matcher reduce-only (`DRAIN_ONLY` is not available outside Live, `E 19671-19675`);
   - keep the keeper running (each crank forfeits a released leg or resolves,
     playbook: `E 15097-15122`);
   - tell users;

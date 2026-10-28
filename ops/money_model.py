@@ -71,7 +71,7 @@ def variable(o, mode):
         # Both sides are outside money. The LP also pays its fee side, so its
         # off-chain rebate must return that, cover its costs and pay a margin.
         fees = 2 * o.fee_bps / 1e4
-        cost = (min(lp_rebate_bps(o), 2 * o.fee_bps) + o.loss_bps) / 1e4
+        cost = (lp_rebate_bps(o) + o.loss_bps) / 1e4  # the full promised rebate, never capped
     return fees, other, cost
 
 
@@ -108,7 +108,7 @@ def breakeven(o, mode):
     fees, other, cost = variable(o, mode)
     fixed = sum(fixed_costs(o, mode).values()) - o.listing_fee_usd * o.listings_per_month * 12 / 365
     per_dollar = fees + other - cost + maint_per_dollar(o)
-    return float("inf") if per_dollar <= 0 else max(fixed, 0) / per_dollar
+    return float("inf") if per_dollar <= 0 else max(fixed, 0) / per_dollar  # inf: no volume breaks even
 
 
 def table(o, mode, vols):
@@ -128,19 +128,20 @@ def table(o, mode, vols):
     print(f"{'net P&L per 30 days':32}" + "".join(f"{30 * t:>16,.0f}" for t in totals))
     print(f"{'into insurance, both fee sides':32}" + "".join(f"{2 * v * o.fee_bps / 1e4:>16,.0f}" for v in vols))
     fees, other, cost = variable(o, mode)
-    # Cash: what accrues behind the Live gate while it is shut (both fee sides,
-    # plus the rest of the gated lines). Own-LP: half of it came out of LP capital.
+    # Cash: trade fees (both sides) that accrue behind the Live gate while it is
+    # shut. Other gated lines add a little more. Own-LP: half came out of LP capital.
     gated = [2 * v * o.fee_bps / 1e4 * o.lock_days for v in vols]
-    print(f"{'cash locked if gate shut ' + format(o.lock_days, 'g') + 'd':32}" + "".join(f"{x:>16,.0f}" for x in gated))
+    print(f"{'trade fees locked, gate shut ' + format(o.lock_days, 'g') + 'd':32}" + "".join(f"{x:>16,.0f}" for x in gated))
     if mode == "own":
         print(f"{'  of which drained from LP':32}" + "".join(f"{x / 2:>16,.0f}" for x in gated))
     else:
         print(f"{'  rebates owed meanwhile':32}" + "".join(f"{v * lp_rebate_bps(o) / 1e4 * o.lock_days:>16,.0f}" for v in vols))
     print(f"net variable margin: {(fees + other - cost) * 1e4:.2f} bps of volume (+ maintenance)")
     if mode == "outside":
-        print(f"rebate to outside LP: {lp_rebate_bps(o):.2f} bps of volume "
-              f"({lp_rebate_bps(o) / (2 * o.fee_bps):.0%} of fee income)")
-    print(f"break-even taker volume: ${breakeven(o, mode):,.0f}/day")
+        share = f"{lp_rebate_bps(o) / (2 * o.fee_bps):.0%}" if o.fee_bps else "n/a"
+        print(f"rebate to outside LP: {lp_rebate_bps(o):.2f} bps of volume ({share} of fee income)")
+    be = breakeven(o, mode)
+    print("break-even taker volume: " + (f"${be:,.0f}/day" if be != float("inf") else "none (variable margin <= 0)"))
     print()
 
 
