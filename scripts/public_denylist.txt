@@ -57,3 +57,6 @@ CAPITAL_PLAN
 LAUNCH_RUNBOOK
 OWNER_ACTIONS
 LEGAL_QUESTIONS
+# research (research/): private by owner decision
+research/replay
+REPLAY_DATA
