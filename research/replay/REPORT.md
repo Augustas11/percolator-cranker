@@ -11,7 +11,7 @@ we tested. With 1 s lag it can lose.** Results at 12 bps, tight hedge:
 |---|---:|---:|---:|
 | Many small tickets (Binance flow scaled down) | **+9.5 bps** ($845/day at $1M) | **+7.7 bps** ($669/day) | ~$133k/day |
 | Whole Binance-size tickets | **+3.9 bps** ($290/day) | **+2.4–2.6 bps** ($136–159/day) | ~$550k/day (loses at $500k, earns at $1M) |
-| Whole tickets + 4× larger arb | **+1.9–2.0 bps** ($91–101/day) | **−2.9 bps** (−$395/day) | none |
+| Whole tickets + 4× larger arb | **+1.9–2.0 bps** ($91–101/day) | **−2.9 bps** (−$395/day) | not established (loses at $1M/day, only volume tested) |
 
 - **Small tickets:** 97% of days are positive, the worst day is −$2.8k and the max drawdown is $3k.
 - **Whole tickets:** the inventory cap refuses about a quarter of the volume, and large tickets carry more
@@ -72,7 +72,7 @@ SOL rose 37% in the window and the capped LP sat long, so the unhedged column is
 - **Lag 0 is not reachable.** Our oracle stand-in is the Binance spot print, and Pyth itself trails it.
   So 400 ms is the best case and 1 s is a realistic pusher.
 - **The hedge fills 500 ms after it is sent.** So net exposure briefly exceeds the 1% threshold. The peak
-  over every fill was $39k, 3.9% of daily volume, on Aug 22; minute samples peak near 2%.
+  over every LP and hedge fill was $39k, 3.9% of daily volume, on Aug 22; minute samples peak near 2%.
 
 ## Sensitivity (toxic, tight hedge)
 
@@ -209,16 +209,18 @@ It is called through `TradeCpi`.
   with no cash transfer at the quoted price (`E 17676-17694`). Gains and losses then accrue against
   the shared mark.
 - So a 50 bps quote changes:
-  - the fee notional, by 0.5%;
   - which taker limits pass, so a taker with a tight limit is refused rather than charged;
-  - in EWMA or hybrid oracle modes only, the mark-discovery input.
+  - in EWMA or hybrid (trade-driven mark discovery) modes only, the fee basis and the mark-discovery
+    input. Under AuthMark, the fee basis is the effective mark too.
 
   It does not move cash from taker to LP.
-- **`TradeNoCpi` (our staging path) behaves the same.** Settlement is at the mark, and `exec_price` is
-  the fee basis (`P 8076-8098`).
-- **The two paths differ on the fee.** `TradeCpi` charges only `trade_fee_base_bps`, because the
-  unsigned LP cannot approve more (`P 9465-9468`). `TradeNoCpi`, co-signed by our LP, can charge any
-  `fee_bps` up to `max_trading_fee_bps`.
+- **`TradeNoCpi` (our staging path) behaves the same.** Settlement is at the mark, and the accepted
+  price is the fee basis (`P 8076-8098`).
+- **The two paths differ on the fee.** On `TradeCpi`, the caller-controlled base rate is fixed at
+  `trade_fee_base_bps`, because the unsigned LP cannot approve more (`P 9465-9468`).
+  - Protocol-derived mark-movement fees can still be added in discovery modes. They do not apply under
+    AuthMark (`P 15298-15304`).
+  - `TradeNoCpi`, co-signed by our LP, can set any base `fee_bps` up to `max_trading_fee_bps`.
 - **So any per-trade fee policy needs `TradeNoCpi`:** the size-based fee below, or a fee raised while
   the mark is stale.
 
@@ -608,7 +610,7 @@ Inventory limit 10% of daily volume: base flow filled 98.6% of offered notional.
 
 ### Setting 12 bps / 1000 ms / tight hedge, toxic, $1M/day
 
-Net/day mean 669, SD 546, max drawdown $3k, days positive 97%. Peak net exposure over every fill $39k.
+Net/day mean 669, SD 546, max drawdown $3k, days positive 97%. Peak net exposure over every LP and hedge fill $39k.
 
 | Inventory, sampled each minute | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
@@ -627,7 +629,7 @@ Five worst days:
 
 ### Setting 5 bps / 1000 ms / tight hedge, toxic, $1M/day
 
-Net/day mean -1,164, SD 1,790, max drawdown $105k, days positive 8%. Peak net exposure over every fill $38k.
+Net/day mean -1,164, SD 1,790, max drawdown $105k, days positive 8%. Peak net exposure over every LP and hedge fill $38k.
 
 | Inventory, sampled each minute | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|

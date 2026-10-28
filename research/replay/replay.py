@@ -194,9 +194,14 @@ class Book:
         hs = hh[np.searchsorted(ht, s, side="right") - 1]
         ps = px(s)
         self.expo.append((np.abs(lps + hs) * ps).astype(np.float32))
-        if len(lp_path):  # event-level peak: exposure only jumps at our fills
+        # event-level peak: exposure changes only at our fills and at hedge fills
+        if len(lp_path):
             hf = hh[np.searchsorted(ht, t, side="right") - 1]
             self.expo_max = max(self.expo_max, float((np.abs(lp_path + hf) * p_now).max()))
+        if len(ht) > 1:
+            li = np.searchsorted(t, ht[1:], side="right") - 1
+            lph = np.where(li >= 0, lp_path[np.maximum(li, 0)] if len(lp_path) else n_lp0, n_lp0)
+            self.expo_max = max(self.expo_max, float((np.abs(lph + hh[1:]) * px(ht[1:])).max()))
         self.lpabs.append((np.abs(lps) * ps).astype(np.float32))
         pnl = eq - self.eq
         self.days.append({"pnl": pnl, "fees": fees, "hedge_cost": hcost, "funding": fund,
@@ -461,7 +466,7 @@ def report(days, info, books, mk_base, mk_arb, arb_vol, mk_size, edges, mean_raw
         s = S[key]
         P(f"\n### Setting {key[1]} bps / {key[2]} ms / {key[3]} hedge, toxic, $1M/day\n")
         P(f"Net/day mean {s['net_day']:,.0f}, SD {s['sd']:,.0f}, max drawdown {fmt_usd(s['dd'])}, "
-          f"days positive {np.mean(s['net'] > 0):.0%}. Peak net exposure over every fill {fmt_usd(s['expo_max'])}.\n")
+          f"days positive {np.mean(s['net'] > 0):.0%}. Peak net exposure over every LP and hedge fill {fmt_usd(s['expo_max'])}.\n")
         P("| Inventory, sampled each minute | p50 | p95 | p99 | max |\n|---|---:|---:|---:|---:|")
         for name, arr in (("net exposure, LP + hedge", s["expo"]), ("LP on-chain position", s["lpabs"])):
             P(f"| {name} | " + " | ".join(fmt_usd(float(np.percentile(arr, q))) for q in (50, 95, 99, 100)) + " |")
