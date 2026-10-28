@@ -64,15 +64,22 @@ jobs:
   # or a content-gate failure shows up on the change that caused it.
   public-export:
     name: public export + content gate + exported build
-    if: ${{ hashFiles('scripts/export_public.sh') != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # hashFiles() is not available in a job-level `if`, so detect here and
+      # gate the remaining steps on this output.
+      - name: detect export source
+        id: detect
+        run: |
+          if [ -f scripts/export_public.py ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; echo "no export source here; nothing to do"; fi
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.detect.outputs.present == 'true'
       - uses: actions/cache@v4
+        if: steps.detect.outputs.present == 'true'
         with:
           path: |
             ~/.cargo/registry
@@ -80,9 +87,14 @@ jobs:
             ${{ runner.temp }}/pub-target
           key: pubexport-${{ runner.os }}-${{ hashFiles('public/Cargo.lock', 'scripts/pins.env') }}
           restore-keys: pubexport-${{ runner.os }}-
+      - name: content-gate regression probes
+        if: steps.detect.outputs.present == 'true'
+        run: python3 scripts/test_check_public_tree.py
       - name: export (draft) + content gate
+        if: steps.detect.outputs.present == 'true'
         run: ./scripts/export_public.sh "$RUNNER_TEMP/pub"
       - name: exported tree builds and tests on its own (--locked)
+        if: steps.detect.outputs.present == 'true'
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/pub-target
         run: |

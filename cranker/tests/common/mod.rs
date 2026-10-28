@@ -119,7 +119,7 @@ fn local_rpc_guard_parses_the_host() {
         "http://127.0.0.1@remote.example:8899", // public-check: allow-test-fixture
         "https://localhost@remote.example.invalid:8899", // public-check: allow-test-fixture
         "http://127.0.0.1.evil:8899", // public-check: allow-test-fixture
-        "ftp://127.0.0.1",
+        "ftp://127.0.0.1", // public-check: allow-test-fixture
     ] {
         assert!(!local_rpc(bad), "{bad}");
     }

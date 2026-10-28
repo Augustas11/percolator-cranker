@@ -1,7 +1,7 @@
 # Public export manifest: <private path> <public path>, one per line.
 # The export copies exactly these files from the COMMITTED tree (HEAD) and
-# fails if a tracked file under cranker/src, cranker/tests, client/src or
-# public/ is not listed here (or a listed file does not exist).
+# fails if a file committed under cranker/src, cranker/tests, client/src or
+# public/ is not listed here (or a listed file is not committed).
 cranker/Cargo.toml crates/cranker/Cargo.toml
 cranker/build.rs crates/cranker/build.rs
 cranker/src/binding.rs crates/cranker/src/binding.rs
@@ -28,6 +28,7 @@ client/src/main.rs crates/bringup/src/main.rs
 client/src/plan_gate.rs crates/bringup/src/plan_gate.rs
 scripts/m1_bringup.sh scripts/m1_bringup.sh
 scripts/check_public_tree.sh scripts/check_public_tree.sh
+scripts/check_public_tree.py scripts/check_public_tree.py
 scripts/fetch_upstream.sh scripts/fetch_upstream.sh
 scripts/pins.env scripts/pins.env
 .github/workflows/ci.yml .github/workflows/ci.yml

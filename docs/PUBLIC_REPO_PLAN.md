@@ -73,24 +73,52 @@ docs/        # ARCHITECTURE, RUNBOOK
 
 | Piece | Where | Exported? |
 |---|---|---|
-| `scripts/export_public.sh <dir>` | private only | no |
-| allowlist | inside `export_public.sh` (explicit `put` lines) | — |
-| public-only files (README, docs, workspace `Cargo.toml`, public-layout `env.sh`, crate READMEs, `.gitignore`) | `public/` overlay | yes |
-| shared with this repo (identical at each export; private CI re-runs the export on every change, so drift is caught before release): `.github/workflows/ci.yml`, `scripts/fetch_upstream.sh`, `scripts/pins.env`, `m1_bringup.sh` | private tree, copied as-is | yes |
-| layout rewrites (path dep `../repo-prog` → `../../upstream/percolator-prog`, `@PUBLIC_NAME@`) | `export_public.sh`, each anchored and checked | — |
-| `scripts/check_public_tree.sh <dir> [denylist]` | private, and exported (generic checks) | yes |
+| `scripts/export_public.sh <new-dir>` → `export_public.py` | private only | no |
+| `scripts/public_manifest.txt`: the exact file list, `<private path> <public path>` | private only | no |
+| public-only files (README, docs, workspace `Cargo.toml` and lock, public-layout `env.sh`, crate READMEs, `.gitignore`) | `public/` overlay, listed in the manifest | yes |
+| shared with this repo (identical at each export; private CI re-runs the export on every change): `.github/workflows/ci.yml`, `scripts/fetch_upstream.sh`, `scripts/pins.env`, `m1_bringup.sh` | private tree, listed in the manifest | yes |
+| layout rewrites (path dep `../repo-prog` → `../../upstream/percolator-prog`), `@PUBLIC_NAME@`, `@SECURITY_CONTACT@` | `export_public.py`, each anchored and checked | — |
+| `scripts/check_public_tree.sh [--draft] [--allow-email ADDR] <dir> [denylist]` → `check_public_tree.py` | private, and exported (generic checks) | yes |
 | `scripts/public_denylist.txt` | private only | no (asserted) |
+| `scripts/test_check_public_tree.py`: regression probes for every gate bypass found in audits | private only | no |
+
+**Export.**
+- The destination must not exist.
+- The tree is built in a fresh temp dir next to it, and renamed into place
+  only after every check passes. A failed export leaves nothing behind and
+  never touches existing files.
+- HEAD is resolved once. Exactly the manifest's files are read from that
+  commit (`git cat-file`), never from the working tree.
+- Every file committed at that HEAD under `cranker/src`, `cranker/tests`,
+  `client/src` and `public/` must be listed in the manifest. A new file goes
+  public only on purpose.
+- Destinations are normalized, and must not escape the tree, land in
+  `target/` or `upstream/`, or use dot components other than `.github` and
+  `.gitignore`.
+- Without `SECURITY_CONTACT` the export is a DRAFT and says so.
+
+**Content gate.** It fails closed:
+- **File checks:** walk errors, bad names, dot paths and symlinks fail, and
+  any file that isn't strict UTF-8 without NULs fails. The whole file is
+  decoded, so late binary or UTF-16 content can't hide.
+- **Secrets:** secret-like file names, 64-byte key arrays, and private-key,
+  seed-phrase and mnemonic markers.
+- **Locations:** absolute local paths and emails. The one exception is the
+  approved security contact, and only in `SECURITY.md`.
+- **Links:** URLs (parsed, with an allowlisted host and path) and any
+  `github.com/<owner>/<repo>` that isn't one of the two upstream repos.
+- **Private material:** operator-stack paths, unreplaced placeholders, and
+  the denylist, checked in both contents and file names.
+- **Test fixtures:** a line marked `public-check: allow-test-fixture` is
+  exempt from the email and URL rules only. It must be in `crates/*/tests/`
+  and use loopback or documentation-placeholder hosts.
+- **Cargo.lock** is exempt from the URL rule only; its sources come from
+  upstream manifests.
 
 The scripts read their layout from env vars with private-layout defaults
 (`PERCOLATOR_PROG_DIR`, `BRINGUP_DIR`, `CRANKER_MANIFEST`), so the same
-`m1_bringup.sh` runs in both trees. The public
-`env.sh` sets the public layout.
-
-Content gate: secrets and keypair JSON, absolute local paths, emails, URLs
-outside the allowlist (the two upstream repos, toolchain installers,
-registries, localhost), and the denylist. The URL rule skips `Cargo.lock`,
-because its sources come from upstream manifests. A negative test with
-planted violations is in the R1 PR description.
+`m1_bringup.sh` runs in both trees. The public `env.sh` sets the public
+layout.
 
 ## CI
 
@@ -98,37 +126,42 @@ Both repos run the **same** `.github/workflows/ci.yml`, copied by the
 export. It is layout-neutral: each tree's `scripts/env.sh` names the
 wrapper checkout, the bring-up crate and the keeper manifest.
 
-- **host** (push to `main`, pull requests): fetch the pinned wrapper,
-  build, run unit tests.
+- **host** (push to `main`, pull requests, dispatch): fetch the pinned
+  wrapper, build, run unit tests.
+- **public-export:** runs its steps only where `scripts/export_public.py`
+  exists, so it does nothing in the public repo. It runs the gate's
+  regression probes, then the export and its gate with the private
+  denylist, then a `--locked` build and test of the exported workspace.
 - **e2e** (pull requests, manual dispatch): SBF build with platform-tools
-  v1.52, validator bring-up, a 3-cycle dry run, the lifecycle integration
-  test, and the validator integration tests. Nothing is non-gating. (The
-  `live_shaped` load test was moved out of the first release; it is
-  maintained separately.)
+  v1.52, validator bring-up, a 3-cycle dry run with fail-on-error, and the
+  validator integration tests. Nothing is non-gating. (The `live_shaped`
+  load test is not part of the public release; it is maintained
+  separately.)
 - **Caches:** cargo registry and target dirs, the Solana CLI and
   platform-tools, and the wrapper SBF target.
 
 ## Release checklist (after the owner creates the repo)
 
-1. `PUBLIC_NAME=<chosen> ./scripts/export_public.sh <scratch>`. It must end
-   with `== OK`.
+1. `PUBLIC_NAME=<chosen> SECURITY_CONTACT=<approved> ./scripts/export_public.sh <new-dir>`.
+   It must end with `exported to <new-dir>` and must not say DRAFT.
 2. In `<scratch>`, run `./scripts/fetch_upstream.sh`, `cargo build`,
    `cargo test`, the bring-up and a 3-cycle dry run. All green.
-3. Add the owner-approved `LICENSE` and replace `@SECURITY_CONTACT@` in
-   `SECURITY.md`.
+3. Add the owner-approved `LICENSE` (add it to `public/` and the manifest,
+   so it goes through the gate).
 4. `git init`, then push one commit to the new repo. Wait for CI to go
    green; dispatch the gated e2e job once.
 5. Tag `v0.1.0`. The release notes cover pins, keeper behavior,
    quarantine, CU and the known issue (upstream #243). **Never** include
    load-test results or findings: they stay private (see Scope). Release
-   notes are written by hand, so they don't pass through the content gate;
-   run `check_public_tree.sh` on a file containing the notes before
-   publishing them.
+   notes are written by hand, so they don't pass through the export. Gate
+   them first: `mkdir -p <tmp>/notes && cp RELEASE_NOTES.md <tmp>/notes/ &&
+   ./scripts/check_public_tree.sh <tmp>/notes scripts/public_denylist.txt`.
 
 ## Export rules
 
-- **Allowlist only.** `scripts/export_public.sh` copies named paths; nothing
-  is copied by default.
+- **Manifest only.** `scripts/export_public.sh` copies exactly the
+  committed files in `scripts/public_manifest.txt`; nothing is copied by
+  default.
 - **Never exported:** `prep.md`, `ROADMAP.md`,
   `cranker-strategic-questions.md`, `prompts/`, watcher outputs (`digests/`,
   `signals.md`, `radar.md`, `contributors.md`, `watchlist.md`, `releases/`,
