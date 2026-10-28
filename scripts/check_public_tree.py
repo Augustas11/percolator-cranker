@@ -71,6 +71,7 @@ ALLOWED_REPOS = {
     ("aeyakovenko", "percolator"),
     ("aeyakovenko", "percolator-prog"),
     ("rust-lang", "crates.io-index"),
+    ("solana-foundation", "anchor"),  # upstream wrapper's git dependency (Cargo.lock)
 }
 ALLOWED_HOSTS = {
     "release.anza.xyz", "docs.rs", "crates.io", "static.rust-lang.org", "sh.rustup.rs",
