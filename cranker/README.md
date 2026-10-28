@@ -59,8 +59,10 @@ Env vars:
   `CRANKER_QUARANTINE_BASE_CYCLES` (default `2`),
   `CRANKER_QUARANTINE_MAX_CYCLES` (default `64`) — same-error streak that
   quarantines an account, and its backoff (doubles per re-quarantine, capped).
-* `CRANKER_SCENARIO=live_shaped` — run the deterministic load scenario
-  instead of the 3-cycle loop (see "Load scenario" below).
+* `CRANKER_ENABLE_FEE_SHARES=1` — opt in to fee paths (see the top of this
+  file). `CRANKER_WITHDRAWAL_TEST=1` additionally needs it.
+* `CRANKER_FAIL_ON_ERRORS=1` — exit nonzero if any attempt fails (CI sets
+  it for the dry run).
 * `CRANKER_PYTH_MODE=canonical` — enable Pyth canonical-PDA fallback
   in `PythFeedResolver`. Unset or `off` (default) means the resolver
   never hits, so hybrid+Pyth legs fall through to bytes-as-pubkey and
@@ -73,7 +75,7 @@ Env vars:
   portfolio's withdrawal path is byte-for-byte the same as a user
   portfolio's. See prep.md Q6 for the source-read side of the answer.
 
-Each cycle (`cycle::run_one_cycle`, shared with the load scenario):
+Each cycle (`cycle::run_one_cycle`, shared by the binary and the validator tests):
 
 1. `getProgramAccounts` filtered by wrapper header
    `[MAGIC | VERSION | KIND_PORTFOLIO]` (11-byte memcmp @ offset 0).
@@ -120,16 +122,15 @@ line; the run ends with the mirror-custody table and CU stats.
 * **Recovery crank bumps `position_epoch`** (prog `b40ffbd8`).
   * **Keeper.** The production crank path takes no binding at all (tag 5
     has no epoch field), so the keeper caches nothing that could go stale.
-    Every owner instruction the repo builds (tests, scenario, Q6
-    spot-check) reads the binding from fresh account bytes right before
-    sending.
-  * **What is tested.** The scenario's check d covers a Recovery-asset
-    `ForceCloseAbandonedAsset`. It bumps the epoch; an owner instruction
-    bound to the stale epoch is rejected, and the re-read one is accepted.
-  * **Not reached.** The market-wide Recovery `PermissionlessCrank` path
-    that `b40ffbd8` changed.
-* **Funding is exact** (engine #227, in `68859b94`): a leg whose F snapshot
-  trails its target by less than one atom is F-settled. `work::leg_f_settled`
+    Every owner instruction the repo builds (tests, Q6 spot-check) reads the
+    binding from fresh account bytes right before sending.
+  * **Not exercised in this PR's tests.** The epoch bump itself was
+    observed in the separate load test (historical, see `../prep.md`); the
+    market-wide Recovery crank path that `b40ffbd8` changed was never
+    reached.
+* **Funding is exact** (engine #227: only in the `68859b94` **preview**, not
+  in the default pin `4db11a8c`): a leg whose F snapshot trails its target
+  by less than one atom is F-settled. `work::leg_f_settled`
   is the only F test, so such legs never count as pending work. There is
   still no standalone funding settle entry point.
 * **Provider surplus withdraw** (engine #223 / prog #454) reaches the
@@ -169,34 +170,12 @@ line; the run ends with the mirror-custody table and CU stats.
   (`:10473`, `:10485`) — the cranker portfolio is created with `payer`
   as the owner for that reason.
 
-## Load scenario (`live_shaped`)
+## Load test
 
-```
-./scripts/live_shaped.sh                       # reuses the running validator
-CRANKER_SCENARIO=live_shaped ./scripts/preview_launch_fixes.sh   # preview pin
-```
-
-The scenario is deterministic: the seed `CRANKER_SCENARIO_SEED` drives
-every choice. Defaults are 40 traders (`CRANKER_SCENARIO_TRADERS`), 3
-AuthMark assets with one maker each (`CRANKER_SCENARIO_ASSETS`), and 200
-cycles (`CRANKER_CYCLES`).
-
-Each tick runs the scenario's own actions, then one real
-`cycle::run_one_cycle`. The actions are mark pushes, trades, backing
-top-ups, shutdown and force-close, resolve, and exits.
-
-It ends with assertions a–e:
-* a. no account stays unrefreshable past the quarantine window;
-* b. every resolved claimant is paid;
-* c. the residue before CloseSlab is within dust plus lapsed principal;
-* d. a Recovery-asset force-close bumps the position epoch; the stale binding is rejected and the re-read one accepted;
-* e. coverage.
-
-On the current pins it fails a, b and c because of a suspected engine
-issue, not the cranker. See `scenario-findings.md` and `../prep.md` → "Found
-in load test".
-Set `CRANKER_SCENARIO_DUMP_DIR=<dir>` to save the market and portfolio bytes
-whenever an account is quarantined.
+The `live_shaped` load test is not part of this crate any more; it is
+maintained separately. Its earlier 200-cycle results are kept in
+`../prep.md` and `scenario-findings.md` as findings (F1 is upstream as
+aeyakovenko/percolator#243).
 
 ## What's stubbed
 

@@ -356,9 +356,10 @@ once-only fix-up in `scripts/m1_bringup.sh` if this persists.
          - The production crank path takes no binding (tag 5 has no epoch).
            Owner instructions re-read the binding from fresh bytes before
            sending.
-         - Tested by `live_shaped` check d: a Recovery-asset force-close
-           bumps the epoch, the stale binding is rejected, and the fresh one
-           is accepted.
+         - Observed in the (since separated) `live_shaped` load test: a
+           Recovery-asset force-close bumps the epoch, the stale binding is
+           rejected, and the fresh one is accepted. Not exercised by PR #1's
+           own tests.
          - Not reached: the market-wide Recovery crank path itself.
          `SetMatcherConfig` now also binds `position_epoch` +
          `asset_generation_frontier` (cranker doesn't send it).
@@ -369,6 +370,11 @@ once-only fix-up in `scripts/m1_bringup.sh` if this persists.
          `WithdrawBackingBucket` tag in Resolved mode when signed. Not a crank;
          the cranker never calls it; nothing new to decode.
       6. Live OI symmetry: nothing in cranker code/tests asserts it.
+
+      **Fees (since round 2):** off by default. The default bootstrap has no
+      maintenance fee and zero cranker shares, and cranks attach no reward
+      portfolio. `CRANKER_ENABLE_FEE_SHARES=1` opts in (50% shares);
+      `CRANKER_WITHDRAWAL_TEST=1` also requires it.
 
       **Hardening:** per-account quarantine (same error × 3 → backoff 2, 4, 8 …
       capped at 64 cycles, JSON event line); per-cycle wall/CU/tx budget with

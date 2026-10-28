@@ -363,16 +363,15 @@ pub fn submit_crank_routed(
     let pre_state_hash = fnv_hash(&pre_target);
 
     // Submit with retry-on-blockhash-not-found (the test validator's RPC
-    // occasionally races the bank). A retry resends the same, never-landed
-    // tx, so it stays within the one budget reservation the caller took;
-    // the deadline is re-checked before every send.
+    // occasionally races the bank). A preflight "Blockhash not found" means
+    // the previous attempt was never forwarded, so a retry re-signs the same
+    // instructions with a fresh blockhash and stays within the one budget
+    // reservation the caller took. The deadline is re-checked before every
+    // send.
     let mut last_err: Option<String> = None;
     for attempt in 0..5 {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Err(anyhow!(
-                "cycle deadline reached before send{}",
-                last_err.as_deref().map(|e| format!(" (last: {e})")).unwrap_or_default()
-            ));
+            return Err(DeadlineReached.into());
         }
         let (bh, _) = rpc
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -388,7 +387,7 @@ pub fn submit_crank_routed(
         // tx is sent, its confirmation is bounded by blockhash expiry (the
         // client's own wait), not by the cycle deadline.
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Err(anyhow!("cycle deadline reached before send"));
+            return Err(DeadlineReached.into());
         }
         match rpc.send_and_confirm_transaction(&tx) {
             Ok(signature) => {
@@ -569,6 +568,19 @@ pub fn wrapper_error_name_for_ix(msg: &str, ix_index: usize) -> Option<&'static 
     }
     wrapper_error_name(msg)
 }
+
+/// The cycle deadline passed before the tx was sent: nothing went on chain.
+/// The caller treats it as budget deferral, never as an account failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeadlineReached;
+
+impl std::fmt::Display for DeadlineReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cycle deadline reached before send")
+    }
+}
+
+impl std::error::Error for DeadlineReached {}
 
 /// Compute-unit limit requested by every crank tx. The scheduler reserves
 /// this much CU budget before each tx.

@@ -65,6 +65,7 @@ pub struct Live {
 ///   cargo test -p percolator-cranker --test lifecycle -- --nocapture
 pub fn live_from_env() -> Option<Live> {
     let url = std::env::var("PERCOLATOR_TEST_RPC").ok()?;
+    assert!(local_rpc(&url), "PERCOLATOR_TEST_RPC must be a local validator, got {url}");
     let program_id = std::env::var("PERCOLATOR_PROGRAM_ID")
         .ok()
         .and_then(|s| Pubkey::from_str(&s).ok())?;
@@ -89,8 +90,15 @@ pub fn skip(test: &str) {
 /// Lighter env read for tests that BOOTSTRAP their own market (lifecycle):
 /// they only need the RPC endpoint + program id, then create the market
 /// themselves. Returns `None` (skip) when either var is missing.
+/// Validator tests send transactions: refuse anything but a local RPC.
+fn local_rpc(url: &str) -> bool {
+    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).unwrap_or("");
+    rest.starts_with("127.0.0.1") || rest.starts_with("localhost") || rest.starts_with("[::1]")
+}
+
 pub fn rpc_and_program_from_env() -> Option<(RpcClient, Pubkey)> {
     let url = std::env::var("PERCOLATOR_TEST_RPC").ok()?;
+    assert!(local_rpc(&url), "PERCOLATOR_TEST_RPC must be a local validator, got {url}");
     let program_id = std::env::var("PERCOLATOR_PROGRAM_ID")
         .ok()
         .and_then(|s| Pubkey::from_str(&s).ok())?;

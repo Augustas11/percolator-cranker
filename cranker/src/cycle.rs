@@ -313,6 +313,12 @@ pub fn run_one_cycle(
                 Some(deadline),
             ) {
                 Ok(o) => o,
+                Err(e) if e.is::<submit::DeadlineReached>() => {
+                    // Not sent: refund the reservation and stop. This is the
+                    // budget running out (deferral), not an account failure.
+                    ab.settle_tx(Some(0));
+                    break;
+                }
                 Err(e) => {
                     // Unknown CU: the full reservation stays charged.
                     ab.settle_tx(None);

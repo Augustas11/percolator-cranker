@@ -239,13 +239,14 @@ const CLASS_PATTERN: [Priority; 4] = [
     Priority::Quiet,
 ];
 
-/// Cross-cycle fairness state: one cursor per priority class. A class's
-/// queue starts at its cursor, and the cursor advances by the number of its
-/// candidates *visited* this cycle, so an account deferred for lack of
-/// budget is first in its class next cycle.
+/// Cross-cycle fairness state. Per priority class, the pubkey of the last
+/// candidate *visited*: next cycle that class starts at the first candidate
+/// sorting after it (wrapping). Keyed by pubkey, not by position, so it
+/// stays correct while accounts join, leave or change class between cycles:
+/// an account deferred for lack of budget is first in its class next cycle.
 #[derive(Debug, Default, Clone)]
 pub struct ScheduleState {
-    cursors: [usize; 3],
+    last_visited: [Option<Pubkey>; 3],
     /// Position in [`CLASS_PATTERN`] where the next cycle starts. Persisted
     /// so that a budget admitting only a few attempts still rotates the
     /// first turn across classes instead of always starting liquidatable.
@@ -299,20 +300,24 @@ where
     // Per-class queues, each starting at its persistent cursor.
     let mut cands = candidates;
     cands.sort_by(|a, b| a.pubkey.to_bytes().cmp(&b.pubkey.to_bytes()));
-    let cursors = quarantine.schedule_state().cursors;
+    let last_visited = quarantine.schedule_state().last_visited;
     let mut turn = quarantine.schedule_state().turn;
     let mut queues: [std::collections::VecDeque<Candidate>; 3] = Default::default();
     for (c, p) in [Priority::Liquidatable, Priority::Pending, Priority::Quiet].into_iter().enumerate() {
         let mut class: Vec<Candidate> = cands.iter().filter(|x| x.priority == p).cloned().collect();
-        let n = class.len();
-        if n > 0 {
-            class.rotate_left(cursors[c] % n);
+        if let Some(last) = last_visited[c] {
+            // Sorted by pubkey: start at the first one after `last`.
+            let start = class
+                .iter()
+                .position(|x| x.pubkey.to_bytes() > last.to_bytes())
+                .unwrap_or(0);
+            class.rotate_left(start);
         }
         queues[c] = class.into();
     }
     let quotas = class_quotas(budget.max_submissions, [0, 1, 2].map(|c| !queues[c].is_empty()));
     let mut used = [0usize; 3];
-    let mut visited = [0usize; 3];
+    let mut visited: [Option<Pubkey>; 3] = [None; 3];
 
     loop {
         // Next class: follow the pattern among classes with candidates left,
@@ -333,7 +338,7 @@ where
         let cand = queues[c].pop_front().expect("non-empty");
         if quarantine.is_blocked(&cand.pubkey, cycle) {
             s.quarantined_skipped += 1;
-            visited[c] += 1;
+            visited[c] = Some(cand.pubkey);
             continue;
         }
         if !meter.can_send() {
@@ -354,7 +359,7 @@ where
             }
             break;
         }
-        visited[c] += 1;
+        visited[c] = Some(cand.pubkey);
         let txs_before = meter.txs_left;
         let cu_before = meter.cu_left;
         let mut ab = AttemptBudget {
@@ -378,7 +383,9 @@ where
     }
     let st = quarantine.schedule_state_mut();
     for c in 0..3 {
-        st.cursors[c] = st.cursors[c].wrapping_add(visited[c]);
+        if visited[c].is_some() {
+            st.last_visited[c] = visited[c];
+        }
     }
     st.turn = turn;
     s
@@ -487,6 +494,29 @@ mod tests {
             });
         }
         assert_eq!(order, vec![0, 1, 2, 3, 4, 0]);
+    }
+
+    /// Audit finding: position cursors broke when class membership changed.
+    /// With last-visited pubkeys, a deferred account is first next cycle even
+    /// when a new account sorting before it joins.
+    #[test]
+    fn deferred_account_first_even_when_membership_changes() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let budget = CycleBudget { max_submissions: 2, ..CycleBudget::default() };
+        let mut served = Vec::new();
+        // cycle 0: 10, 11, 12 -> serves 10, 11; 12 deferred
+        let c0 = [10u8, 11, 12].iter().map(|&i| cand(pk(i), Priority::Quiet)).collect();
+        run(0, c0, &budget, &mut q, |c, ab| {
+            served.push(c.pubkey.to_bytes()[0]);
+            one_tx(ab, 1, Attempt::Idle { cu: 1 })
+        });
+        // cycle 1: a new account 5 sorts first; 12 must still be next
+        let c1 = [5u8, 10, 11, 12].iter().map(|&i| cand(pk(i), Priority::Quiet)).collect();
+        run(1, c1, &budget, &mut q, |c, ab| {
+            served.push(c.pubkey.to_bytes()[0]);
+            one_tx(ab, 1, Attempt::Idle { cu: 1 })
+        });
+        assert_eq!(served, vec![10, 11, 12, 5]);
     }
 
     /// Audit finding: with a 1-tx budget every cycle used to start (and end)
