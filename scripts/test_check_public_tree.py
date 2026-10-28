@@ -103,6 +103,13 @@ class Helper(unittest.TestCase):
                 self.put(rel, text)
                 self.assertHit("denylisted")
 
+    def test_relative_denylist_path(self):
+        self.put("RELEASE_NOTES.md", f"by {OWNER}\n")
+        p = subprocess.run(["bash", HELPER, self.root, "scripts/public_denylist.txt"],
+                           capture_output=True, text=True, cwd=os.path.dirname(HERE))
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("denylisted", p.stdout)
+
     def test_placeholder_unless_draft(self):
         self.put("SECURITY.md", "contact @SECURITY" + "_CONTACT@\n")
         self.assertHit("unreplaced placeholder")

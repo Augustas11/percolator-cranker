@@ -40,6 +40,9 @@ if [ -n "$deny" ] && [ ! -f "$deny" ]; then
   echo "denylist not found: $deny" >&2
   exit 2
 fi
+if [ -n "$deny" ]; then
+  deny="$(cd "$(dirname "$deny")" && pwd)/$(basename "$deny")"  # absolute: we cd below
+fi
 
 echo "== check_public_tree: $root"
 cd "$root"
@@ -74,7 +77,8 @@ if [ "$draft" = 0 ]; then
   scan "unreplaced placeholder" -E '@[A-Z][A-Z_]+@'
 fi
 if [ -n "$deny" ]; then
-  patterns="$(grep -v '^[[:space:]]*#' "$deny" | sed 's/[[:space:]]#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)"
+  patterns="$(sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' "$deny")" \
+    || { echo "cannot read denylist: $deny" >&2; exit 2; }
   if [ -n "$patterns" ]; then
     scan "denylisted" -iF -e "$patterns"
     report "denylisted file name" < <(files | grep -iF -e "$patterns" || true)
