@@ -92,7 +92,7 @@ pub fn skip(test: &str) {
 /// themselves. Returns `None` (skip) when either var is missing.
 /// Validator tests send transactions: refuse anything but a local RPC.
 /// Parses the authority and compares the exact host; userinfo (`a@b`) is
-/// rejected so `http://127.0.0.1@remote/` can't pass.
+/// rejected so `http://127.0.0.1@remote.example/` cannot pass.
 fn local_rpc(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) else {
         return false;
@@ -530,7 +530,7 @@ pub fn market_is_retired(rpc: &RpcClient, market: &Pubkey) -> Result<bool> {
 }
 
 // ---------------------------------------------------------------------------
-// TODO (Layer B): full-view invariants.
+// Not yet covered: full-view invariants.
 //
 // To also assert `market.validate_shape()` and, per account,
 // `PortfolioV16View::new(acct).validate_with_market(&market_view)` — the two

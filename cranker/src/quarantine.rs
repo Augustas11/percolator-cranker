@@ -1,7 +1,7 @@
 //! Per-account failure quarantine.
 //!
-//! Live-shaped test deployments (Commoneffort, percolator #226) hit accounts
-//! that no crank could refresh: every attempt reverted with the same engine
+//! Live-shaped test deployments (reported on upstream percolator #226) hit
+//! accounts that no crank could refresh: every attempt reverted with the same engine
 //! error (`EngineCounterUnderflow` on engine `5f2a7151`). Upstream fixed that
 //! case; the cranker assumes the next one exists.
 //!

@@ -2,7 +2,7 @@
 //!
 //! Filters on the wrapper's 11-byte header prefix
 //! `[MAGIC(8) | VERSION(2) | KIND_PORTFOLIO(1)]` — see
-//! `write_header` / `check_header` at `repo-prog/src/v16_program.rs:684`.
+//! `write_header` / `check_header` at the wrapper's `src/v16_program.rs:684`.
 //! This isolates portfolio-kind accounts owned by the program, without
 //! having to enumerate everything and filter client-side.
 
@@ -106,7 +106,7 @@ pub fn discover_portfolios(
 
 /// Rank candidates for cranking.
 ///
-/// M2 heuristic (deliberately simple):
+/// Heuristic (deliberately simple):
 ///   1. Restrict to portfolios belonging to `market` — otherwise the
 ///      wrapper rejects with `EngineProvenanceMismatch` (0x10) and we
 ///      waste tx fees. This is the crucial filter because the RPC

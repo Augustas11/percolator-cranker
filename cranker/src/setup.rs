@@ -1,7 +1,7 @@
 //! One-shot environment setup: SPL mint, market slab, InitMarket, one
 //! user portfolio with a deposit, and one cranker reward portfolio.
 //!
-//! This mirrors what `../client/src/main.rs` (the M1 bring-up) does but
+//! This mirrors what the M1 bring-up client does but
 //! is inlined here so the cranker is self-contained: run against a
 //! deployed program on a validator, get back a `CrankerEnv` describing
 //! everything the loop needs. No coordination with `m1_bringup` required.
@@ -31,7 +31,7 @@ use solana_sdk::{
 pub struct CrankerEnv {
     pub payer: Keypair,
     /// Admin keypair kept for post-setup governance calls (e.g. rotating
-    /// fee policies mid-run in later work). Not read by the M2 loop.
+    /// fee policies mid-run in later work). Not read by the cranker loop.
     #[allow(dead_code)]
     pub admin: Keypair,
     #[allow(dead_code)]
@@ -44,7 +44,7 @@ pub struct CrankerEnv {
     /// Owner keypair of `user_portfolio`. Exposed so tests can sign
     /// `CloseResolved` (the wrapper checks `expect_portfolio_view_owner`
     /// against this key, and requires its signature inside the
-    /// force-close delay window). Unused by the M2 binary loop.
+    /// force-close delay window). Unused by the cranker loop.
     #[allow(dead_code)]
     pub user: Keypair,
 }
@@ -179,10 +179,10 @@ pub fn bootstrap_with_options(
         // Enable the liquidation cranker reward path (50% share). This gates
         // the reward-portfolio-append acceptance during PermissionlessCrank
         // (`reward_enabled = liquidation_cranker_fee_share_bps != 0`, at
-        // repo-prog/src/v16_program.rs:10467). Without this the wrapper
+        // the wrapper's src/v16_program.rs:10467). Without this the wrapper
         // treats an appended reward portfolio as an unaccounted-for oracle
         // tail account and rejects with InvalidInstruction. We still won't
-        // see nonzero fee movement in M2 (no liquidations happen in the
+        // see nonzero fee movement here (no liquidations happen in the
         // synthetic market), but the ABI shape is now correctly exercised.
         let liq = binding::market_authority_binding(&rpc.get_account_data(&market.pubkey())?)?;
         send_prog_ix(
@@ -235,7 +235,7 @@ pub fn bootstrap_with_options(
     // Cranker's own reward portfolio. Owner MUST be the tx payer/signer —
     // the wrapper's PermissionlessCrank reward-append path (see
     // `expect_signer(owner)` + `reward_owner != owner.key.to_bytes()` at
-    // repo-prog/src/v16_program.rs:10473,10485) rejects with Unauthorized
+    // the wrapper's src/v16_program.rs:10473,10485) rejects with Unauthorized
     // otherwise. In a real deployment the cranker's operator keypair would
     // both own the reward portfolio and sign submissions.
     let cranker_portfolio = create_portfolio(rpc, &payer, &payer, &market.pubkey(), *program_id)?;

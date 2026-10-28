@@ -1,7 +1,7 @@
-//! Minimal permissionless cranker for percolator-prog (M2, re-pinned to
+//! Minimal permissionless cranker for percolator-prog (pinned to
 //! wrapper `5cb331dd` / engine `4db11a8c`).
 //!
-//! **Reference / dry-run only; not a paid live service.** M3 is NO-GO.
+//! **Reference / dry-run only; not a paid live service.** Nothing is deployed on a public cluster.
 //!
 //! Loop shape:
 //!   1. Boot a self-contained market environment (`setup::bootstrap`).
@@ -17,7 +17,7 @@
 //!         account in quarantine with capped exponential backoff.
 //!   3. Print the mirror-custody table, cycle summaries and CU stats.
 //!
-//! Deliberate omissions (see cranker/README.md for the full stub inventory):
+//! Deliberate omissions:
 //!   * No `SyncMaintenanceFee` submission in the loop (M1 proved fee routing).
 //!   * No priority-fee logic. No leader-slot prediction. No jito-bundle.
 //!   * Fees are **off by default**: the bootstrap market has no maintenance
@@ -62,7 +62,7 @@ fn main() -> Result<()> {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_CYCLES);
 
-    println!("== cranker M2 loop against {RPC_URL} ==");
+    println!("== cranker loop against {RPC_URL} ==");
     println!("program_id = {program_id}");
     println!("cycles = {cycles} (CRANKER_CYCLES to override)");
     println!("hint_budget = {HINT_BUDGET}");
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
         "layout_discriminator = {V16_LAYOUT_DISCRIMINATOR} (A6 drain cap = {SOURCE_LIEN_DRAIN_MAX_STEPS})"
     );
 
-    // Smoke-test the M2 plan-classification gate, including post-#195
+    // Smoke-test the plan-classification gate, including post-#195
     // variants. Delegates to auto_crank_plan_requires_caller_observation.
     {
         use percolator::PermissionlessRecoveryReasonV16;
@@ -169,7 +169,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // ---- summary (M2.g) ----
+    // ---- summary ----
     println!("\n== mirror-custody summary ==");
     println!(
         "{:<6} {:<45} {:<24} {:<12} {:<7} {:<7} {:<9}",
@@ -224,8 +224,8 @@ fn main() -> Result<()> {
         reward_hash
     );
 
-    // ---- optional Q6 empirical spot-check: cranker portfolio withdrawal ----
-    // Guarded so it never fires in the M2 default run. When enabled:
+    // ---- optional spot-check: cranker portfolio withdrawal ----
+    // Guarded so it never fires in the default run. When enabled:
     //   1. Route some maintenance fee to the cranker portfolio via
     //      `SyncMaintenanceFee` (as in M1's fee-routing proof).
     //   2. Attempt `Withdraw` from the cranker portfolio.
@@ -244,7 +244,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Q6 empirical verification. See main() call site for context.
+/// Withdrawal spot-check. See main() call site for context.
 fn run_q6_withdrawal_test(
     rpc: &RpcClient,
     program_id: &Pubkey,
@@ -257,7 +257,7 @@ fn run_q6_withdrawal_test(
         transaction::Transaction,
     };
 
-    println!("\n== Q6 withdrawal spot-check ==");
+    println!("\n== withdrawal spot-check ==");
 
     // Route maintenance fee to the cranker portfolio. Wait a few slots
     // first so meaningful fee accrues.
@@ -365,10 +365,10 @@ fn run_q6_withdrawal_test(
     let delta = dest_after.saturating_sub(dest_before);
     println!("payer ATA after Withdraw:  {} atoms (Δ = {})", dest_after, delta);
     if delta as u128 == withdraw_amount {
-        println!("Q6 verified: cranker portfolio → owner ATA transfer matches Withdraw amount");
+        println!("verified: cranker portfolio → owner ATA transfer matches Withdraw amount");
     } else {
         println!(
-            "Q6 partial: expected +{withdraw_amount}, got +{delta}. Amount=0 case still exercises \
+            "partial: expected +{withdraw_amount}, got +{delta}. Amount=0 case still exercises \
              the code path (engine short-circuits at line 14549)."
         );
     }

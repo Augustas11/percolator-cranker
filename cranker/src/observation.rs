@@ -7,7 +7,7 @@
 //! ## What the wrapper expects (source of truth)
 //!
 //! For asset `i`, the wrapper's per-asset profile at
-//! `repo-prog/src/v16_program.rs:556` (struct `AssetOracleProfileV16`)
+//! the wrapper's `src/v16_program.rs:556` (struct `AssetOracleProfileV16`)
 //! carries (`ASSET_ORACLE_PROFILE_LEN` = 424 bytes at the current pin):
 //! * `oracle_mode: u8` — dispatch discriminant:
 //!   * `ORACLE_MODE_MANUAL       = 0` — no oracle account; mark is stored.
@@ -41,8 +41,8 @@
 //! **A cranker cannot fully derive Pyth account pubkeys from market state
 //! alone.** For any HYBRID-mode asset backed by Pyth, the cranker needs an
 //! out-of-band `PythFeedResolver` that returns the current PriceUpdateV2
-//! account for a given `feed_id`. This is the operational-data edge the
-//! service-operator side of your positioning trades on.
+//! account for a given `feed_id`. This mapping is
+//! operator-supplied data.
 //!
 //! For Switchboard and Chainlink the account pubkey is byte-embedded in
 //! the profile — no off-chain lookup needed. Their tradeoff is that the
@@ -82,7 +82,7 @@ impl FetchedObservation {
 }
 
 /// Pyth Solana Receiver mainnet program id — hardcoded in the wrapper at
-/// `repo-prog/src/v16_program.rs:3523` as a 32-byte literal. This is the
+/// the wrapper's `src/v16_program.rs:3523` as a 32-byte literal. This is the
 /// program that owns `PriceUpdateV2` accounts; the wrapper checks
 /// `price_ai.owner == PYTH_RECEIVER_PROGRAM_ID` at `:3662`.
 ///
@@ -110,8 +110,8 @@ pub const PYTH_MAINNET_CANONICAL_SHARD: u16 = 0;
 /// * **`overrides`**: an explicit `feed_id → account` map. Populated by
 ///   the operator from their own tracking (a Pyth-receiver-crawling
 ///   indexer, a hand-curated table, or a Pyth-hosted API). Takes
-///   precedence when set. This is the operational-data edge from
-///   Q4/strategic-questions.
+///   precedence when set. This is operator-supplied data: market state
+///   alone does not name the Pyth account.
 ///
 /// * **`pda_shard`**: fallback derivation using the canonical
 ///   `PDA(seeds=[shard_le_bytes, feed_id], program_id=RECEIVER)`
@@ -202,7 +202,7 @@ pub fn pyth_price_update_v2_pda(shard: u16, feed_id: &[u8; 32]) -> Pubkey {
 ///   assumes the leg is Switchboard or Chainlink and treats the 32-byte
 ///   feed value as the account pubkey directly. In production, the
 ///   cranker should track which legs are which source per-asset in its
-///   own configuration; for M2 we take the byte-embedded interpretation
+///   own configuration; by default we take the byte-embedded interpretation
 ///   as the default (correct for SB / Chainlink) and let Pyth entries
 ///   route through the resolver.
 pub fn fetch_observation_for_asset(

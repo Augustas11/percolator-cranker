@@ -58,6 +58,51 @@ jobs:
       - name: unit tests (validator-gated integration tests self-skip)
         run: cargo test --release --manifest-path "$CRANKER_MANIFEST"
 
+  # Runs only where scripts/export_public.sh exists (the maintainers' export
+  # source); skipped everywhere else. Re-runs the export, its leak helper,
+  # and a --locked build + test of the exported workspace, so a stale lock
+  # or a leak-helper hit shows up on the change that caused it.
+  public-export:
+    name: public export + leak helper + exported build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # hashFiles() is not available in a job-level `if`, so detect here and
+      # gate the remaining steps on this output.
+      - name: detect export source
+        id: detect
+        run: |
+          if [ -f scripts/export_public.py ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; echo "no export source here; nothing to do"; fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.detect.outputs.present == 'true'
+      - uses: actions/cache@v4
+        if: steps.detect.outputs.present == 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/pub-target
+          key: pubexport-${{ runner.os }}-${{ hashFiles('public/Cargo.lock', 'scripts/pins.env') }}
+          restore-keys: pubexport-${{ runner.os }}-
+      - name: exporter + leak-helper tests
+        if: steps.detect.outputs.present == 'true'
+        run: python3 scripts/test_check_public_tree.py
+      - name: export (draft) + leak helper
+        if: steps.detect.outputs.present == 'true'
+        run: ./scripts/export_public.sh "$RUNNER_TEMP/pub"
+      - name: exported tree builds and tests on its own (--locked)
+        if: steps.detect.outputs.present == 'true'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/pub-target
+        run: |
+          cd "$RUNNER_TEMP/pub"
+          ./scripts/fetch_upstream.sh
+          cargo build --release --locked --workspace --all-targets
+          cargo test --release --locked --workspace
+
   # SBF build + local validator. Heavier, so it runs on pull requests and
   # manual dispatch only, not on pushes to main.
   e2e:

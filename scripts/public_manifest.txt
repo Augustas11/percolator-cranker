@@ -1,0 +1,45 @@
+# Public export manifest: <private path> <public path>, one per line.
+# The export copies exactly these files from the COMMITTED tree (HEAD) and
+# fails if a file committed under cranker/src, cranker/tests, client/src or
+# public/ is not listed here (or a listed file is not committed).
+cranker/Cargo.toml crates/cranker/Cargo.toml
+cranker/build.rs crates/cranker/build.rs
+cranker/src/binding.rs crates/cranker/src/binding.rs
+cranker/src/cycle.rs crates/cranker/src/cycle.rs
+cranker/src/discovery.rs crates/cranker/src/discovery.rs
+cranker/src/lib.rs crates/cranker/src/lib.rs
+cranker/src/main.rs crates/cranker/src/main.rs
+cranker/src/observation.rs crates/cranker/src/observation.rs
+cranker/src/plan_gate.rs crates/cranker/src/plan_gate.rs
+cranker/src/quarantine.rs crates/cranker/src/quarantine.rs
+cranker/src/resolved.rs crates/cranker/src/resolved.rs
+cranker/src/scheduler.rs crates/cranker/src/scheduler.rs
+cranker/src/setup.rs crates/cranker/src/setup.rs
+cranker/src/submit.rs crates/cranker/src/submit.rs
+cranker/src/work.rs crates/cranker/src/work.rs
+cranker/tests/common/mod.rs crates/cranker/tests/common/mod.rs
+cranker/tests/cycle_resolved.rs crates/cranker/tests/cycle_resolved.rs
+cranker/tests/hard_reject.rs crates/cranker/tests/hard_reject.rs
+cranker/tests/invariants.rs crates/cranker/tests/invariants.rs
+cranker/tests/lifecycle.rs crates/cranker/tests/lifecycle.rs
+client/Cargo.toml crates/bringup/Cargo.toml
+client/build.rs crates/bringup/build.rs
+client/src/main.rs crates/bringup/src/main.rs
+client/src/plan_gate.rs crates/bringup/src/plan_gate.rs
+scripts/m1_bringup.sh scripts/m1_bringup.sh
+scripts/check_public_tree.sh scripts/check_public_tree.sh
+scripts/fetch_upstream.sh scripts/fetch_upstream.sh
+scripts/pins.env scripts/pins.env
+.github/workflows/ci.yml .github/workflows/ci.yml
+public/.gitignore .gitignore
+public/CHANGELOG.md CHANGELOG.md
+public/CONTRIBUTING.md CONTRIBUTING.md
+public/Cargo.lock Cargo.lock
+public/Cargo.toml Cargo.toml
+public/README.md README.md
+public/SECURITY.md SECURITY.md
+public/crates/bringup/README.md crates/bringup/README.md
+public/crates/cranker/README.md crates/cranker/README.md
+public/docs/ARCHITECTURE.md docs/ARCHITECTURE.md
+public/docs/RUNBOOK.md docs/RUNBOOK.md
+public/scripts/env.sh scripts/env.sh
