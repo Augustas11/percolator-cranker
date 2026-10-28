@@ -1,0 +1,139 @@
+# One pipeline for this repo and the exported public tree. It is
+# layout-neutral: scripts/env.sh says where the wrapper checkout, the
+# bring-up crate and the keeper manifest live in each tree.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SOLANA_VERSION: "2.0.21"
+
+jobs:
+  host:
+    name: build + unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: layout
+        run: |
+          source scripts/env.sh
+          {
+            echo "PERCOLATOR_PROG_DIR=$PERCOLATOR_PROG_DIR"
+            echo "BRINGUP_DIR=$BRINGUP_DIR"
+            echo "CRANKER_MANIFEST=$CRANKER_MANIFEST"
+          } >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            cranker/target
+            client/target
+          key: host-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'scripts/pins.env') }}
+          restore-keys: host-${{ runner.os }}-
+      - name: fetch pinned wrapper
+        run: ./scripts/fetch_upstream.sh
+      - name: build keeper + bring-up client
+        run: |
+          cargo build --release --all-targets --manifest-path "$CRANKER_MANIFEST"
+          cargo build --release --manifest-path "$BRINGUP_DIR/Cargo.toml"
+      - name: unit tests (validator-gated integration tests self-skip)
+        run: cargo test --release --manifest-path "$CRANKER_MANIFEST"
+
+  # SBF build + local validator. Heavier, so it runs on pull requests and
+  # manual dispatch only, not on pushes to main.
+  e2e:
+    name: SBF build + bring-up + dry-run + live_shaped (50 cycles)
+    needs: host
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: layout
+        run: |
+          source scripts/env.sh
+          {
+            echo "PERCOLATOR_PROG_DIR=$PERCOLATOR_PROG_DIR"
+            echo "BRINGUP_DIR=$BRINGUP_DIR"
+            echo "CRANKER_MANIFEST=$CRANKER_MANIFEST"
+          } >> "$GITHUB_ENV"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            cranker/target
+            client/target
+          key: host-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'scripts/pins.env') }}
+          restore-keys: host-${{ runner.os }}-
+      - name: cache Solana CLI + platform-tools v1.52
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/solana
+            ~/.cache/solana
+          key: solana-${{ runner.os }}-${{ env.SOLANA_VERSION }}-platform-tools-v1.52
+      - name: install Solana CLI
+        run: |
+          if [ ! -x "$HOME/.local/share/solana/install/active_release/bin/solana" ]; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          fi
+          solana --version
+      - name: fetch pinned wrapper
+        run: ./scripts/fetch_upstream.sh
+      - name: cache wrapper SBF build
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PERCOLATOR_PROG_DIR }}/target
+          key: sbf-${{ runner.os }}-${{ hashFiles('scripts/pins.env') }}
+      - name: payer keypair (throwaway, local validator only)
+        run: |
+          mkdir -p ~/.config/solana
+          solana-keygen new --no-bip39-passphrase --silent --force --outfile ~/.config/solana/id.json
+      - name: SBF build + local bring-up
+        run: FORCE_SBF_REBUILD=1 ./scripts/m1_bringup.sh
+      - name: keeper dry-run (3 cycles)
+        run: |
+          export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
+          CRANKER_CYCLES=3 cargo run --release --bin cranker --manifest-path "$CRANKER_MANIFEST"
+      - name: integration test against the validator
+        run: |
+          export PERCOLATOR_TEST_RPC=http://127.0.0.1:8899
+          export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
+          cargo test --release --manifest-path "$CRANKER_MANIFEST" --test lifecycle
+      # On the current pins the scenario's liveness assertion fails because of
+      # an engine-side issue (lapsed, unreferenced backing wedges Live
+      # refresh). The step runs and uploads its report, but it does not gate
+      # the job, and its name says so. A pass/fail summary is printed either way.
+      - name: live_shaped 50 cycles (non-gating, known engine-side issue)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          CRANKER_CYCLES=50 ./scripts/live_shaped.sh 2>&1 | tee live-shaped-run.log
+      - name: live_shaped summary
+        if: always()
+        run: sed -n '/^assertions:/,$p' live-shaped-run.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-shaped-report
+          path: |
+            live-shaped-run.log
+            /tmp/solana-test-validator.log
+          if-no-files-found: ignore
