@@ -15,12 +15,12 @@
 mod common;
 
 use anyhow::{ensure, Result};
-use percolator_cranker::cycle::{self, CrankCtx, CuStats, SubmissionRecord};
-use percolator_cranker::observation;
-use percolator_cranker::quarantine::{Quarantine, QuarantineConfig};
-use percolator_cranker::scheduler::CycleBudget;
-use percolator_cranker::setup;
-use percolator_cranker::submit::OutcomeClass;
+use drip::cycle::{self, CrankCtx, CuStats, SubmissionRecord};
+use drip::observation;
+use drip::quarantine::{Quarantine, QuarantineConfig};
+use drip::scheduler::CycleBudget;
+use drip::setup;
+use drip::submit::OutcomeClass;
 use solana_sdk::program_pack::Pack;
 use solana_sdk::signature::Signer;
 

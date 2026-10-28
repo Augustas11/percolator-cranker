@@ -1,16 +1,16 @@
 [package]
-name = "percolator-cranker"
+name = "drip"
 version = "0.1.0"
 edition = "2021"
 publish = false
-default-run = "cranker"
+default-run = "drip"
 
 [lib]
-name = "percolator_cranker"
+name = "drip"
 path = "src/lib.rs"
 
 [[bin]]
-name = "cranker"
+name = "drip"
 path = "src/main.rs"
 
 [dependencies]

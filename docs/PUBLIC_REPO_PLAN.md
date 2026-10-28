@@ -79,7 +79,7 @@ docs/        # ARCHITECTURE, RUNBOOK
 ```
 
 **v0.1.0 as built:** `crates/cranker` (the whole keeper crate: library,
-`cranker` binary, integration tests) and `crates/bringup`
+`drip` binary, integration tests) and `crates/bringup`
 (the smoke-test client). `upstream/` is fetched at the pinned SHA by
 `scripts/fetch_upstream.sh` and is gitignored.
 

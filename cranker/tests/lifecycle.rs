@@ -23,8 +23,8 @@ mod common;
 
 use anyhow::Result;
 use percolator::AutoCrankPlanV16;
-use percolator_cranker::submit::CrankOutcome;
-use percolator_cranker::{discovery, observation, plan_gate, setup, submit};
+use drip::submit::CrankOutcome;
+use drip::{discovery, observation, plan_gate, setup, submit};
 use solana_sdk::signature::Signer;
 use std::time::Duration;
 
@@ -110,7 +110,7 @@ fn crank_lifecycle_preserves_conservation() -> Result<()> {
             // ---- submit + classify ----
             // A6 drain: one domain per crank until Ok(no-mut) / HardReject.
             let mut inner_slot = now_slot;
-            for drain_step in 0..percolator_cranker::binding::SOURCE_LIEN_DRAIN_MAX_STEPS {
+            for drain_step in 0..drip::binding::SOURCE_LIEN_DRAIN_MAX_STEPS {
             let outcome = submit::submit_crank(
                 &rpc,
                 &program_id,

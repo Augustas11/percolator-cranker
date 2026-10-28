@@ -57,7 +57,7 @@ exported as `PERCOLATOR_PROGRAM_ID`.
 ```bash
 source scripts/env.sh
 export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey upstream/percolator-prog/target/deploy/percolator_prog-keypair.json)
-CRANKER_CYCLES=3 cargo run --release -p percolator-cranker --bin cranker
+CRANKER_CYCLES=3 cargo run --release -p drip --bin drip
 ```
 
 The binary bootstraps its own one-asset market and runs N cycles against

@@ -107,4 +107,4 @@ export PERCOLATOR_SKIP_PIN_CHECK=1
 echo "==> cranker (preview) CRANKER_CYCLES=${CRANKER_CYCLES:-3}"
 cd "$PV/cranker"
 PERCOLATOR_PROGRAM_ID="$PROG_ID" CRANKER_CYCLES="${CRANKER_CYCLES:-3}" \
-  cargo run --release --bin cranker
+  cargo run --release --bin drip

@@ -171,7 +171,7 @@ jobs:
       - name: keeper dry-run (3 cycles)
         run: |
           export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
-          CRANKER_CYCLES=3 CRANKER_FAIL_ON_ERRORS=1 cargo run --release --bin cranker --manifest-path "$CRANKER_MANIFEST"
+          CRANKER_CYCLES=3 CRANKER_FAIL_ON_ERRORS=1 cargo run --release --bin drip --manifest-path "$CRANKER_MANIFEST"
       - name: validator integration tests (lifecycle, rollback, conservation, cycle through Resolved)
         run: |
           export PERCOLATOR_TEST_RPC=http://127.0.0.1:8899

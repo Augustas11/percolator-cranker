@@ -38,8 +38,8 @@ use solana_sdk::{
 };
 use std::str::FromStr;
 
-use percolator_cranker::discovery::{discover_portfolios, DiscoveredPortfolio};
-use percolator_cranker::setup::CrankerEnv;
+use drip::discovery::{discover_portfolios, DiscoveredPortfolio};
+use drip::setup::CrankerEnv;
 
 // ---------------------------------------------------------------------------
 // Env-gated wiring. Integration tests only run when a validator is pointed at.
@@ -62,7 +62,7 @@ pub struct Live {
 ///   PERCOLATOR_TEST_RPC=http://127.0.0.1:8899 \
 ///   PERCOLATOR_PROGRAM_ID=Perco1ator111111111111111111111111111111111 \
 ///   PERCOLATOR_TEST_MARKET=<market pubkey> \
-///   cargo test -p percolator-cranker --test lifecycle -- --nocapture
+///   cargo test -p drip --test lifecycle -- --nocapture
 pub fn live_from_env() -> Option<Live> {
     let url = std::env::var("PERCOLATOR_TEST_RPC").ok()?;
     assert!(local_rpc(&url), "PERCOLATOR_TEST_RPC must be a local validator, got {url}");
@@ -338,7 +338,7 @@ fn send_prog_tx(
 /// at `InitMarket`) as a signer, and `accounts[1]` the writable market.
 pub fn resolve_market(rpc: &RpcClient, program_id: &Pubkey, env: &CrankerEnv) -> Result<()> {
     let market_data = rpc.get_account_data(&env.market).context("read market")?;
-    let bind = percolator_cranker::binding::market_authority_binding(&market_data)?;
+    let bind = drip::binding::market_authority_binding(&market_data)?;
     send_prog_tx(
         rpc,
         program_id,
@@ -426,7 +426,7 @@ pub fn close_portfolio(
     closer: &Keypair,
 ) -> Result<()> {
     let data = rpc.get_account_data(portfolio).context("read portfolio")?;
-    let bind = percolator_cranker::binding::portfolio_binding(&data)?;
+    let bind = drip::binding::portfolio_binding(&data)?;
     send_prog_tx(
         rpc,
         program_id,
@@ -467,7 +467,7 @@ pub fn close_slab(
     let (vault_authority, _bump) =
         Pubkey::find_program_address(&[b"vault", env.market.as_ref()], program_id);
     let market_data = rpc.get_account_data(&env.market).context("read market")?;
-    let bind = percolator_cranker::binding::market_authority_binding(&market_data)?;
+    let bind = drip::binding::market_authority_binding(&market_data)?;
     send_prog_tx(
         rpc,
         program_id,
