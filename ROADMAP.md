@@ -41,9 +41,11 @@ load-test results.
   - the README, `docs/RUNBOOK.md`, `CHANGELOG.md` and the license are in
     place;
   - CI runs build, tests and the `live_shaped` scenario;
-  - a publish checklist is ready.
-- **Owner decision:** flipping the repo to public, and separating the
-  watcher outputs (`digests/`, `signals.md`, …) from the published tree.
+  - it is published as a **new, clean public repo** (fresh history, proper
+    name and layout) built by an allowlist export. This repo stays private
+    as the working, ops and strategy repo.
+- **Owner decisions:** the public repo's name, creating it, the license, and
+  which repo is the code home after `v0.1.0`.
 
 ### 2. A persistent staging market
 
