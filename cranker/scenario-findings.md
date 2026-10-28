@@ -166,6 +166,19 @@ engine `68859b94` (`src/v16.rs`).
   backing provider has no pre-expiry exit, so unowed backing is forfeited
   and swept. That may explain the domain-4 withdrawal that released 1 atom.
 
-The pre-merge preview run (prog #456 head + engine `68859b94`) decides which
-of these are still open there; its result is recorded in `prep.md`.
+**Pre-merge preview result** (prog #456 head `febc3731` + engine
+`68859b94`, same seed, 200 cycles):
+
+* **F1: still present.** 72 quarantine events, all `EngineStale`; the
+  longest failure run was 79 cycles against a bound of 67. Lapsed-but-Fresh
+  buckets were seen in Live for domains 0–3.
+* **F1b: gone.** No `EngineLockActive` quarantines, consistent with engine
+  #216.
+* **F2: much smaller.**
+  * Residue was 9,127,703 atoms against 9,000,000 of lapsed principal (all
+    6 domains lapsed under the #224 resolved horizon).
+  * Another 48,674 was insurance that could not be withdrawn.
+  * About 78.5k atoms remain unexplained.
+  * CloseSlab was refused with `EngineLockActive`.
+  * `ClaimResolvedPayoutTopup` was rejected `EngineLockActive` 185 times.
 
