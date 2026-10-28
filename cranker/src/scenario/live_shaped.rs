@@ -34,10 +34,40 @@
 //! lapses), so two runs with the same digest need not produce byte-equal
 //! state.
 //!
-//! Keeper cohort: every 5th trader (ordinals 0, 5, 10, …) is never closed or
-//! claimed by the scenario after Resolve. Only `cycle::run_one_cycle`
-//! (its `CrankRoute::Resolved` path, once `force_close_delay_slots` passed)
-//! can drive them to terminal; check `f` asserts it did.
+//! Keeper cohort: every 5th trader (ordinals 0, 5, 10, …) gets no scenario
+//! CloseResolved or claim after Resolve until it is settled. Only
+//! `cycle::run_one_cycle` (its `CrankRoute::Resolved` path, once
+//! `force_close_delay_slots` passed) can settle them; check `f` asserts it
+//! did. The owner then claims any junior top-up and closes.
+//!
+//! Fees: the scenario opts in itself (50% liquidation cranker share via its
+//! own `UpdateLiquidationFeePolicy`; maintenance fee 0). It does not use
+//! `setup::bootstrap`, so `CRANKER_ENABLE_FEE_SHARES` does not apply.
+//!
+//! Checks (report `assertions:`):
+//! * `a` no live account still struck; no consecutive-failure run longer
+//!   than quarantine threshold + max backoff. Runs come from the
+//!   scheduler's per-account outcomes (`CycleSummary`), not from records.
+//! * `b` Resolved; every portfolio terminal (capital = pnl = reserved = 0,
+//!   no legs, no unfinalized payout receipt); every owner got its senior
+//!   (capital) entitlement.
+//! * `c` vault residue before CloseSlab within the dust bound (plus lapsed
+//!   unliened backing principal when no claimant was haircut).
+//! * `d` position-epoch re-read around a Recovery-asset force-close.
+//! * `e` coverage counters (liquidations, expired and impaired buckets,
+//!   recovery asset, funding, CU no-op) all nonzero.
+//! * `f` the keeper's Resolved route settled every cohort member.
+//! * `g` the market retired through a confirmed CloseSlab (header-only
+//!   tombstone or account gone).
+//!
+//! Evidence reads that fail (token balances, portfolio or market bytes that
+//! do not decode) end the run with an error; they never read as 0 or closed.
+//!
+//! Exit status: `CRANKER_SCENARIO_ALLOW_FAIL` is a comma list of check ids
+//! whose failure is tolerated (only those in [`ALLOWABLE_FAILURES`]: `c`,
+//! `e`). The run passes only if every failing check is on the list; the
+//! report prints an `allowed failures:` line with each id, its reason, and
+//! whether it failed or passed anyway.
 
 use anyhow::{anyhow, bail, Context, Result};
 use percolator::{
@@ -45,6 +75,7 @@ use percolator::{
     BOUND_SCALE, MAX_VAULT_TVL, POS_SCALE,
 };
 use percolator_prog::{
+    constants::{HEADER_LEN, KIND_CLOSED_MARKET, MAGIC},
     processor::ASSET_ACTION_SHUTDOWN,
     ix::Instruction as P,
     state::{
@@ -72,7 +103,7 @@ use crate::binding::{self, PortfolioBinding};
 use crate::cycle::{self, CrankCtx, CuStats, SubmissionRecord};
 use crate::observation;
 use crate::quarantine::{Quarantine, QuarantineConfig};
-use crate::scheduler::CycleBudget;
+use crate::scheduler::{CycleBudget, CycleSummary};
 use crate::setup;
 use crate::submit::{self, CrankOutcome, OutcomeClass};
 
@@ -99,6 +130,39 @@ pub struct ScenarioConfig {
     pub assets: usize,
     pub cycles: u64,
     pub program_id: Pubkey,
+    /// `CRANKER_SCENARIO_BACKING` (default `lapse`).
+    pub backing: BackingMode,
+}
+
+/// How the scenario's backing provider treats bucket expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackingMode {
+    /// Stress buckets are left to lapse. A lapsed-but-Fresh bucket in Live
+    /// is engine finding F1 (aeyakovenko/percolator#243): positions
+    /// attributed to it go EngineStale, which exercises quarantine.
+    #[default]
+    Lapse,
+    /// Operator mitigation: shortly before expiry, withdraw the unliened
+    /// principal (bucket back to Empty) and top it up anew with a fresh
+    /// expiry, so no bucket lapses unused.
+    Roll,
+}
+
+impl BackingMode {
+    pub fn parse(v: &str) -> Result<Self> {
+        match v.trim() {
+            "" | "lapse" => Ok(Self::Lapse),
+            "roll" => Ok(Self::Roll),
+            other => bail!("CRANKER_SCENARIO_BACKING must be lapse or roll (got {other:?})"),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Lapse => "lapse",
+            Self::Roll => "roll",
+        }
+    }
 }
 
 impl ScenarioConfig {
@@ -125,6 +189,7 @@ impl ScenarioConfig {
             assets,
             cycles,
             program_id: Pubkey::from_str(&program_id).context("parse PERCOLATOR_PROGRAM_ID")?,
+            backing: BackingMode::parse(&std::env::var("CRANKER_SCENARIO_BACKING").unwrap_or_default())?,
         })
     }
 }
@@ -207,6 +272,12 @@ enum TopUpExpiry {
     StressPct(u64),
     /// `now + slots`.
     Offset(u64),
+    /// Past the whole Live phase: `now + slots_per_cycle × (cycles − topup)
+    /// × 3/2 + 5 cycles`. Never lapses while Live (no F1), yet is reachable
+    /// before CloseSlab: a bucket left Fresh with a sub-atom unliened
+    /// remnant (fee accrual is not atom-aligned, so it can never be
+    /// withdrawn) holds CloseSlab's terminal scan until it expires.
+    PastBudget,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,13 +383,24 @@ impl ActionPlan {
         let mut topups = Vec::new();
         for a in 0..n.min(3) {
             if a == shutdown_asset {
-                // Long-dated bucket, withdrawn (partly in Live, rest after exits).
-                topups.push(TopUp { domain: 2 * a, amount: 1_000_000, expiry: TopUpExpiry::Offset(10_000_000) });
+                // Long-dated bucket, withdrawn (partly in Live, rest after
+                // exits). `roll` bounds its expiry so CloseSlab can wait it out.
+                let e = match cfg.backing {
+                    BackingMode::Lapse => TopUpExpiry::Offset(10_000_000),
+                    BackingMode::Roll => TopUpExpiry::PastBudget,
+                };
+                topups.push(TopUp { domain: 2 * a, amount: 1_000_000, expiry: e });
                 continue;
             }
             let lien = lien_domain(&dir, phases, a);
-            topups.push(TopUp { domain: lien ^ 1, amount: 1_000_000, expiry: TopUpExpiry::StressPct(55) });
-            topups.push(TopUp { domain: lien, amount: 3_000_000, expiry: TopUpExpiry::StressPct(75) });
+            // `lapse`: stress buckets lapse mid-run (F1). `roll`: they
+            // outlive the Live phase and are rolled if they ever near expiry.
+            let (e1, e2) = match cfg.backing {
+                BackingMode::Lapse => (TopUpExpiry::StressPct(55), TopUpExpiry::StressPct(75)),
+                BackingMode::Roll => (TopUpExpiry::PastBudget, TopUpExpiry::PastBudget),
+            };
+            topups.push(TopUp { domain: lien ^ 1, amount: 1_000_000, expiry: e1 });
+            topups.push(TopUp { domain: lien, amount: 3_000_000, expiry: e2 });
         }
 
         let cohort: Vec<usize> = (0..traders).filter(|t| t % KEEPER_COHORT_EVERY == 0).collect();
@@ -366,7 +448,7 @@ impl ActionPlan {
         }
         let mut h = Hasher::default();
         h.hash(b"reference-keeper/live_shaped/plan/v1");
-        for v in [cfg.seed, cfg.run, cfg.traders as u64, cfg.assets as u64, cfg.cycles] {
+        for v in [cfg.seed, cfg.run, cfg.traders as u64, cfg.assets as u64, cfg.cycles, cfg.backing as u64] {
             u(&mut h, v);
         }
         let ph = self.phases;
@@ -408,6 +490,7 @@ impl ActionPlan {
             let (kind, v) = match t.expiry {
                 TopUpExpiry::StressPct(p) => (0, p),
                 TopUpExpiry::Offset(s) => (1, s),
+                TopUpExpiry::PastBudget => (2, 0),
             };
             u(&mut h, kind);
             u(&mut h, v);
@@ -449,6 +532,10 @@ struct Actor {
     pnl_at_resolve: i128,
     /// Already terminal (nothing left to close) when the market resolved.
     terminal_at_resolve: bool,
+    /// No active leg when the market resolved. Only then is capital at
+    /// Resolve (less realized loss) the owner's senior entitlement; an open
+    /// leg still settles at the resolved price after the snapshot.
+    flat_at_resolve: bool,
     /// Closed only by the keeper's Resolved route (never by the scenario's
     /// CloseResolved / ClaimResolvedPayoutTopup).
     keeper_cohort: bool,
@@ -493,6 +580,17 @@ pub struct ScenarioReport {
     /// Backing principal withdrawn per domain (atoms).
     pub backing_withdrawn: BTreeMap<usize, u128>,
     pub buckets_impaired: BTreeSet<usize>,
+    /// `CRANKER_SCENARIO_BACKING` mode name.
+    pub backing_mode: &'static str,
+    /// `roll` mode: buckets rolled, and rolls that could not happen.
+    pub backing_rolls: usize,
+    pub backing_roll_blocked: usize,
+    /// ForceCloseAbandonedAsset: cycles tried, attempts, landings, and
+    /// rejections by error.
+    pub force_close_cycles: usize,
+    pub force_close_attempts: usize,
+    pub force_close_landed: usize,
+    pub force_close_errors: BTreeMap<String, usize>,
     /// Live-mode domains seen Fresh past expiry: domain → (first, last) slot.
     pub lapsed_unnormalized_live: BTreeMap<usize, (u64, u64)>,
     pub recovery_assets: BTreeSet<usize>,
@@ -510,7 +608,13 @@ pub struct ScenarioReport {
     pub fail_run_bound: u64,
     pub vault_after: u64,
     pub dust_bound: u64,
+    /// The slab retired (header-only tombstone or gone) as observed right
+    /// after a confirmed CloseSlab tx.
     pub close_slab: bool,
+    /// Confirmed CloseSlab txs (scan steps plus the retiring one).
+    pub close_slab_steps_ok: usize,
+    /// The CloseSlab rejection that ended the loop, if any.
+    pub close_slab_rejection: Option<String>,
     /// Vault balance after every owner exit and every authority withdrawal,
     /// before CloseSlab's terminal sweep.
     pub vault_before_close_slab: u64,
@@ -519,11 +623,36 @@ pub struct ScenarioReport {
     pub action_rejects: BTreeMap<String, usize>,
     pub notes: Vec<String>,
     pub checks: Vec<Check>,
+    /// `CRANKER_SCENARIO_ALLOW_FAIL`: check ids whose failure does not fail
+    /// the run (each must be in [`ALLOWABLE_FAILURES`]).
+    pub allow_fail: BTreeSet<&'static str>,
+}
+
+/// Check ids that may go on `CRANKER_SCENARIO_ALLOW_FAIL`, with the reason
+/// printed on the report's `allowed failures:` line. Any other id on the
+/// list is a config error: a, b, d, f and g are never allow-listable.
+pub const ALLOWABLE_FAILURES: &[(&str, &str)] = &[
+    ("c", "residue above dust — open finding F2"),
+    ("e", "the Impaired bucket is not reachable on these pins"),
+];
+
+/// Parse a comma list of check ids (`"c,e"`; empty = none).
+pub fn parse_allow_fail(v: &str) -> Result<BTreeSet<&'static str>> {
+    let mut out = BTreeSet::new();
+    for id in v.split(',').map(str::trim).filter(|x| !x.is_empty()) {
+        let Some((known, _)) = ALLOWABLE_FAILURES.iter().find(|(k, _)| *k == id) else {
+            let ok: Vec<&str> = ALLOWABLE_FAILURES.iter().map(|(k, _)| *k).collect();
+            bail!("CRANKER_SCENARIO_ALLOW_FAIL: check {id:?} cannot be allow-listed (allowable: {ok:?})");
+        };
+        out.insert(*known);
+    }
+    Ok(out)
 }
 
 impl ScenarioReport {
+    /// Exit status: every failing check is on the allow-list.
     pub fn passed(&self) -> bool {
-        self.checks.iter().all(|c| c.passed)
+        self.checks.iter().all(|c| c.passed || self.allow_fail.contains(c.id))
     }
 
     pub fn render(&self) -> String {
@@ -538,13 +667,28 @@ impl ScenarioReport {
             self.seed, self.run, self.traders, self.assets, self.cycles, self.market, self.wall_secs
         ));
         line(format!(
+            "backing: {} ({})",
+            self.backing_mode,
+            if self.backing_mode == "roll" {
+                "unliened principal withdrawn and re-topped before expiry; no bucket lapses unused"
+            } else {
+                "stress buckets lapse; exercises F1 (aeyakovenko/percolator#243) and quarantine"
+            }
+        ));
+        line(format!(
             "action-plan digest={} (pins the seeded inputs: price path, deposits, trade sizes/directions, \
              top-up amounts/expiry offsets, keeper cohort, key pubkeys; on-chain outcomes also depend on \
              validator slot timing, so the digest does not pin every outcome)",
             self.plan_digest
         ));
+        line(
+            "fees: opt-in (scenario): the scenario sets a 50% liquidation cranker share itself \
+             (UpdateLiquidationFeePolicy on its own market); maintenance fee 0; independent of \
+             CRANKER_ENABLE_FEE_SHARES"
+                .into(),
+        );
         line(format!(
-            "cranker totals: submissions={} progressed={} idle={} failed={}",
+            "cranker totals: txs={} (scheduler accounting) progressed={} idle={} failed={}",
             self.submissions, self.progressed, self.idle, self.failed
         ));
         line(format!(
@@ -556,8 +700,8 @@ impl ScenarioReport {
             self.liquidation_fee_cranks, self.liquidatable_seen, self.crank_leg_reductions
         ));
         line(format!(
-            "backing buckets: expired domains={:?} impaired domains={:?}",
-            self.buckets_expired, self.buckets_impaired
+            "backing buckets: expired domains={:?} impaired domains={:?} rolls={} roll-blocked={}",
+            self.buckets_expired, self.buckets_impaired, self.backing_rolls, self.backing_roll_blocked
         ));
         line(format!(
             "lapsed-but-Fresh buckets in Live (domain → first..last slot seen): {:?}",
@@ -603,15 +747,43 @@ impl ScenarioReport {
         }
         line("assertions:".into());
         for c in &self.checks {
+            let allowed = !c.passed && self.allow_fail.contains(c.id);
             line(format!(
-                "  [{}] {}: {}",
+                "  [{}] {}: {}{}",
                 if c.passed { "PASS" } else { "FAIL" },
                 c.id,
-                c.detail
+                c.detail,
+                if allowed { " (allowed failure)" } else { "" }
             ));
         }
-        line(format!("RESULT: {}", if self.passed() { "PASS" } else { "FAIL" }));
+        line(format!("allowed failures: {}", self.allowed_line()));
+        let allowed_fails = self.checks.iter().filter(|c| !c.passed && self.allow_fail.contains(c.id)).count();
+        line(format!(
+            "RESULT: {}{}",
+            if self.passed() { "PASS" } else { "FAIL" },
+            if allowed_fails > 0 { format!(" ({allowed_fails} allowed failure(s))") } else { String::new() }
+        ));
         s
+    }
+
+    /// Each allow-listed check with its reason and how it ended.
+    fn allowed_line(&self) -> String {
+        if self.allow_fail.is_empty() {
+            return "none (CRANKER_SCENARIO_ALLOW_FAIL unset or empty)".into();
+        }
+        self.allow_fail
+            .iter()
+            .map(|id| {
+                let why = ALLOWABLE_FAILURES.iter().find(|(k, _)| k == id).map(|(_, w)| *w).unwrap_or("");
+                let how = match self.checks.iter().find(|c| c.id == *id) {
+                    Some(c) if c.passed => "allowed but passed",
+                    Some(_) => "failed, allowed",
+                    None => "not evaluated",
+                };
+                format!("{id} ({why}): {how}")
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 
@@ -654,10 +826,27 @@ fn effective_abs(p: &PortfolioAccountV16Account, g: &MarketGroupV16, asset: usiz
         .sum()
 }
 
-fn is_terminal(p: &PortfolioAccountV16Account) -> bool {
+/// Nothing left for a crank or `CloseResolved` to settle: capital, pnl and
+/// reserved pnl are zero and no leg is active. A positive-PnL claimant can
+/// still hold an unfinalized payout receipt here (junior top-up owed).
+fn settled(p: &PortfolioAccountV16Account) -> bool {
     p.capital.get() == 0 && p.pnl.get() == 0 && p.reserved_pnl.get() == 0 && legs(p).is_empty()
 }
 
+/// Terminal: [`settled`] and no outstanding receipt face (no receipt, or a
+/// finalized one with `paid_effective == terminal_positive_claim_face`).
+/// The engine refuses ClosePortfolio on a present, unfinalized receipt.
+fn is_terminal(p: &PortfolioAccountV16Account) -> bool {
+    let r = &p.resolved_payout_receipt;
+    let receipt_done = r.present == 0
+        || (r.finalized != 0 && r.paid_effective.get() >= r.terminal_positive_claim_face.get());
+    settled(p) && receipt_done
+}
+
+/// Portfolios by key: `None` only for a real closure (account gone, zero
+/// lamports, or no data past the header; ClosePortfolio zeroes, shrinks and
+/// defunds the account). Live bytes that fail to decode are an error, not
+/// a closed account.
 fn fetch_portfolios(
     rpc: &RpcClient,
     keys: &[Pubkey],
@@ -667,10 +856,16 @@ fn fetch_portfolios(
         let accts = rpc
             .get_multiple_accounts_with_commitment(chunk, CommitmentConfig::confirmed())?
             .value;
-        for a in accts {
-            out.push(a.filter(|a| a.lamports > 0).and_then(|a| {
-                read_portfolio(&a.data).ok().map(|p| (a.data, p))
-            }));
+        for (k, a) in chunk.iter().zip(accts) {
+            let live = a.filter(|a| a.lamports > 0 && a.data.len() > HEADER_LEN);
+            out.push(match live {
+                None => None,
+                Some(a) => {
+                    let p = read_portfolio(&a.data)
+                        .map_err(|e| anyhow!("portfolio {k}: live account fails to decode: {e:?}"))?;
+                    Some((a.data, p))
+                }
+            });
         }
     }
     Ok(out)
@@ -731,6 +926,10 @@ struct World<'a> {
     plan: ActionPlan,
     phases: Phases,
     shutdown_asset: usize,
+    /// Slots per cycle measured at the top-up cycle (roll lead time).
+    slots_per_cycle: u64,
+    /// `roll` mode: domain → original expiry span (slots) of its top-up.
+    roll_spans: BTreeMap<usize, u64>,
 }
 
 impl<'a> World<'a> {
@@ -860,6 +1059,7 @@ impl<'a> World<'a> {
             capital_at_resolve: 0,
             pnl_at_resolve: 0,
             terminal_at_resolve: false,
+            flat_at_resolve: false,
             keeper_cohort: false,
             keeper_terminal_received: None,
             receipt: None,
@@ -940,6 +1140,7 @@ impl<'a> World<'a> {
                 capital_at_resolve: 0,
                 pnl_at_resolve: 0,
                 terminal_at_resolve: false,
+                flat_at_resolve: false,
                 keeper_cohort,
                 keeper_terminal_received: None,
                 receipt: None,
@@ -1148,7 +1349,7 @@ impl<'a> World<'a> {
         Ok(())
     }
 
-    fn top_up_backing(&mut self, domain: usize, amount: u128, expiry_slot: u64) {
+    fn top_up_backing(&mut self, domain: usize, amount: u128, expiry_slot: u64) -> bool {
         let r = (|| -> Result<(), TxError> {
             let (data, _, g) = read_mkt(self.rpc, &self.market).map_err(txe)?;
             let a = domain / 2;
@@ -1183,13 +1384,71 @@ impl<'a> World<'a> {
         match r {
             Ok(()) => {
                 *self.report.backing_topped_up.entry(domain).or_default() += amount;
-                println!("top-up backing domain {domain}: {amount} atoms, expiry slot {expiry_slot}")
+                println!("top-up backing domain {domain}: {amount} atoms, expiry slot {expiry_slot}");
+                true
             }
             Err(e) => {
                 println!("top-up backing domain {domain} rejected: {e}");
                 self.reject("backing-top-up", &e);
+                false
             }
         }
+    }
+
+    /// `roll` mode, once per Live cycle: every planned bucket within `lead`
+    /// slots of expiry has its unliened principal withdrawn (bucket back to
+    /// Empty, or Expired if liens were consumed) and is topped up anew with
+    /// the withdrawn amount and its original span. A bucket that cannot be
+    /// emptied (outstanding liens) cannot take a new expiry; that is
+    /// reported, never hidden.
+    fn roll_backing(&mut self, cycle: u64) -> Result<()> {
+        let (_, _, g) = read_mkt(self.rpc, &self.market)?;
+        if g.mode != MarketModeV16::Live {
+            return Ok(());
+        }
+        let now = self.slot()?.max(g.current_slot);
+        let lead = 4 * self.slots_per_cycle + 8;
+        for (d, span) in self.roll_spans.clone() {
+            let b = g.source_backing_buckets[d];
+            if b.status != BackingBucketStatusV16::Fresh || b.expiry_slot > now + lead {
+                continue;
+            }
+            let cap = b.fresh_unliened_backing_num / BOUND_SCALE;
+            let got = self.withdraw_backing(d, cap, false);
+            let (_, _, g2) = read_mkt(self.rpc, &self.market)?;
+            let b2 = g2.source_backing_buckets[d];
+            let emptied = matches!(b2.status, BackingBucketStatusV16::Empty | BackingBucketStatusV16::Expired);
+            if !emptied || got == 0 {
+                self.report.backing_roll_blocked += 1;
+                // Why a 1-atom withdrawal is refused now (Live withdrawals
+                // are gated on e.g. no negative-PnL account market-wide).
+                let why = {
+                    let (data, _, g3) = read_mkt(self.rpc, &self.market)?;
+                    let sq = seqs(&data, d / 2)?;
+                    let ix = self.withdraw_backing_ix(d, g3.assets[d / 2].market_id, sq.authority_epoch, 1, false);
+                    match self.chain.simulate(&[ix], &[&self.admin]) {
+                        Ok(()) => "1-atom withdrawal simulates ok".to_string(),
+                        Err(e) => format!("1-atom withdrawal → {} (negative_pnl_accounts={})", e.short(), g3.negative_pnl_account_count),
+                    }
+                };
+                let msg = format!(
+                    "cycle {cycle}: roll of domain {d} blocked: withdrew {got}, status {:?} unliened={} liened={} expiry={}; {why}",
+                    b2.status, b2.fresh_unliened_backing_num, b2.valid_liened_backing_num, b2.expiry_slot
+                );
+                println!("{msg}");
+                self.report.notes.push(msg);
+                continue;
+            }
+            let expiry = self.slot()?.max(g2.current_slot) + span;
+            if self.top_up_backing(d, got, expiry) {
+                self.report.backing_rolls += 1;
+                println!("cycle {cycle}: rolled domain {d}: {got} atoms, new expiry {expiry}");
+            } else {
+                self.report.backing_roll_blocked += 1;
+                self.report.notes.push(format!("cycle {cycle}: roll of domain {d}: re-top-up rejected after withdrawing {got}"));
+            }
+        }
+        Ok(())
     }
 
     fn withdraw_backing_ix(&self, domain: usize, market_id: u64, epoch: u64, amount: u128, earnings: bool) -> Instruction {
@@ -1533,12 +1792,6 @@ impl<'a> World<'a> {
         if longs.is_empty() && shorts.is_empty() {
             return Ok(true);
         }
-        // Prefer trader-vs-trader / trader-vs-LP pairs with a trader first,
-        // so the d-check runs on a trader portfolio.
-        longs.sort_by_key(|(i, _)| (self.actors[*i].role != Role::Trader, *i));
-        shorts.sort_by_key(|(i, _)| (self.actors[*i].role != Role::Trader, *i));
-        let mut done = 0;
-        let (mut li, mut si) = (0, 0);
         // One-sided residue (no counterparty leg left, e.g. after the
         // d-check forfeit): the owner forfeits it. ForceClose's own residue
         // path only applies once that side's OI is already zero.
@@ -1565,16 +1818,34 @@ impl<'a> World<'a> {
             }
             return Ok(false);
         }
-        while done < max_pairs && li < longs.len() && si < shorts.len() {
-            let (long, short, q) = {
-                let ((l, lq), (s, sq)) = (longs[li], shorts[si]);
-                (l, s, lq.min(sq).max(1))
-            };
-            let do_d = d_done.is_none()
-                && (self.actors[long].role == Role::Trader || self.actors[short].role == Role::Trader)
-                && li < longs.len()
-                && si < shorts.len();
-            let subject = if self.actors[long].role == Role::Trader { long } else { short };
+        self.report.force_close_cycles += 1;
+        // Every long × short pair, trader-involved pairs first. A pair that
+        // is rejected (one side stale, locked, …) does not block the rest:
+        // each cycle walks the whole list until something lands.
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        for &(l, _) in &longs {
+            for &(s, _) in &shorts {
+                if l != s {
+                    pairs.push((l, s));
+                }
+            }
+        }
+        let traders: Vec<bool> = self.actors.iter().map(|x| x.role == Role::Trader).collect();
+        let is_trader = |i: usize| traders[i];
+        pairs.sort_by_key(|&(l, s)| (!(is_trader(l) || is_trader(s)), !is_trader(l), l, s));
+        let mut left: HashMap<usize, u128> = longs.iter().chain(shorts.iter()).map(|&(i, q)| (i, q)).collect();
+        let mut landed = 0;
+        for (long, short) in pairs {
+            if landed >= max_pairs {
+                break;
+            }
+            let (lq, sq) = (left[&long], left[&short]);
+            if lq == 0 || sq == 0 {
+                continue;
+            }
+            let q = lq.min(sq).max(1);
+            let do_d = d_done.is_none() && (is_trader(long) || is_trader(short));
+            let subject = if is_trader(long) { long } else { short };
             let close_q = if do_d { (q / 2).max(1) } else { q };
             let stale = if do_d {
                 Some(binding::portfolio_binding(&self.rpc.get_account_data(&self.actors[subject].portfolio)?)?)
@@ -1582,29 +1853,28 @@ impl<'a> World<'a> {
                 None
             };
             let ix = self.force_close_ix(a, &self.actors[long].portfolio, &self.actors[short].portfolio, close_q)?;
+            self.report.force_close_attempts += 1;
             match self.chain.send(&[ix], &[]) {
                 Ok(_) => {
+                    landed += 1;
+                    self.report.force_close_landed += 1;
                     println!(
                         "cycle {cycle}: ForceCloseAbandonedAsset asset {a} long={} short={} q={close_q}",
                         self.actors[long].name, self.actors[short].name
                     );
+                    *left.get_mut(&long).unwrap() -= close_q.min(lq);
+                    *left.get_mut(&short).unwrap() -= close_q.min(sq);
                     if let Some(stale) = stale {
                         *d_done = Some(self.epoch_reread_check(cycle, subject, stale));
+                        // Bindings moved; re-read everything next cycle.
+                        break;
                     }
                 }
                 Err(e) => {
                     println!("cycle {cycle}: force-close {}/{} q={close_q} rejected: {e}", self.actors[long].name, self.actors[short].name);
+                    *self.report.force_close_errors.entry(e.short()).or_default() += 1;
                     self.reject("force-close", &e);
                 }
-            }
-            done += 1;
-            // Re-read next round anyway; advance past the smaller side here.
-            let (lq, sq) = (longs[li].1, shorts[si].1);
-            if lq <= sq {
-                li += 1;
-            }
-            if sq <= lq {
-                si += 1;
             }
         }
         Ok(false)
@@ -1779,11 +2049,18 @@ impl<'a> World<'a> {
         let f = fetch_portfolios(self.rpc, &keys)?;
         for (i, x) in f.iter().enumerate() {
             let ata = self.actors[i].ata;
-            self.actors[i].ata_at_resolve = token_amount(self.rpc, &ata);
-            if let Some((_, p)) = x {
-                self.actors[i].capital_at_resolve = p.capital.get();
-                self.actors[i].pnl_at_resolve = p.pnl.get();
-                self.actors[i].terminal_at_resolve = is_terminal(p);
+            self.actors[i].ata_at_resolve = token_amount(self.rpc, &ata)?;
+            match x {
+                Some((_, p)) => {
+                    self.actors[i].capital_at_resolve = p.capital.get();
+                    self.actors[i].pnl_at_resolve = p.pnl.get();
+                    self.actors[i].terminal_at_resolve = is_terminal(p);
+                    self.actors[i].flat_at_resolve = legs(p).is_empty();
+                }
+                None => {
+                    self.actors[i].terminal_at_resolve = true;
+                    self.actors[i].flat_at_resolve = true;
+                }
             }
         }
         Ok(())
@@ -1793,11 +2070,12 @@ impl<'a> World<'a> {
     /// number still open.
     ///
     /// Keeper-cohort portfolios get no CloseResolved and no claim here
-    /// until they are terminal; only the keeper's Resolved route can get
-    /// them there. Once terminal, the ATA delta is recorded as what the
+    /// until they are [`settled`]; only the keeper's Resolved route can get
+    /// them there. Once settled, the ATA delta is recorded as what the
     /// keeper paid, then the owner claims any junior top-up (the keeper has
-    /// no route for `ClaimResolvedPayoutTopup`) and closes the account to
-    /// reclaim rent so the slab can retire.
+    /// no route for `ClaimResolvedPayoutTopup`) until the receipt is
+    /// finalized ([`is_terminal`]) and closes the account to reclaim rent
+    /// so the slab can retire.
     fn exit_round(&mut self, cycle: u64, max: usize) -> Result<usize> {
         let open: Vec<usize> = (0..self.actors.len()).filter(|&i| !self.actors[i].closed).collect();
         let start = (cycle as usize) % open.len().max(1);
@@ -1813,11 +2091,13 @@ impl<'a> World<'a> {
             }
             if self.actors[i].keeper_cohort {
                 let d = self.rpc.get_account_data(&self.actors[i].portfolio)?;
-                if !read_portfolio(&d).map(|p| is_terminal(&p)).unwrap_or(false) {
+                // Settled = the keeper's Resolved route has nothing left;
+                // the junior top-up (receipt) is owner-only, claimed below.
+                if !read_portfolio(&d).map(|p| settled(&p)).unwrap_or(false) {
                     continue;
                 }
                 if self.actors[i].keeper_terminal_received.is_none() {
-                    let got = token_amount(self.rpc, &self.actors[i].ata).saturating_sub(self.actors[i].ata_at_resolve);
+                    let got = token_amount(self.rpc, &self.actors[i].ata)?.saturating_sub(self.actors[i].ata_at_resolve);
                     self.actors[i].keeper_terminal_received = Some(got);
                     println!("cycle {cycle}: keeper cohort {} terminal; keeper paid {got}", self.actors[i].name);
                 }
@@ -1833,7 +2113,7 @@ impl<'a> World<'a> {
                 match self.chain.send(&[ix], &[&self.actors[i].owner]) {
                     Ok(_) => {
                         let d = self.rpc.get_account_data(&self.actors[i].portfolio)?;
-                        if read_portfolio(&d).map(|p| is_terminal(&p)).unwrap_or(false) {
+                        if read_portfolio(&d).map(|p| settled(&p)).unwrap_or(false) {
                             break;
                         }
                     }
@@ -1845,7 +2125,7 @@ impl<'a> World<'a> {
                 }
             }
             for _ in 0..4 {
-                let before = token_amount(self.rpc, &self.actors[i].ata);
+                let before = token_amount(self.rpc, &self.actors[i].ata)?;
                 let mut accts = vec![
                     AccountMeta::new(self.actors[i].owner.pubkey(), true),
                     AccountMeta::new(self.market, false),
@@ -1854,7 +2134,7 @@ impl<'a> World<'a> {
                 accts.extend(self.payout_tail(&self.actors[i].ata));
                 let ix = self.chain.ix(P::ClaimResolvedPayoutTopup, accts);
                 match self.chain.send(&[ix], &[&self.actors[i].owner]) {
-                    Ok(_) if token_amount(self.rpc, &self.actors[i].ata) > before => continue,
+                    Ok(_) if token_amount(self.rpc, &self.actors[i].ata)? > before => continue,
                     Ok(_) => break,
                     Err(e) if e.is("EngineNonProgress") => break,
                     Err(e) => {
@@ -1899,20 +2179,32 @@ impl<'a> World<'a> {
         setup::create_ata(self.rpc, self.chain.payer, &self.actors[i].owner.pubkey(), &self.mint)
     }
 
-    /// `true` once the market slab is retired (account gone or no longer a
-    /// decodable market).
-    fn slab_closed(&self) -> bool {
-        match self.rpc.get_account(&self.market) {
-            Ok(a) => a.lamports == 0 || read_market(&a.data).is_err(),
-            Err(_) => true,
+    /// `true` once the market slab is retired: account gone, zero lamports,
+    /// or CloseSlab's header-only `KIND_CLOSED_MARKET` tombstone. A live
+    /// account that is neither a tombstone nor a decodable market is an
+    /// error, not a retirement.
+    fn slab_closed(&self) -> Result<bool> {
+        let acct = self
+            .rpc
+            .get_account_with_commitment(&self.market, CommitmentConfig::confirmed())
+            .context("read market for retirement")?
+            .value;
+        let Some(a) = acct else { return Ok(true) };
+        if a.lamports == 0 {
+            return Ok(true);
         }
+        if a.data.len() == HEADER_LEN && a.data[..8] == MAGIC.to_le_bytes() && a.data[10] == KIND_CLOSED_MARKET {
+            return Ok(true);
+        }
+        read_market(&a.data).map_err(|e| anyhow!("market neither live nor retired: {e:?}"))?;
+        Ok(false)
     }
 
     /// Backing principal/earnings and per-asset insurance, each withdrawn up
     /// to the largest amount the engine accepts right now.
     fn drain_withdrawals(&mut self) -> Result<()> {
         let (_, _, g) = read_mkt(self.rpc, &self.market)?;
-        let vault_now = token_amount(self.rpc, &self.vault) as u128;
+        let vault_now = token_amount(self.rpc, &self.vault)? as u128;
         for d in 0..g.source_backing_buckets.len().min(2 * self.cfg.assets) {
             let b = g.source_backing_buckets[d];
             if b.fresh_unliened_backing_num != 0 {
@@ -1926,7 +2218,7 @@ impl<'a> World<'a> {
             let (data, _, g) = read_mkt(self.rpc, &self.market)?;
             let s = seqs(&data, a)?;
             let mid = g.assets[a].market_id;
-            let hi = (token_amount(self.rpc, &self.vault) as u128).min(g.insurance);
+            let hi = (token_amount(self.rpc, &self.vault)? as u128).min(g.insurance);
             let build = |x: u128| {
                 self.chain.ix(
                     P::WithdrawInsuranceAsset {
@@ -1963,15 +2255,18 @@ impl<'a> World<'a> {
     fn final_drain(&mut self) -> Result<()> {
         self.drain_withdrawals()?;
         let (_, _, g) = read_mkt(self.rpc, &self.market)?;
-        let vault_pre = token_amount(self.rpc, &self.vault);
+        let vault_pre = token_amount(self.rpc, &self.vault)?;
         println!(
             "pre-CloseSlab: vault(token)={} vault(engine)={} insurance={} c_tot={} materialized={}",
             vault_pre, g.vault, g.insurance, g.c_tot, g.materialized_portfolio_count
         );
         self.report.vault_before_close_slab = vault_pre;
-        let admin_before = token_amount(self.rpc, &self.admin_ata);
+        let admin_before = token_amount(self.rpc, &self.admin_ata)?;
+        if self.cfg.backing == BackingMode::Roll {
+            self.wait_for_unwithdrawable_buckets()?;
+        }
         for step in 0..32 {
-            if self.slab_closed() {
+            if self.slab_closed()? {
                 break;
             }
             let (data, _, _) = read_mkt(self.rpc, &self.market)?;
@@ -1991,25 +2286,130 @@ impl<'a> World<'a> {
             );
             match self.chain.send(&[ix], &[&self.admin]) {
                 Ok(_) => {
-                    println!("CloseSlab step {step}: ok (slab closed: {})", self.slab_closed());
-                    if !self.slab_closed() {
-                        // A scan step can recredit insurance; drain it again.
-                        self.drain_withdrawals()?;
+                    self.report.close_slab_steps_ok += 1;
+                    let retired = self.slab_closed()?;
+                    println!("CloseSlab step {step}: ok (slab closed: {retired})");
+                    if retired {
+                        // Retirement observed right after a confirmed CloseSlab.
+                        self.report.close_slab = true;
+                        break;
                     }
+                    // A scan step can recredit insurance; drain it again.
+                    self.drain_withdrawals()?;
                 }
                 Err(e) => {
                     println!("CloseSlab step {step} rejected: {e}");
+                    // What the terminal scan waits on: a Fresh bucket with a
+                    // future expiry, or nonzero provider earnings.
+                    let blockers = read_mkt(self.rpc, &self.market)
+                        .map(|(_, _, g)| {
+                            let buckets: Vec<String> = g
+                                .source_backing_buckets
+                                .iter()
+                                .enumerate()
+                                .take(2 * self.cfg.assets)
+                                .filter(|(_, b)| b.status != BackingBucketStatusV16::Empty)
+                                .map(|(d, b)| {
+                                    format!(
+                                        "d{d}:{:?} unliened={} liened={} expiry={} earnings={}",
+                                        b.status,
+                                        b.fresh_unliened_backing_num,
+                                        b.valid_liened_backing_num,
+                                        b.expiry_slot,
+                                        b.utilization_fee_earnings
+                                    )
+                                })
+                                .collect();
+                            // Every nonzero here is a terminal-claim-free
+                            // blocker (engine `require_terminal_claim_free_state`).
+                            let counters: Vec<String> = [
+                                ("materialized", g.materialized_portfolio_count as u128),
+                                ("c_tot", g.c_tot),
+                                ("pnl_pos_tot", g.pnl_pos_tot),
+                                ("pnl_matured_pos_tot", g.pnl_matured_pos_tot),
+                                ("pnl_pos_bound_tot", g.pnl_pos_bound_tot),
+                                ("pnl_pos_bound_tot_num", g.pnl_pos_bound_tot_num),
+                                ("source_claim_bound_total_num", g.source_claim_bound_total_num),
+                                ("resolved_payout_blockers", g.resolved_payout_blocker_count as u128),
+                                ("stale_certs", g.stale_certificate_count as u128),
+                                ("b_stale_accounts", g.b_stale_account_count as u128),
+                                ("negative_pnl_accounts", g.negative_pnl_account_count as u128),
+                                ("provider_earnings_total", g.backing_provider_earnings_total),
+                                // Terminal retirement of unbudgeted insurance
+                                // requires both to be zero.
+                                ("insurance_domain_budget_remaining_total", g.insurance_domain_budget_remaining_total),
+                                ("source_insurance_credit_reserved_total_atoms", g.source_insurance_credit_reserved_total_atoms),
+                            ]
+                            .iter()
+                            .filter(|(_, v)| *v != 0)
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect();
+                            let budgets: Vec<String> = g
+                                .insurance_domain_budget
+                                .iter()
+                                .zip(g.insurance_domain_spent.iter())
+                                .enumerate()
+                                .filter(|(_, (b, s))| **b != 0 || **s != 0)
+                                .map(|(d, (b, s))| format!("d{d}:budget={b} spent={s}"))
+                                .collect();
+                            format!(
+                                "slot={} mode={:?} nonzero blockers=[{}] insurance={} vault={} domain insurance=[{}] buckets=[{}]",
+                                g.current_slot,
+                                g.mode,
+                                counters.join(" "),
+                                g.insurance,
+                                g.vault,
+                                budgets.join(", "),
+                                buckets.join(", ")
+                            )
+                        })
+                        .unwrap_or_else(|e| format!("market read failed: {e}"));
+                    println!("CloseSlab blockers: {blockers}");
+                    self.report.close_slab_rejection = Some(format!("{} ({blockers})", e.short()));
                     self.reject("close-slab", &e);
                     break;
                 }
             }
         }
-        self.report.close_slab = self.slab_closed();
-        self.report.swept_to_admin = token_amount(self.rpc, &self.admin_ata).saturating_sub(admin_before);
+        self.report.swept_to_admin = token_amount(self.rpc, &self.admin_ata)?.saturating_sub(admin_before);
         println!(
             "CloseSlab: retired={} swept to market authority={} atoms",
             self.report.close_slab, self.report.swept_to_admin
         );
+        Ok(())
+    }
+
+    /// CloseSlab's terminal scan waits (EngineLockActive) on any Fresh
+    /// bucket whose expiry is still ahead. After the withdrawals, one with
+    /// less than a whole atom of unliened principal (fee accrual is not
+    /// atom-aligned) can never be emptied, so wait out its expiry. Bounded:
+    /// a bucket more than `MAX_WAIT_SLOTS` out is left for CloseSlab to
+    /// report.
+    fn wait_for_unwithdrawable_buckets(&mut self) -> Result<()> {
+        const MAX_WAIT_SLOTS: u64 = 3_000;
+        let (_, _, g) = read_mkt(self.rpc, &self.market)?;
+        let target = g
+            .source_backing_buckets
+            .iter()
+            .take(2 * self.cfg.assets)
+            .filter(|b| b.status == BackingBucketStatusV16::Fresh && b.expiry_slot > g.current_slot)
+            .map(|b| b.expiry_slot)
+            .max();
+        let Some(target) = target else { return Ok(()) };
+        let now = self.slot()?;
+        if target > now + MAX_WAIT_SLOTS {
+            println!("pre-CloseSlab: a Fresh bucket expires at {target}, {} slots out; not waiting", target - now);
+            return Ok(());
+        }
+        println!("pre-CloseSlab: waiting for Fresh bucket expiry at slot {target} (now {now})");
+        let deadline = Instant::now() + std::time::Duration::from_secs(MAX_WAIT_SLOTS / 2);
+        while self.slot()? <= target {
+            if Instant::now() > deadline {
+                bail!("slot did not reach bucket expiry {target} in time");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1_000));
+        }
+        self.report.notes.push(format!("waited {} slots for a Fresh bucket to expire before CloseSlab", target.saturating_sub(now)));
         Ok(())
     }
 
@@ -2128,6 +2528,19 @@ impl FailRuns {
     }
 }
 
+/// One cycle's per-account attempt outcomes, straight from the scheduler:
+/// `failures`, `progressed_accounts`, `idle_accounts` (idle includes a
+/// no-tx owner-window skip). Records are not consulted: a failure can
+/// happen with no SubmissionRecord (RPC error before any outcome).
+fn scheduler_outcomes(s: &CycleSummary) -> Vec<(Pubkey, OutcomeClass)> {
+    s.failures
+        .iter()
+        .map(|(k, _)| (*k, OutcomeClass::Failed))
+        .chain(s.progressed_accounts.iter().map(|k| (*k, OutcomeClass::Progress)))
+        .chain(s.idle_accounts.iter().map(|k| (*k, OutcomeClass::Idle)))
+        .collect()
+}
+
 fn txe(e: anyhow::Error) -> TxError {
     TxError { name: None, msg: e.to_string() }
 }
@@ -2137,14 +2550,15 @@ fn txe(e: anyhow::Error) -> TxError {
 pub fn run() -> Result<ScenarioReport> {
     let started = Instant::now();
     let cfg = ScenarioConfig::from_env()?;
+    let allow_fail = parse_allow_fail(&std::env::var("CRANKER_SCENARIO_ALLOW_FAIL").unwrap_or_default())?;
     let rpc = RpcClient::new_with_commitment(RPC_URL.to_string(), CommitmentConfig::confirmed());
     rpc.get_version().context("connect to local validator")?;
     let home = std::env::var("HOME").context("HOME")?;
     let payer = read_keypair_file(format!("{home}/.config/solana/id.json"))
         .map_err(|e| anyhow!("read payer keypair: {e}"))?;
     println!(
-        "== live_shaped: seed={:#x} run={} traders={} assets={} cycles={} program={} ==",
-        cfg.seed, cfg.run, cfg.traders, cfg.assets, cfg.cycles, cfg.program_id
+        "== live_shaped: seed={:#x} run={} traders={} assets={} cycles={} backing={} program={} ==",
+        cfg.seed, cfg.run, cfg.traders, cfg.assets, cfg.cycles, cfg.backing.name(), cfg.program_id
     );
 
     let plan = ActionPlan::new(&cfg);
@@ -2185,11 +2599,15 @@ pub fn run() -> Result<ScenarioReport> {
             traders: cfg.traders,
             assets: cfg.assets,
             cycles: cfg.cycles,
+            backing_mode: cfg.backing.name(),
+            allow_fail,
             ..Default::default()
         },
         plan,
         phases,
         shutdown_asset: cfg.assets - 1,
+        slots_per_cycle: 2,
+        roll_spans: BTreeMap::new(),
         cfg,
     };
     w.setup()?;
@@ -2242,13 +2660,20 @@ pub fn run() -> Result<ScenarioReport> {
             let now = w.slot()?;
             let spc = ((now - slot0) / cycle.max(1)).max(2);
             let stress = ph.stress_end - ph.stress_start;
+            w.slots_per_cycle = spc;
             for t in w.plan.topups.clone() {
                 let expiry = match t.expiry {
                     TopUpExpiry::StressPct(pct) => now + spc * stress * pct / 100,
                     TopUpExpiry::Offset(s) => now + s,
+                    TopUpExpiry::PastBudget => now + spc * (w.cfg.cycles - cycle) * 3 / 2 + 5 * spc,
                 };
-                w.top_up_backing(t.domain, t.amount, expiry);
+                if w.top_up_backing(t.domain, t.amount, expiry) && w.cfg.backing == BackingMode::Roll {
+                    w.roll_spans.insert(t.domain, expiry - now);
+                }
             }
+        }
+        if w.cfg.backing == BackingMode::Roll && cycle > ph.topup && resolved_at.is_none() {
+            w.roll_backing(cycle)?;
         }
         if let Some(step) = w.plan.stress.get(&cycle).cloned() {
             w.stress_actions(cycle, &step)?;
@@ -2363,7 +2788,12 @@ pub fn run() -> Result<ScenarioReport> {
                 }
             }
         }
-        fail_runs.observe(cycle, records[first..].iter().map(|r| (r.target, r.outcome.class())));
+        // Failure runs come from the scheduler's per-account outcomes, not
+        // from records: an RPC error before any outcome (or a hint error)
+        // fails the attempt without leaving a SubmissionRecord.
+        if let Some(s) = &summary {
+            fail_runs.observe(cycle, scheduler_outcomes(s));
+        }
         // Raw bytes of each newly quarantined account + the market, for an
         // offline replay of the failing crank (CRANKER_SCENARIO_DUMP_DIR).
         if let Ok(dir) = std::env::var("CRANKER_SCENARIO_DUMP_DIR") {
@@ -2391,6 +2821,7 @@ pub fn run() -> Result<ScenarioReport> {
             w.report.progressed += s.progressed;
             w.report.idle += s.idle;
             w.report.failed += s.failed;
+            w.report.submissions += s.txs;
         }
         // Accounts still in a failure run that the cranker can no longer
         // see (closed) end their run here, keeping the length reached.
@@ -2405,7 +2836,6 @@ pub fn run() -> Result<ScenarioReport> {
         w.actors.iter().find(|a| a.portfolio == *pk).map(|a| a.name.clone()).unwrap_or_else(|| pk.to_string())
     };
     let rep = &mut w.report;
-    rep.submissions = records.len();
     rep.cu = cu;
     rep.liquidatable_seen = liquidatable.len();
     rep.quarantine_events = quarantine.events().iter().map(|e| e.to_json_line()).collect();
@@ -2446,19 +2876,23 @@ pub fn run() -> Result<ScenarioReport> {
         ),
     });
 
-    // b: every portfolio terminal, and every owner reconciled against its
-    // entitlement at Resolve. Asserted: received (owner ATA delta since
-    // Resolve) ≥ senior − dust, where senior = capital − max(0, −pnl)
-    // (a loss settles against capital first; capital is senior and must be
-    // paid in full). Not asserted: the positive-PnL (junior) part, which a
-    // haircut may legitimately cut; it is reported as a payout ratio
+    // b: every portfolio terminal, and every owner that was FLAT at Resolve
+    // reconciled against its entitlement. Asserted for flat accounts:
+    // received (owner ATA delta since Resolve) ≥ senior − dust, where
+    // senior = capital − max(0, −pnl) (a loss settles against capital
+    // first; capital is senior and must be paid in full). An account with
+    // an open leg at Resolve is settled at the resolved price after the
+    // snapshot, so capital at Resolve is not its entitlement: its count and
+    // shortfall against that number are reported, not asserted. Not
+    // asserted either: the positive-PnL (junior) part, which a haircut may
+    // legitimately cut; it is reported as a payout ratio
     // (received − senior) / claim, where claim is the engine's receipt
-    // face when one was captured, else pnl at Resolve. Not modelled: PnL
-    // that moved between the Resolve snapshot and the close (marks settle
-    // to the index first, so it should be small).
+    // face when one was captured, else pnl at Resolve.
     let dust_per_account = (w.cfg.assets as u64) * DUST_ATOMS_PER_ASSET_ACCOUNT;
     let mut not_terminal = Vec::new();
     let mut short_senior = Vec::new();
+    let mut open_at_resolve = 0usize;
+    let mut open_short = Vec::new();
     let mut ratios = Vec::new();
     let mut haircut = Vec::new();
     let mut received_of: HashMap<usize, u64> = HashMap::new();
@@ -2468,10 +2902,16 @@ pub fn run() -> Result<ScenarioReport> {
                 not_terminal.push(a.name.clone());
             }
         }
-        let got = token_amount(&rpc, &a.ata).saturating_sub(a.ata_at_resolve);
+        let got = token_amount(&rpc, &a.ata)?.saturating_sub(a.ata_at_resolve);
         received_of.insert(i, got);
         let senior = a.capital_at_resolve.saturating_sub(a.pnl_at_resolve.min(0).unsigned_abs());
-        if (got as u128) + (dust_per_account as u128) < senior {
+        let short = (got as u128) + (dust_per_account as u128) < senior;
+        if !a.flat_at_resolve {
+            open_at_resolve += 1;
+            if short {
+                open_short.push(format!("{}(got {got}, capital-at-Resolve basis {senior})", a.name));
+            }
+        } else if short {
             short_senior.push(format!("{}(got {got} < senior {senior})", a.name));
         }
         let claim = a.receipt.map(|r| r.0).unwrap_or(a.pnl_at_resolve.max(0) as u128);
@@ -2491,12 +2931,16 @@ pub fn run() -> Result<ScenarioReport> {
         id: "b",
         passed: resolved_at.is_some() && not_terminal.is_empty() && short_senior.is_empty(),
         detail: format!(
-            "resolved={} portfolios={} non-terminal={:?} senior(capital) short={:?} (dust {dust_per_account}/account); \
+            "resolved={} portfolios={} non-terminal={:?} senior(capital) short, flat at Resolve={:?} (dust {dust_per_account}/account); \
+             open legs at Resolve={} below capital-at-Resolve={:?} (not asserted: an open leg settles at the resolved price \
+             after the snapshot, so capital at Resolve is not its entitlement); \
              positive-PnL payout ratio junior_paid/claim [{}] haircut={:?} (junior haircut is not a failure)",
             resolved_at.is_some(),
             w.actors.len(),
             not_terminal,
             short_senior,
+            open_at_resolve,
+            open_short,
             ratios.join(" "),
             haircut
         ),
@@ -2511,7 +2955,7 @@ pub fn run() -> Result<ScenarioReport> {
     // With any haircut, that value should have gone to the haircut
     // winners, so residue above dust is stranded.
     let rep = &mut w.report;
-    rep.vault_after = token_amount(&rpc, &w.vault);
+    rep.vault_after = token_amount(&rpc, &w.vault)?;
     rep.dust_bound = dust_per_account * (w.actors.len() as u64);
     let forfeited: u128 = rep
         .buckets_expired
@@ -2537,11 +2981,19 @@ pub fn run() -> Result<ScenarioReport> {
     });
 
     // d: position-epoch re-read around a Recovery-asset force-close.
-    let mut d = d_check.unwrap_or(Check {
+    let mut d = d_check.unwrap_or_else(|| Check {
         id: "d",
         passed: false,
-        detail: "no ForceCloseAbandonedAsset with a trader landed".into(),
+        detail: format!(
+            "NOT EXERCISED: no ForceCloseAbandonedAsset with a trader landed — every long×short pair was tried \
+             each cycle: {} attempts over {} cycles, {} landed (non-trader pairs), rejections {:?}",
+            rep.force_close_attempts, rep.force_close_cycles, rep.force_close_landed, rep.force_close_errors
+        ),
     });
+    d.detail.push_str(&format!(
+        "; force-close totals: attempts={} cycles={} landed={} rejections={:?}",
+        rep.force_close_attempts, rep.force_close_cycles, rep.force_close_landed, rep.force_close_errors
+    ));
     if rep.market_recovery_seen {
         d.detail.push_str(&format!(
             "; market-wide Recovery reached: {} mutating keeper Recovery cranks, {} moved the target binding",
@@ -2571,13 +3023,17 @@ pub fn run() -> Result<ScenarioReport> {
         let terminal = fin[i].as_ref().map(|(_, p)| is_terminal(p)).unwrap_or(true);
         let senior = a.capital_at_resolve.saturating_sub(a.pnl_at_resolve.min(0).unsigned_abs());
         let paid = a.keeper_terminal_received;
-        let paid_ok = paid.map(|p| (p as u128) + (dust_per_account as u128) >= senior).unwrap_or(false);
+        // Senior coverage is asserted only for members flat at Resolve (same
+        // model as b); an open leg settles at the resolved price.
+        let paid_ok = paid.is_some()
+            && (!a.flat_at_resolve || paid.map(|p| (p as u128) + (dust_per_account as u128) >= senior).unwrap_or(false));
         let ok = a.terminal_at_resolve || (progress > 0 && terminal && paid_ok);
         f_ok &= ok;
         f_detail.push(format!(
-            "{}{}: resolved-route progress={} terminal={} closed={} keeper paid={:?} senior={} total received={}",
+            "{}{}{}: resolved-route progress={} terminal={} closed={} keeper paid={:?} senior={} total received={}",
             a.name,
             if a.terminal_at_resolve { "(terminal at Resolve, not required)" } else { "" },
+            if a.flat_at_resolve { "" } else { "(open at Resolve: senior not asserted)" },
             progress,
             terminal,
             a.closed,
@@ -2610,6 +3066,21 @@ pub fn run() -> Result<ScenarioReport> {
         } else {
             format!("not covered: {missing:?}")
         },
+    });
+
+    // g: the market retired through a confirmed CloseSlab (header-only
+    // tombstone or account gone, observed right after the confirmed tx).
+    // Mandatory; c says nothing about retirement.
+    rep.checks.push(Check {
+        id: "g",
+        passed: rep.close_slab,
+        detail: format!(
+            "exits_done={} retired={} confirmed CloseSlab txs={} stopped by={}",
+            exits_done,
+            rep.close_slab,
+            rep.close_slab_steps_ok,
+            rep.close_slab_rejection.as_deref().unwrap_or(if exits_done { "-" } else { "exits never finished" })
+        ),
     });
     rep.wall_secs = started.elapsed().as_secs();
     let _ = BOUND_SCALE;
@@ -2657,7 +3128,15 @@ mod tests {
     }
 
     fn cfg(seed: u64, run: u64) -> ScenarioConfig {
-        ScenarioConfig { seed, run, traders: 12, assets: 3, cycles: 60, program_id: Pubkey::default() }
+        ScenarioConfig {
+            seed,
+            run,
+            traders: 12,
+            assets: 3,
+            cycles: 60,
+            program_id: Pubkey::default(),
+            backing: BackingMode::Lapse,
+        }
     }
 
     fn all_keys(p: &ActionPlan) -> Vec<Pubkey> {
@@ -2719,6 +3198,55 @@ mod tests {
         f.observe(33, []);
         assert_eq!(f.longest[&y], 3);
         assert_eq!(f.max(), 10);
+    }
+
+    fn report_with(fails: &[&'static str], allow: &str) -> ScenarioReport {
+        let mut r = ScenarioReport { allow_fail: parse_allow_fail(allow).unwrap(), ..Default::default() };
+        for id in ["a", "b", "c", "d", "e", "f", "g"] {
+            r.checks.push(Check { id, passed: !fails.contains(&id), detail: String::new() });
+        }
+        r
+    }
+
+    #[test]
+    fn allow_list_gates_exit_status() {
+        assert!(report_with(&["c", "e"], "c,e").passed());
+        assert!(report_with(&["c"], "c, e").passed()); // e allowed but passed
+        assert!(!report_with(&["c"], "").passed());
+        assert!(!report_with(&["c", "g"], "c,e").passed());
+        assert!(!report_with(&["a"], "c,e").passed());
+        let r = report_with(&["c"], "c,e");
+        let out = r.render();
+        assert!(out.contains("c (residue above dust — open finding F2): failed, allowed"), "{out}");
+        assert!(out.contains("e (the Impaired bucket is not reachable on these pins): allowed but passed"), "{out}");
+        assert!(out.contains("RESULT: PASS (1 allowed failure(s))"), "{out}");
+        for bad in ["a", "b", "d", "f", "g", "x"] {
+            assert!(parse_allow_fail(bad).is_err(), "{bad} must not be allow-listable");
+        }
+        assert!(parse_allow_fail("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn fail_runs_see_failures_without_records() {
+        let (x, y, z) = (Pubkey::new_unique(), Pubkey::new_unique(), Pubkey::new_unique());
+        // x: RPC error before any outcome (no record); y: progressed; z: idle
+        // with no tx (owner window).
+        let s = CycleSummary {
+            failures: vec![(x, "Rpc: timeout".into())],
+            progressed_accounts: vec![y],
+            idle_accounts: vec![z],
+            ..Default::default()
+        };
+        let mut o = scheduler_outcomes(&s);
+        o.sort_by_key(|(k, _)| *k);
+        let mut want = vec![(x, OutcomeClass::Failed), (y, OutcomeClass::Progress), (z, OutcomeClass::Idle)];
+        want.sort_by_key(|(k, _)| *k);
+        assert_eq!(o, want);
+        let mut f = FailRuns::default();
+        f.observe(5, o);
+        f.observe(6, scheduler_outcomes(&CycleSummary { failures: vec![(x, "Rpc: timeout".into())], ..Default::default() }));
+        assert_eq!(f.longest[&x], 2);
+        assert!(!f.longest.contains_key(&y));
     }
 
     #[test]

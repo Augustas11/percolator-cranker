@@ -126,12 +126,11 @@ fn plan_hints(
     Ok((hints, class))
 }
 
-/// CU charged for a crank whose CU could not be read (measurement off or
-/// `getTransaction` missed), so the cycle CU budget still binds.
-pub const UNKNOWN_CU_CHARGE: u64 = 200_000;
-
+/// CU an attempt is charged per tx: the measured whole-tx CU, or the full
+/// requested limit when it could not be read. This is the same amount the
+/// scheduler's meter keeps reserved, so the summary and the budget agree.
 fn outcome_cu(o: &CrankOutcome) -> u64 {
-    o.program_cu().unwrap_or(UNKNOWN_CU_CHARGE)
+    o.tx_cu().unwrap_or(submit::TX_CU_LIMIT as u64)
 }
 
 /// Fold one candidate's drain into a scheduler attempt. `rpc_error` is an
@@ -224,12 +223,24 @@ pub fn run_one_cycle(
             .as_ref()
             .map(|pf| work::assess(pf, &group).priority)
             .unwrap_or(Priority::Pending);
-        // A Resolved claimant with value left is still owed work: persistent
-        // idle on it is reported as stuck, not hidden as "idle".
-        let owed = resolved
-            && decoded.as_ref().is_some_and(|pf| {
-                pf.capital.get() != 0 || pf.pnl.get() != 0 || pf.reserved_pnl.get() != 0
-            });
+        // Still owed work: persistent idle on such an account is reported as
+        // stuck, not hidden as "idle".
+        // * Resolved: capital/PnL left, or a payout receipt not yet fully paid.
+        // * Live/Recovery: the off-chain estimate says it is liquidatable or
+        //   pending, yet the engine keeps answering NonProgress / no-mut.
+        let owed = decoded.as_ref().is_some_and(|pf| {
+            if resolved {
+                let r = &pf.resolved_payout_receipt;
+                pf.capital.get() != 0
+                    || pf.pnl.get() != 0
+                    || pf.reserved_pnl.get() != 0
+                    || (r.present != 0
+                        && r.finalized == 0
+                        && r.paid_effective.get() < r.terminal_positive_claim_face.get())
+            } else {
+                priority != Priority::Quiet
+            }
+        });
         let owner = p.owner().unwrap_or_default();
         let (plan, plan_class) =
             match plan_hints(&group, &market_data, &p.account.data, ctx.pyth, now_slot, cycle) {
@@ -289,6 +300,7 @@ pub fn run_one_cycle(
             if !ab.begin_tx() {
                 break;
             }
+            let deadline = std::time::Instant::now() + ab.time_left();
             let o = match submit::submit_crank_routed(
                 ctx.rpc,
                 ctx.program_id,
@@ -298,6 +310,7 @@ pub fn run_one_cycle(
                 &route,
                 hints,
                 slot,
+                Some(deadline),
             ) {
                 Ok(o) => o,
                 Err(e) => {
@@ -307,7 +320,9 @@ pub fn run_one_cycle(
                     break;
                 }
             };
-            ab.settle_tx(o.program_cu());
+            // Settle on the WHOLE tx (compute-budget and ATA ixs included);
+            // unknown keeps the full reservation.
+            ab.settle_tx(o.tx_cu());
             cu.observe(&o);
             // Keep draining only while the TARGET moved (A6 one domain per
             // call); a reward-portfolio byte diff alone is not drain progress.
@@ -354,7 +369,8 @@ mod tests {
             reward_bytes_diff: None,
             market_bytes_diff: None,
             program_cu: Some(cu),
-            tx_cu: None,
+            tx_cu: Some(cu),
+            unreconciled: None,
         }
     }
 
@@ -363,6 +379,7 @@ mod tests {
             error: String::new(),
             error_name: Some(name),
             program_cu: Some(10),
+            tx_cu: Some(10),
         }
     }
 
@@ -406,12 +423,28 @@ mod tests {
     }
 
     #[test]
-    fn unknown_cu_is_charged() {
+    fn unknown_cu_is_charged_the_full_tx_limit() {
         let mut o = ok(false, 0);
-        if let CrankOutcome::Ok { program_cu, .. } = &mut o {
-            *program_cu = None;
+        if let CrankOutcome::Ok { tx_cu, .. } = &mut o {
+            *tx_cu = None;
         }
-        assert_eq!(attempt_from(&[o], None), Attempt::Idle { cu: UNKNOWN_CU_CHARGE });
+        assert_eq!(
+            attempt_from(&[o], None),
+            Attempt::Idle { cu: submit::TX_CU_LIMIT as u64 },
+            "same amount the scheduler meter keeps reserved"
+        );
+    }
+
+    /// Review finding: a confirmed tx whose post-state read failed must stay
+    /// a confirmed outcome (Progress), never a failure strike.
+    #[test]
+    fn landed_tx_with_unreadable_post_state_is_progress() {
+        let mut o = ok(false, 20_000);
+        if let CrankOutcome::Ok { unreconciled, .. } = &mut o {
+            *unreconciled = Some("read target portfolio post-state: timeout".into());
+        }
+        assert_eq!(o.class(), OutcomeClass::Progress);
+        assert_eq!(attempt_from(&[o], None), Attempt::Progress { cu: 20_000, steps: 1 });
     }
 
     #[test]

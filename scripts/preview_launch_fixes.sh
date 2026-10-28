@@ -39,6 +39,12 @@ fi
 ENGINE_GIT="https://github.com/aeyakovenko/percolator"
 
 mkdir -p "$PV"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/pins.env"
+# The wrapper checkout comes from fetch_upstream.sh; the engine clone is only
+# needed for the preview, so create it here when missing.
+[ -d "$REPO_ROOT/repo-prog/.git" ] || "$SCRIPT_DIR/fetch_upstream.sh"
+[ -d "$REPO_ROOT/repo/.git" ] || git clone -q "$PERCOLATOR_ENGINE_REPO" "$REPO_ROOT/repo"
 git -C "$REPO_ROOT/repo-prog" fetch -q origin
 git -C "$REPO_ROOT/repo" fetch -q origin
 

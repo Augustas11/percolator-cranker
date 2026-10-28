@@ -20,12 +20,12 @@
 //! Deliberate omissions (see cranker/README.md for the full stub inventory):
 //!   * No `SyncMaintenanceFee` submission in the loop (M1 proved fee routing).
 //!   * No priority-fee logic. No leader-slot prediction. No jito-bundle.
-//!   * Fees: Live cranks append the keeper's own reward portfolio, so when a
-//!     market enables a liquidation cranker share (the local bootstrap sets
-//!     5000 bps; upstream defaults are 0) that share **accrues** into the
-//!     keeper's portfolio. Nothing withdraws it by default: the only withdraw
-//!     path is the opt-in `CRANKER_WITHDRAWAL_TEST=1` spot-check against the
-//!     local validator. No bounty path, no mainnet path.
+//!   * Fees are **off by default**: the bootstrap market has no maintenance
+//!     fee and zero cranker shares, and cranks attach no reward portfolio.
+//!     `CRANKER_ENABLE_FEE_SHARES=1` opts in (maintenance fee + 50% shares,
+//!     reward portfolio appended, so a share accrues into the keeper's own
+//!     portfolio). Nothing withdraws it unless `CRANKER_WITHDRAWAL_TEST=1`,
+//!     which also requires the opt-in. No bounty path, no mainnet path.
 
 use anyhow::{anyhow, Context, Result};
 use percolator::AutoCrankPlanV16;
@@ -139,7 +139,9 @@ fn main() -> Result<()> {
         program_id: &program_id,
         payer: &env.payer,
         market: &env.market,
-        reward_portfolio: Some(&env.cranker_portfolio),
+        // Fee paths are opt-in (CRANKER_ENABLE_FEE_SHARES=1); without them the
+        // wrapper would reject a trailing reward portfolio anyway.
+        reward_portfolio: setup::fee_shares_enabled().then_some(&env.cranker_portfolio),
         pyth: &pyth_resolver,
         exclude: &[],
     };
@@ -225,6 +227,10 @@ fn main() -> Result<()> {
     //      portfolio is byte-for-byte the same withdrawal surface as a
     //      user portfolio.
     if env::var("CRANKER_WITHDRAWAL_TEST").ok().as_deref() == Some("1") {
+        anyhow::ensure!(
+            setup::fee_shares_enabled(),
+            "CRANKER_WITHDRAWAL_TEST=1 needs CRANKER_ENABLE_FEE_SHARES=1 (fee paths are opt-in)"
+        );
         run_q6_withdrawal_test(&rpc, &program_id, &env)?;
     }
 

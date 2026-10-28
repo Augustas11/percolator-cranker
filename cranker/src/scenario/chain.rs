@@ -239,12 +239,20 @@ impl<'a> Chain<'a> {
     }
 }
 
-/// SPL token amount of `ata`, 0 when the account does not exist.
-pub fn token_amount(rpc: &RpcClient, ata: &Pubkey) -> u64 {
+/// SPL token amount of `ata`: 0 only when the account does not exist
+/// (never created, or closed). An RPC failure or undecodable token data is
+/// an error, never 0: these reads are assertion evidence.
+pub fn token_amount(rpc: &RpcClient, ata: &Pubkey) -> Result<u64> {
     use solana_sdk::program_pack::Pack;
-    rpc.get_account_data(ata)
-        .ok()
-        .and_then(|d| spl_token::state::Account::unpack(&d).ok())
-        .map(|a| a.amount)
-        .unwrap_or(0)
+    let acct = rpc
+        .get_account_with_commitment(ata, rpc.commitment())
+        .map_err(|e| anyhow!("token balance {ata}: {e}"))?
+        .value;
+    match acct {
+        None => Ok(0),
+        Some(a) if a.lamports == 0 => Ok(0),
+        Some(a) => spl_token::state::Account::unpack(&a.data)
+            .map(|t| t.amount)
+            .map_err(|e| anyhow!("token balance {ata}: not an SPL token account: {e}")),
+    }
 }

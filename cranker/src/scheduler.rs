@@ -97,11 +97,23 @@ impl CycleBudget {
     pub fn from_env() -> Self {
         let d = Self::default();
         let get = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
+        let max_cu = get("CRANKER_CYCLE_CU").unwrap_or(d.max_cu);
+        // Each tx reserves the full compute-unit limit before it is sent, so
+        // a smaller cycle budget would send nothing at all. Clamp, loudly.
+        let max_cu = if max_cu < d.cu_per_tx_reserve {
+            eprintln!(
+                "warning: CRANKER_CYCLE_CU={max_cu} is below one tx's reservation ({}); clamping to it",
+                d.cu_per_tx_reserve
+            );
+            d.cu_per_tx_reserve
+        } else {
+            max_cu
+        };
         Self {
             max_wall: get("CRANKER_CYCLE_MS")
                 .map(Duration::from_millis)
                 .unwrap_or(d.max_wall),
-            max_cu: get("CRANKER_CYCLE_CU").unwrap_or(d.max_cu),
+            max_cu,
             max_submissions: get("CRANKER_CYCLE_MAX_TX")
                 .map(|v| v as usize)
                 .unwrap_or(d.max_submissions),
@@ -164,7 +176,9 @@ impl AttemptBudget<'_> {
         self.open_reserve = 0;
     }
 
-    /// Wall-clock time left in the cycle (bound RPC waits with it).
+    /// Wall-clock time left in the cycle. `cycle.rs` turns it into the
+    /// per-send deadline that `submit_crank_routed` checks before every
+    /// send, including blockhash retries.
     pub fn time_left(&self) -> Duration {
         self.meter.deadline.saturating_duration_since(Instant::now())
     }
@@ -192,6 +206,8 @@ pub struct CycleSummary {
     pub idle_pending_stuck: usize,
     pub failures: Vec<(Pubkey, String)>,
     pub progressed_accounts: Vec<Pubkey>,
+    /// Accounts whose attempt was idle (including a no-tx owner-window skip).
+    pub idle_accounts: Vec<Pubkey>,
 }
 
 impl CycleSummary {
@@ -213,8 +229,9 @@ impl CycleSummary {
     }
 }
 
-/// Interleave pattern over priority classes (2:1:1). Empty classes are
-/// skipped, so a lone class gets the whole budget.
+/// Tx-budget weights per priority class (liquidatable, pending, quiet).
+const CLASS_WEIGHTS: [usize; 3] = [2, 1, 1];
+/// Turn order between classes inside a cycle.
 const CLASS_PATTERN: [Priority; 4] = [
     Priority::Liquidatable,
     Priority::Liquidatable,
@@ -222,38 +239,35 @@ const CLASS_PATTERN: [Priority; 4] = [
     Priority::Quiet,
 ];
 
-/// Rotate each priority class by `cycle`, then interleave the classes with
-/// [`CLASS_PATTERN`].
-pub fn order_candidates(mut cands: Vec<Candidate>, cycle: u64) -> Vec<Candidate> {
-    cands.sort_by(|a, b| {
-        a.priority
-            .cmp(&b.priority)
-            .then_with(|| a.pubkey.to_bytes().cmp(&b.pubkey.to_bytes()))
-    });
-    let mut classes: Vec<std::collections::VecDeque<Candidate>> = Vec::new();
-    for p in [Priority::Liquidatable, Priority::Pending, Priority::Quiet] {
-        let mut class: Vec<Candidate> = cands.iter().filter(|c| c.priority == p).cloned().collect();
-        let n = class.len();
-        if n > 0 {
-            class.rotate_left((cycle as usize) % n);
-        }
-        classes.push(class.into());
-    }
-    let mut out = Vec::with_capacity(cands.len());
-    while out.len() < cands.len() {
-        for p in CLASS_PATTERN {
-            if let Some(c) = classes[p as usize].pop_front() {
-                out.push(c);
-            }
+/// Cross-cycle fairness state: one cursor per priority class. A class's
+/// queue starts at its cursor, and the cursor advances by the number of its
+/// candidates *visited* this cycle, so an account deferred for lack of
+/// budget is first in its class next cycle.
+#[derive(Debug, Default, Clone)]
+pub struct ScheduleState {
+    cursors: [usize; 3],
+}
+
+/// Tx quota per class for one cycle: the cycle tx budget split 2:1:1 over
+/// the **non-empty** classes (at least 1 tx each). A class past its quota
+/// waits while any other class still has quota and candidates; leftover
+/// budget then goes to whoever remains.
+fn class_quotas(max_txs: usize, nonempty: [bool; 3]) -> [usize; 3] {
+    let total: usize = (0..3).filter(|&c| nonempty[c]).map(|c| CLASS_WEIGHTS[c]).sum();
+    let mut q = [0usize; 3];
+    for c in 0..3 {
+        if nonempty[c] && total > 0 {
+            q[c] = (max_txs * CLASS_WEIGHTS[c] / total).max(1);
         }
     }
-    out
+    q
 }
 
 /// Run one cycle. `started` is the cycle's entry time (discovery and
 /// planning count against the wall budget). `submit` performs one
 /// candidate's crank(s) within the given [`AttemptBudget`]; it must not
 /// panic, and an `Err` is a failure of that candidate only.
+#[allow(clippy::too_many_arguments)]
 pub fn run_cycle<F>(
     cycle: u64,
     slot: u64,
@@ -277,15 +291,63 @@ where
         reserve: budget.cu_per_tx_reserve,
         per_attempt: budget.max_txs_per_attempt.max(1),
     };
-    for cand in &order_candidates(candidates, cycle) {
+
+    // Per-class queues, each starting at its persistent cursor.
+    let mut cands = candidates;
+    cands.sort_by(|a, b| a.pubkey.to_bytes().cmp(&b.pubkey.to_bytes()));
+    let cursors = quarantine.schedule_state().cursors;
+    let mut queues: [std::collections::VecDeque<Candidate>; 3] = Default::default();
+    for (c, p) in [Priority::Liquidatable, Priority::Pending, Priority::Quiet].into_iter().enumerate() {
+        let mut class: Vec<Candidate> = cands.iter().filter(|x| x.priority == p).cloned().collect();
+        let n = class.len();
+        if n > 0 {
+            class.rotate_left(cursors[c] % n);
+        }
+        queues[c] = class.into();
+    }
+    let quotas = class_quotas(budget.max_submissions, [0, 1, 2].map(|c| !queues[c].is_empty()));
+    let mut used = [0usize; 3];
+    let mut visited = [0usize; 3];
+    let mut turn = 0usize;
+
+    loop {
+        // Next class: follow the pattern among classes with candidates left,
+        // preferring classes still under quota.
+        let has = |c: usize, q: &[std::collections::VecDeque<Candidate>; 3]| !q[c].is_empty();
+        let any_under = (0..3).any(|c| has(c, &queues) && used[c] < quotas[c]);
+        let mut pick = None;
+        for k in 0..CLASS_PATTERN.len() {
+            let c = CLASS_PATTERN[(turn + k) % CLASS_PATTERN.len()] as usize;
+            if has(c, &queues) && (!any_under || used[c] < quotas[c]) {
+                pick = Some(c);
+                turn = (turn + k + 1) % CLASS_PATTERN.len();
+                break;
+            }
+        }
+        let Some(c) = pick else { break };
+        let cand = queues[c].pop_front().expect("non-empty");
         if quarantine.is_blocked(&cand.pubkey, cycle) {
             s.quarantined_skipped += 1;
+            visited[c] += 1;
             continue;
         }
         if !meter.can_send() {
+            // Out of budget: this and every remaining candidate is deferred
+            // (quarantined ones still count as skipped). Not visited, so the
+            // cursors leave them first in line next cycle.
             s.budget_deferred += 1;
-            continue;
+            for q in queues.iter_mut() {
+                for rest in q.drain(..) {
+                    if quarantine.is_blocked(&rest.pubkey, cycle) {
+                        s.quarantined_skipped += 1;
+                    } else {
+                        s.budget_deferred += 1;
+                    }
+                }
+            }
+            break;
         }
+        visited[c] += 1;
         let txs_before = meter.txs_left;
         let cu_before = meter.cu_left;
         let mut ab = AttemptBudget {
@@ -295,55 +357,76 @@ where
         };
         // An unsettled tx (the closure bailed mid-tx) keeps its whole
         // reservation charged: the meter was debited in `begin_tx`.
-        let result = submit(cand, &mut ab);
+        let result = submit(&cand, &mut ab);
         let attempt = result.unwrap_or_else(|e| Attempt::Failed {
             error: format!("Rpc: {e}"),
             cu: 0,
         });
-        s.txs += txs_before - meter.txs_left;
-        let charged = cu_before - meter.cu_left;
-        s.cu_spent = s.cu_spent.saturating_add(charged);
+        let sent = txs_before - meter.txs_left;
+        used[c] += sent;
+        s.txs += sent;
+        s.cu_spent = s.cu_spent.saturating_add(cu_before - meter.cu_left);
         s.max_attempt_cu = s.max_attempt_cu.max(attempt.cu());
-        match attempt {
-            Attempt::Progress { .. } => {
-                s.progressed += 1;
-                s.progressed_accounts.push(cand.pubkey);
-                quarantine.record_ok(&cand.pubkey);
-            }
-            Attempt::Idle { .. } => {
-                s.idle += 1;
-                let streak = quarantine.record_idle(&cand.pubkey, cand.pending_work);
-                if cand.pending_work && streak >= budget.idle_stuck_cycles {
-                    s.idle_pending_stuck += 1;
-                    if streak == budget.idle_stuck_cycles {
-                        println!(
-                            "{{\"event\":\"idle_with_pending_work\",\"account\":\"{}\",\"cycle\":{},\"slot\":{},\"plan_class\":{},\"idle_cycles\":{}}}",
-                            cand.pubkey,
-                            cycle,
-                            slot,
-                            serde_json::Value::String(cand.plan_class.clone()),
-                            streak
-                        );
-                    }
-                }
-            }
-            Attempt::Failed { error, .. } => {
-                s.failed += 1;
-                if let Some(ev) = quarantine.record_failure(FailureReport {
-                    account: &cand.pubkey,
-                    error: &error,
-                    cycle,
-                    slot,
-                    plan_class: &cand.plan_class,
-                }) {
-                    println!("{}", ev.to_json_line());
-                    s.newly_quarantined += 1;
-                }
-                s.failures.push((cand.pubkey, error));
-            }
-        }
+        record(&mut s, quarantine, budget, &cand, attempt, cycle, slot);
+    }
+    let st = quarantine.schedule_state_mut();
+    for c in 0..3 {
+        st.cursors[c] = st.cursors[c].wrapping_add(visited[c]);
     }
     s
+}
+
+fn record(
+    s: &mut CycleSummary,
+    quarantine: &mut Quarantine,
+    budget: &CycleBudget,
+    cand: &Candidate,
+    attempt: Attempt,
+    cycle: u64,
+    slot: u64,
+) {
+    match attempt {
+        Attempt::Progress { .. } => {
+            s.progressed += 1;
+            s.progressed_accounts.push(cand.pubkey);
+            quarantine.record_ok(&cand.pubkey);
+        }
+        Attempt::Idle { .. } => {
+            s.idle += 1;
+            s.idle_accounts.push(cand.pubkey);
+            let streak = quarantine.record_idle(&cand.pubkey, cand.pending_work);
+            if cand.pending_work && streak >= budget.idle_stuck_cycles {
+                s.idle_pending_stuck += 1;
+                if streak == budget.idle_stuck_cycles {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "idle_with_pending_work",
+                            "account": cand.pubkey.to_string(),
+                            "cycle": cycle,
+                            "slot": slot,
+                            "plan_class": cand.plan_class,
+                            "idle_cycles": streak,
+                        })
+                    );
+                }
+            }
+        }
+        Attempt::Failed { error, .. } => {
+            s.failed += 1;
+            if let Some(ev) = quarantine.record_failure(FailureReport {
+                account: &cand.pubkey,
+                error: &error,
+                cycle,
+                slot,
+                plan_class: &cand.plan_class,
+            }) {
+                println!("{}", ev.to_json_line());
+                s.newly_quarantined += 1;
+            }
+            s.failures.push((cand.pubkey, error));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -381,20 +464,88 @@ mod tests {
         run_cycle(cycle, 1_000 + cycle, Instant::now(), cands, b, q, f)
     }
 
+    /// Deferred accounts are first in their class next cycle (cursors
+    /// advance by the number visited, not by one).
     #[test]
-    fn classes_interleave_and_rotate() {
-        let (a, b, c, l, p) = (pk(1), pk(2), pk(3), pk(9), pk(5));
-        let cands = vec![
-            cand(a, Priority::Quiet),
-            cand(b, Priority::Quiet),
-            cand(c, Priority::Quiet),
-            cand(l, Priority::Liquidatable),
-            cand(p, Priority::Pending),
-        ];
-        let o0: Vec<_> = order_candidates(cands.clone(), 0).iter().map(|c| c.pubkey).collect();
-        let o1: Vec<_> = order_candidates(cands, 1).iter().map(|c| c.pubkey).collect();
-        assert_eq!(o0, vec![l, p, a, b, c]);
-        assert_eq!(o1, vec![l, p, b, c, a]);
+    fn deferred_accounts_come_first_next_cycle() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let budget = CycleBudget { max_submissions: 2, ..CycleBudget::default() };
+        let mut order = Vec::new();
+        for cycle in 0..3 {
+            let cands = (0..5u8).map(|i| cand(pk(i), Priority::Quiet)).collect();
+            run(cycle, cands, &budget, &mut q, |c, ab| {
+                order.push(c.pubkey.to_bytes()[0]);
+                one_tx(ab, 1, Attempt::Idle { cu: 1 })
+            });
+        }
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 0]);
+    }
+
+    /// Review probe: 64-tx budget, 40 liquidatable accounts draining 2 txs
+    /// each, 200 pending. Every pending account must be served within a
+    /// small multiple of the ideal 200 / (64 * 1/3) ≈ 10 cycles.
+    #[test]
+    fn pending_wait_is_bounded_under_liquidatable_drains() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let budget = CycleBudget { max_submissions: 64, ..CycleBudget::default() };
+        let mut last_served: HashMap<Pubkey, u64> = HashMap::new();
+        let mut worst_gap = 0u64;
+        for cycle in 0..60u64 {
+            let mut cands: Vec<Candidate> = (0..40u8).map(|i| cand(pk(i), Priority::Liquidatable)).collect();
+            cands.extend((0..200u16).map(|i| {
+                let mut b = [0u8; 32];
+                b[0] = 1;
+                b[1..3].copy_from_slice(&i.to_le_bytes());
+                cand(Pubkey::new_from_array(b), Priority::Pending)
+            }));
+            run(cycle, cands, &budget, &mut q, |c, ab| {
+                let n = if c.priority == Priority::Liquidatable { 2 } else { 1 };
+                for _ in 0..n {
+                    if !ab.begin_tx() {
+                        break;
+                    }
+                    ab.settle_tx(Some(1));
+                }
+                if c.priority == Priority::Pending {
+                    let prev = last_served.insert(c.pubkey, cycle).unwrap_or(0);
+                    worst_gap = worst_gap.max(cycle - prev);
+                }
+                Ok(Attempt::Progress { cu: 1, steps: n })
+            });
+        }
+        assert_eq!(last_served.len(), 200, "every pending account served");
+        assert!(worst_gap <= 12, "worst pending wait {worst_gap} cycles");
+    }
+
+    /// Review probe: two 4-tx liquidatable drains with an 8-tx budget must
+    /// not starve pending and quiet accounts.
+    #[test]
+    fn big_drains_leave_room_for_other_classes() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let budget = CycleBudget { max_submissions: 8, max_txs_per_attempt: 4, ..CycleBudget::default() };
+        let mut hits: HashMap<Priority, usize> = HashMap::new();
+        for cycle in 0..5 {
+            let cands = vec![
+                cand(pk(1), Priority::Liquidatable),
+                cand(pk(2), Priority::Liquidatable),
+                cand(pk(3), Priority::Pending),
+                cand(pk(4), Priority::Quiet),
+            ];
+            run(cycle, cands, &budget, &mut q, |c, ab| {
+                let mut n = 0;
+                while (c.priority != Priority::Liquidatable || n < 4) && n < 4 && ab.begin_tx() {
+                    ab.settle_tx(Some(1));
+                    n += 1;
+                    if c.priority != Priority::Liquidatable {
+                        break;
+                    }
+                }
+                *hits.entry(c.priority).or_default() += 1;
+                Ok(Attempt::Progress { cu: 1, steps: n })
+            });
+        }
+        assert_eq!(hits.get(&Priority::Pending), Some(&5), "pending served every cycle");
+        assert_eq!(hits.get(&Priority::Quiet), Some(&5), "quiet served every cycle");
     }
 
     /// Review finding: sustained liquidatable load must not starve pending
@@ -519,22 +670,6 @@ mod tests {
         let (s, per) = drain(&mut q, b, Instant::now() - Duration::from_secs(1));
         assert!(per.is_empty());
         assert_eq!((s.txs, s.budget_deferred), (0, 4));
-    }
-
-    #[test]
-    fn rotation_reaches_deferred_accounts() {
-        let mut q = Quarantine::new(QuarantineConfig::default());
-        let budget = CycleBudget { max_submissions: 2, ..CycleBudget::default() };
-        let mut seen = std::collections::HashSet::new();
-        for cycle in 0..2 {
-            let cands = (0..4u8).map(|i| cand(pk(i), Priority::Quiet)).collect();
-            let s = run(cycle, cands, &budget, &mut q, |c, ab| {
-                seen.insert(c.pubkey);
-                one_tx(ab, 1, Attempt::Idle { cu: 1 })
-            });
-            assert_eq!(s.budget_deferred, 2);
-        }
-        assert_eq!(seen.len(), 3, "rotation by one reaches a deferred account");
     }
 
     /// Review finding: a claimant whose payout never becomes ready must not

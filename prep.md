@@ -432,10 +432,14 @@ once-only fix-up in `scripts/m1_bringup.sh` if this persists.
       accounts. Quarantine kept every other account progressing; that part
       is what the cranker controls, and it held.
 
-      ### Found in load test (not filed upstream; owner decision)
+      ### Found in load test (F1 posted upstream as #243 by the owner; the rest private)
 
       Full write-ups, native replays and upstream cross-references are in
       [`cranker/scenario-findings.md`](cranker/scenario-findings.md).
+
+      **Posting upstream (owner decision, 2026-10-28): F1 only.** Posted as
+      [aeyakovenko/percolator#243](https://github.com/aeyakovenko/percolator/issues/243)
+      with a LiteSVM repro on both pins. F1b, F2 and the rest stay private.
 
       - **F1: a lapsed bucket that no account references wedges Live refresh
         and liquidation (`EngineStale` 0x13).**

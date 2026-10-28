@@ -106,23 +106,33 @@ jobs:
         run: |
           mkdir -p ~/.config/solana
           solana-keygen new --no-bip39-passphrase --silent --force --outfile ~/.config/solana/id.json
+      # No FORCE_SBF_REBUILD: the wrapper's target dir is cached by pin, so a
+      # warm run reuses the .so and a cold run builds it. (Note: after the
+      # build, the 2.0.21 SDK's post-build strip.sh runs its legacy installer,
+      # which fetches its built-in default platform-tools v1.42 and Criterion
+      # into sdk/sbf/dependencies. Compilation itself uses v1.52:
+      # cargo-build-sbf links dependencies/platform-tools to
+      # ~/.cache/solana/v1.52 before building. The Solana cache keeps both.)
       - name: SBF build + local bring-up
-        run: FORCE_SBF_REBUILD=1 ./scripts/m1_bringup.sh
+        run: ./scripts/m1_bringup.sh
       - name: keeper dry-run (3 cycles)
         run: |
           export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
           CRANKER_CYCLES=3 cargo run --release --bin cranker --manifest-path "$CRANKER_MANIFEST"
-      - name: integration test against the validator
+      - name: validator integration tests (lifecycle, rollback, conservation)
         run: |
           export PERCOLATOR_TEST_RPC=http://127.0.0.1:8899
           export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
-          cargo test --release --manifest-path "$CRANKER_MANIFEST" --test lifecycle
-      # On the current pins the scenario's liveness assertion fails because of
-      # an engine-side issue (lapsed, unreferenced backing wedges Live
-      # refresh). The step runs and uploads its report, but it does not gate
-      # the job, and its name says so. A pass/fail summary is printed either way.
-      - name: live_shaped 50 cycles (non-gating, known engine-side issue)
-        continue-on-error: true
+          cargo test --release --manifest-path "$CRANKER_MANIFEST" \
+            --test lifecycle --test hard_reject --test invariants -- --include-ignored
+      # GATING. The scenario exits nonzero when any check fails, except checks
+      # named in CRANKER_SCENARIO_ALLOW_FAIL. On these pins:
+      #   c: residue above dust after every exit (open finding F2);
+      #   e: an Impaired bucket is not reachable on these pins.
+      # Every other check (a, b, d, f, g, ...) gates the job.
+      - name: live_shaped 50 cycles (gating; allow-list c,e)
+        env:
+          CRANKER_SCENARIO_ALLOW_FAIL: c,e
         run: |
           set -o pipefail
           CRANKER_CYCLES=50 ./scripts/live_shaped.sh 2>&1 | tee live-shaped-run.log

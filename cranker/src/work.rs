@@ -42,7 +42,12 @@ impl Priority {
 }
 
 /// `true` when a leg's unpaid funding remainder is worth less than one atom.
-/// Overflow in the product means the gap is enormous → not settled.
+///
+/// Overflow handling is exact, not a guess:
+/// * the gap (`f_target − f_snap`) or the numerator `|basis| · gap`
+///   overflowing means the payment is huge → **not settled**;
+/// * the denominator `a_basis · POS_SCALE` overflowing means it exceeds any
+///   u128 numerator, so the floor is exactly 0 → **settled**.
 ///
 /// Only a non-negative gap can floor to zero: the engine floors F deltas
 /// toward −∞, so any negative gap is at least a one-atom debit and is work.
