@@ -72,7 +72,7 @@ pub fn live_from_env() -> Option<Live> {
         .ok()
         .and_then(|s| Pubkey::from_str(&s).ok())?;
     Some(Live {
-        rpc: RpcClient::new(url),
+        rpc: RpcClient::new_with_commitment(url, CommitmentConfig::confirmed()),
         program_id,
         market,
     })
@@ -94,7 +94,7 @@ pub fn rpc_and_program_from_env() -> Option<(RpcClient, Pubkey)> {
     let program_id = std::env::var("PERCOLATOR_PROGRAM_ID")
         .ok()
         .and_then(|s| Pubkey::from_str(&s).ok())?;
-    Some((RpcClient::new(url), program_id))
+    Some((RpcClient::new_with_commitment(url, CommitmentConfig::confirmed()), program_id))
 }
 
 /// Load the funded validator payer, mirroring `main.rs`: `PERCOLATOR_TEST_PAYER`
@@ -481,10 +481,14 @@ pub fn ensure_ata(
 /// retirement (the slab is deleted, so there is no post-retire struct to
 /// decode; this replaces the harness's in-memory `lifecycle == Retired`
 /// check, which inspected a struct that on-chain no longer exists).
-pub fn market_account_exists(rpc: &RpcClient, market: &Pubkey) -> Result<bool> {
+/// `true` once CloseSlab has retired the market. The wrapper does not
+/// deallocate the slab: `handle_close_slab` reallocs it to `HEADER_LEN` and
+/// keeps that much rent (a tombstone), so "retired" means gone OR header-only.
+pub fn market_is_retired(rpc: &RpcClient, market: &Pubkey) -> Result<bool> {
     match rpc.get_account(market) {
-        Ok(acct) => Ok(acct.lamports > 0),
-        Err(_) => Ok(false),
+        Ok(acct) => Ok(acct.lamports == 0
+            || acct.data.len() <= percolator_prog::constants::HEADER_LEN),
+        Err(_) => Ok(true),
     }
 }
 

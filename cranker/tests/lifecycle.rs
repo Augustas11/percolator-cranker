@@ -211,12 +211,13 @@ fn crank_lifecycle_preserves_conservation() -> Result<()> {
     let admin_ata = common::ensure_ata(&rpc, &env.payer, &env.admin.pubkey(), &env.mint)?;
     common::close_slab(&rpc, &program_id, &env, &admin_ata)?;
 
-    // On-chain proof of retirement: the slab account is deallocated.
+    // On-chain proof of retirement: the slab is shrunk to a header-only
+    // tombstone (the wrapper keeps HEADER_LEN rent; it does not deallocate).
     assert!(
-        !common::market_account_exists(&rpc, &env.market)?,
-        "market slab must be deallocated after CloseSlab"
+        common::market_is_retired(&rpc, &env.market)?,
+        "market slab must be retired (header-only) after CloseSlab"
     );
-    eprintln!("market retired: slab deallocated");
+    eprintln!("market retired: slab is a header-only tombstone");
 
     Ok(())
 }

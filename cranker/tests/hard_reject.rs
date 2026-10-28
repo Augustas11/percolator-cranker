@@ -50,9 +50,8 @@ fn hard_reject_leaves_target_bytes_unchanged() -> anyhow::Result<()> {
     let outcome = submit_crank(
         &live.rpc,
         &live.program_id,
-        // A throwaway payer keypair the validator has funded, or reuse your
-        // bootstrap payer. Left as a TODO so this file has no secret material.
-        &load_test_payer()?,
+        // Funded validator payer: PERCOLATOR_TEST_PAYER or ~/.config/solana/id.json.
+        &common::load_payer()?,
         &live.market,
         &target_pk,
         None,        // no reward portfolio
@@ -83,14 +82,4 @@ fn hard_reject_leaves_target_bytes_unchanged() -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-/// TODO: return a funded `Keypair` for the local validator. Reuse your
-/// `setup::bootstrap` payer or read a keypair file path from an env var.
-/// Kept as a stub so no key material lives in the test source.
-fn load_test_payer() -> anyhow::Result<solana_sdk::signature::Keypair> {
-    anyhow::bail!(
-        "wire load_test_payer() to your funded local-validator keypair \
-         (e.g. read PERCOLATOR_TEST_PAYER=<path> and Keypair::read_from_file)"
-    )
 }
