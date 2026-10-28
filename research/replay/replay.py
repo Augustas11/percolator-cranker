@@ -61,14 +61,25 @@ ST, SP = load_spot()
 
 
 def px(ts):
-    """Last oracle print at or before ts (no look-ahead). Before the first print: the first."""
-    return SP[np.clip(np.searchsorted(ST, ts, side="right") - 1, 0, len(SP) - 1)]
+    """Last oracle print at or before ts (no look-ahead). Refuses queries before the first print."""
+    i = np.searchsorted(ST, ts, side="right") - 1
+    if np.any(i < 0):
+        raise ValueError("oracle queried before its first print (fetch.py loads a warm-up day)")
+    return SP[i]
+
+
+def covered(ts):
+    """1 where oracle data extends to ts, else 0: markouts past the end of the data are dropped."""
+    return (np.asarray(ts) <= ST[-1]).astype(float)
 
 
 def slip_table():
     """Average of buy and sell cost vs mid, bps, walking the committed Hyperliquid book."""
     with open(os.path.join(HERE, "inputs", "hl_l2book_SOL.json")) as f:
         bids, asks = json.load(f)["levels"]
+    for lv in bids + asks:
+        if not all(np.isfinite(float(lv[k])) and float(lv[k]) > 0 for k in ("px", "sz")):
+            raise ValueError(f"bad book level {lv!r}")
     mid = (float(bids[0]["px"]) + float(asks[0]["px"])) / 2
 
     def walk(levels, usd):
@@ -136,6 +147,8 @@ class Book:
 
     def __init__(self):
         self.lp = self.h = self.cash = self.eq = 0.0
+        self.hc = 0.0         # committed hedge: executed + pending orders (the trigger sees this)
+        self.pending = []     # (exec_time_ms, dq) orders submitted but not yet filled
         self.days = []        # per-day dicts
         self.expo = []        # |LP + hedge| USD, sampled each minute
         self.lpabs = []       # |LP| USD (on-chain inventory), sampled each minute
@@ -143,24 +156,29 @@ class Book:
 
     def run_day(self, day0, t, qlp, m, p_now, fee_bps, cap, funding):
         n_lp0, h0 = self.lp, self.h
+        day_end = day0 + DAY_MS
         notional = np.abs(qlp) * m
         fees = fee_bps / 1e4 * notional.sum()   # taker side only
         cash = self.cash - float(np.dot(qlp, m)) + fees
         lp_path = n_lp0 + np.cumsum(qlp)
-        pts, h = hedge_points(lp_path, h0, p_now, cap)
+        pts, self.hc = hedge_points(lp_path, self.hc, p_now, cap)
+        # a hedge counts only once it fills at t + latency; orders still open at midnight carry over
+        orders = sorted(self.pending + [(int(t[j]) + HEDGE_LATENCY_MS, dq) for j, dq in pts])
+        self.pending = [o for o in orders if o[0] >= day_end]
         hcost = hvol = 0.0
         ht, hh = [day0 - 1], [h0]
-        for j, dq in pts:
-            pe = float(px(t[j] + HEDGE_LATENCY_MS))
+        for te, dq in (o for o in orders if o[0] < day_end):
+            pe = float(px(te))
             usd = abs(dq) * pe
             cash -= dq * pe
             c = usd * (HEDGE_FEE_BPS + float(slip_bps(usd))) / 1e4
             cash -= c
             hcost += c
             hvol += usd
-            ht.append(int(t[j]))
+            ht.append(te)
             hh.append(hh[-1] + dq)
         ht, hh = np.array(ht), np.array(hh)
+        h = float(hh[-1])
         fund = 0.0
         for ft, rate in funding:   # hedge venue funding, longs pay positive rates
             hf = hh[np.searchsorted(ht, ft, side="right") - 1]
@@ -179,13 +197,13 @@ class Book:
         pnl = eq - self.eq
         self.days.append({"pnl": pnl, "fees": fees, "hedge_cost": hcost, "funding": fund,
                           "inventory": pnl - fees + hcost - fund, "hedge_usd": hvol,
-                          "volume": float(notional.sum()), "hedges": len(pts)})
+                          "volume": float(notional.sum()), "hedges": len(ht) - 1})
         self.lp, self.h, self.cash, self.eq = lp, h, cash, eq
 
 
 def markouts(t, qlp, m):
     """LP gain per horizon: sum qlp * (oracle(t+H) - mark). Negative = adverse selection."""
-    return np.array([float(np.dot(qlp, px(t + 1000 * h) - m)) for h in MARKOUT_S])
+    return np.array([float(np.dot(qlp * covered(t + 1000 * h), px(t + 1000 * h) - m)) for h in MARKOUT_S])
 
 
 def main():
@@ -221,6 +239,8 @@ def main():
         day0 = int(dt.datetime.fromisoformat(d).replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
         z = np.load(os.path.join(DATA, f"perp-{d}.npz"))
         t, q, praw = z["t"], z["q"], z["p"]
+        if not (np.all(np.isfinite(q)) and np.all(np.isfinite(praw)) and np.all(praw > 0) and np.all(np.diff(t) >= 0)):
+            raise ValueError(f"bad cached flow {d}")
         p_now = px(t)
         funding = [(ft, r) for ft, r in fund_all if day0 <= ft < day0 + DAY_MS]
         s = px(day0 + np.arange(0, DAY_MS + 1, 60_000))
@@ -241,7 +261,7 @@ def main():
             if lag in mk_size:
                 usd = np.abs(q) * praw
                 b = np.digitize(usd, size_edges) - 1
-                mo = np.stack([qlp_raw * (px(t + 1000 * h) - m) for h in MARKOUT_S], axis=1)
+                mo = np.stack([qlp_raw * covered(t + 1000 * h) * (px(t + 1000 * h) - m) for h in MARKOUT_S], axis=1)
                 for k in range(len(size_edges) - 1):
                     sel = b == k
                     mk_size[lag][k, :-1] += mo[sel].sum(axis=0)
@@ -275,6 +295,56 @@ def main():
         print(f"{d} done", file=sys.stderr, flush=True)
 
     report(days, day_info, books, mk_base, mk_arb, arb_vol, mk_size, size_edges, mean_raw, len(days), fill)
+    P = print
+    P("\n### Sensitivity: toxic flow, tight hedge, $1M/day, one input changed per row\n")
+    P("| Variant | Fee | Lag | Edge bps | Net/day | SD/day | Max DD | Filled |\n|---|---:|---:|---:|---:|---:|---:|---:|")
+    for (name, fee, lag, *_), sm, fr in sensitivity(days, mean_raw, fund_all):
+        P(f"| {name} | {fee} | {lag} ms | {sm['trade_bps']:.2f} | {sm['net_day']:,.0f} | {sm['sd']:,.0f} | {fmt_usd(sm['dd'])} | {fr:.0%} |")
+
+
+def sensitivity(days, mean_raw, fund_all):
+    """Toxic flow, tight hedge, $1M/day, with one input changed per row (architect review).
+    thin: whole Binance tickets, every N-th trade (N = mean notional / V) from a fixed offset, no size scaling.
+    arb: ticket size as a fraction of daily volume, and the slot phase of the arb clock."""
+    V = 1_000_000
+    N = int(round(mean_raw / V))
+    rows = [("reference (as headline)", 12, 1000, None, ARB_CAP_FRAC, 0)]
+    rows += [(f"arb ticket x4 ({4 * ARB_CAP_FRAC:.0%} of volume)", f, lag, None, 4 * ARB_CAP_FRAC, 0)
+             for f in (8, 12) for lag in (400, 1000)]
+    rows += [("arb slot phase +200 ms", 12, 1000, None, ARB_CAP_FRAC, 200)]
+    rows += [(f"whole tickets, every {N:,}th from offset {o:,}", f, lag, o, ARB_CAP_FRAC, 0)
+             for f, lag in ((12, 1000), (8, 400)) for o in (0, N // 3, 2 * N // 3)]
+    books = [Book() for _ in rows]
+    pos = [0.0] * len(rows)
+    filled = [[0.0, 0.0] for _ in rows]
+    idx0 = 0  # running trade index so thinning is continuous across days
+    for d in days:
+        day0 = int(dt.datetime.fromisoformat(d).replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
+        z = np.load(os.path.join(DATA, f"perp-{d}.npz"))
+        t_all, q_all = z["t"], z["q"]
+        funding = [(ft, r) for ft, r in fund_all if day0 <= ft < day0 + DAY_MS]
+        gidx = idx0 + np.arange(len(t_all))
+        idx0 += len(t_all)
+        for i, (_, fee, lag, off, afrac, phase) in enumerate(rows):
+            if off is None:
+                t, qlp = t_all, -q_all * (V / mean_raw)
+            else:
+                sel = (gidx + off) % N == 0
+                t, qlp = t_all[sel], -q_all[sel]
+            ticks = day0 + phase + np.arange(0, DAY_MS - phase, ARB_TICK_MS)
+            m_tick, p_tick = px(ticks - lag), px(ticks)
+            dev = p_tick / m_tick - 1
+            trig = np.flatnonzero(np.abs(dev) > (fee + ARB_COST_BPS) / 1e4)
+            tt = np.concatenate([t, ticks[trig]])
+            o = np.argsort(tt, kind="stable")
+            mm = np.concatenate([px(t - lag), m_tick[trig]])[o]
+            pn = np.concatenate([px(t), p_tick[trig]])[o]
+            offered = np.concatenate([qlp, -np.sign(dev[trig]) * afrac * V / m_tick[trig]])[o]
+            qq, pos[i] = cap_fills(offered, pn, pos[i], LP_CAP_FRAC * V)
+            filled[i][0] += float(np.abs(qq * pn).sum())
+            filled[i][1] += float(np.abs(offered * pn).sum())
+            books[i].run_day(day0, tt[o], qq, mm, pn, fee, HEDGES["tight"] * V, funding)
+    return [(r, summary(b, r[1], V, "toxic", len(days)), f[0] / f[1]) for r, b, f in zip(rows, books, filled)]
 
 
 def fmt_usd(x):
