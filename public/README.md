@@ -92,14 +92,16 @@ present on the engine's newer master. See [docs/RUNBOOK.md](docs/RUNBOOK.md)
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push. It builds the workspace and
-runs the unit tests against the pinned wrapper.
+`.github/workflows/ci.yml` has two jobs:
 
-The second job is **gated**: it runs on manual dispatch, or when the repo
-variable `RUN_E2E=true` is set. It does the SBF build, a local-validator
-bring-up, the integration tests, and a 50-cycle `live_shaped` run. That job
-has not had a green run on hosted runners yet. Its scenario step is
-non-gating because of the known issue above.
+- **build + unit tests:** runs on pushes to `main` and on pull requests,
+  against the pinned wrapper.
+- **e2e:** runs on pull requests and manual dispatch. It does the SBF build
+  (platform-tools v1.52), a local-validator bring-up, a 3-cycle dry run, the
+  lifecycle integration test, and a 50-cycle `live_shaped` run.
+
+The `live_shaped` step is **non-gating**, and its name says so, because of
+the known issue above. Its report is uploaded as an artifact.
 
 ## Docs
 

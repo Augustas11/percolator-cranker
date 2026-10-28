@@ -58,13 +58,18 @@ put_dir client/src              crates/bringup/src   -name '*.rs'
 put scripts/m1_bringup.sh       scripts/m1_bringup.sh
 put scripts/live_shaped.sh      scripts/live_shaped.sh
 put scripts/check_public_tree.sh scripts/check_public_tree.sh
+put scripts/fetch_upstream.sh   scripts/fetch_upstream.sh
+put scripts/pins.env            scripts/pins.env
+# the same CI pipeline as this repo (layout-neutral via scripts/env.sh;
+# public/scripts/env.sh sets the public layout)
+put .github/workflows/ci.yml    .github/workflows/ci.yml
 # public-only overlay (README, docs, CI, workspace, env.sh, pins, fetch)
 (cd "$SRC/public" && find . -type f) | while read -r f; do
   put "public/${f#./}" "${f#./}"
 done
-# Root lockfile: start from the cranker's lock so the dependency set is the
-# one the cranker was tested with; cargo adds the bring-up crate's extras.
-put cranker/Cargo.lock          Cargo.lock
+# The root Cargo.lock comes from the overlay (public/Cargo.lock): the
+# workspace-resolved lock, seeded from cranker/Cargo.lock. Re-seed it when
+# crate dependencies change; the verify step builds with --locked.
 
 # ---- layout rewrites (explicit, each one checked) -----------------------
 rewrite() { # file, from, to

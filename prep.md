@@ -527,6 +527,22 @@ targets):
       and M2.f will be written against current guard semantics
       (no false-green risk).
 
+### R1. Public reference release (new repo) — **export ready 2026-10-28; waiting on owner**
+- [x] Plan, name options and sync proposal: `docs/PUBLIC_REPO_PLAN.md`.
+- [x] `scripts/export_public.sh <dir>`: allowlist plus the `public/`
+      overlay. The private denylist is `scripts/public_denylist.txt` and is
+      never exported. `scripts/check_public_tree.sh` passes on the export
+      and catches every planted violation in a negative test.
+- [x] The exported tree stands alone (2026-10-28):
+      `fetch_upstream.sh` → `cargo build --locked` → 45 unit tests →
+      `FORCE_SBF_REBUILD=1 m1_bringup.sh` → 3-cycle dry run, all green.
+      No-op crank 18,565 CU.
+- [x] Same CI in both repos (`.github/workflows/ci.yml`, layout-neutral).
+- [ ] Owner decisions: name, LICENSE (Apache-2.0 proposed), security
+      contact, repo creation and push access, sync model.
+- [ ] Push a single commit to the owner-created repo. Tag `v0.1.0` once CI
+      there is green.
+
 ### M3. Pre-deployment readiness (only relevant once devnet deployment appears)
 - [ ] Real keeper portfolio funded on the target chain.
 - [ ] Oracle account subscriptions wired (not stubbed).

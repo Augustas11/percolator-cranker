@@ -624,7 +624,6 @@ fn parse_consumed_cu(logs: &[String]) -> Option<u64> {
 }
 
 fn byte_diff_count(a: &[u8], b: &[u8]) -> usize {
-    let n = a.len().min(b.len());
     let mut diff = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
     diff += a.len().abs_diff(b.len());
     diff

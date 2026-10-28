@@ -64,7 +64,8 @@ docs/        # ARCHITECTURE, RUNBOOK, STAGING, MONITOR
 |---|---|---|
 | `scripts/export_public.sh <dir>` | private only | no |
 | allowlist | inside `export_public.sh` (explicit `put` lines) | — |
-| public-only files (README, docs, CI, workspace `Cargo.toml`, `env.sh`, `pins.env`, `fetch_upstream.sh`, crate READMEs, `.gitignore`) | `public/` overlay | yes |
+| public-only files (README, docs, workspace `Cargo.toml`, public-layout `env.sh`, crate READMEs, `.gitignore`) | `public/` overlay | yes |
+| shared with this repo, so they can't drift: `.github/workflows/ci.yml`, `scripts/fetch_upstream.sh`, `scripts/pins.env`, `m1_bringup.sh`, `live_shaped.sh` | private tree, copied as-is | yes |
 | layout rewrites (path dep `../repo-prog` → `../../upstream/percolator-prog`, `@PUBLIC_NAME@`) | `export_public.sh`, each anchored and checked | — |
 | `scripts/check_public_tree.sh <dir> [denylist]` | private, and exported (generic checks) | yes |
 | `scripts/public_denylist.txt` | private only | no (asserted) |
@@ -79,6 +80,21 @@ outside the allowlist (the two upstream repos, toolchain installers,
 registries, localhost), and the denylist. The URL rule skips `Cargo.lock`,
 because its sources come from upstream manifests. A negative test with
 planted violations is in the R1 PR description.
+
+## CI
+
+Both repos run the **same** `.github/workflows/ci.yml`, copied by the
+export. It is layout-neutral: each tree's `scripts/env.sh` names the
+wrapper checkout, the bring-up crate and the keeper manifest.
+
+- **host** (push to `main`, pull requests): fetch the pinned wrapper,
+  build, run unit tests.
+- **e2e** (pull requests, manual dispatch): SBF build with platform-tools
+  v1.52, validator bring-up, a 3-cycle dry run, the lifecycle integration
+  test, and a 50-cycle `live_shaped` run. The scenario step is non-gating,
+  and its name says so, because of the engine-side liveness issue.
+- **Caches:** cargo registry and target dirs, the Solana CLI and
+  platform-tools, and the wrapper SBF target.
 
 ## Release checklist (after the owner creates the repo)
 
