@@ -29,6 +29,13 @@ source "$SCRIPT_DIR/env.sh"
 PREVIEW_PROG_REF="${PREVIEW_PROG_REF:-origin/fix/repin-launch-fixes}"
 PREVIEW_ENGINE_REV="${PREVIEW_ENGINE_REV:-68859b94}"
 PV="$REPO_ROOT/.preview"
+# Local validator only. Every cluster command passes --url explicitly so the
+# global Solana config (which may name devnet or mainnet) is never used.
+LOCAL_RPC="http://127.0.0.1:8899"
+if ! solana cluster-version --url "$LOCAL_RPC" >/dev/null 2>&1; then
+  echo "no local validator on $LOCAL_RPC; start one with ./scripts/m1_bringup.sh first" >&2
+  exit 2
+fi
 ENGINE_GIT="https://github.com/aeyakovenko/percolator"
 
 mkdir -p "$PV"
@@ -71,7 +78,7 @@ git -C "$REPO_ROOT" archive HEAD cranker | tar -x -C "$PV/cranker.new" --strip-c
 if [ -d "$PV/cranker/target" ]; then mv "$PV/cranker/target" "$PV/cranker.new/target"; fi
 rm -rf "$PV/cranker" && mv "$PV/cranker.new" "$PV/cranker"
 write_patch "$PV/cranker"
-( cd "$PV/cranker" && cargo update -q -p percolator )
+( cd "$PV/cranker" && PERCOLATOR_SKIP_PIN_CHECK=1 cargo update -q -p percolator )
 
 # Refuse to run if the patch did not take (cargo only warns on an unused patch).
 for d in "$PV/repo-prog" "$PV/cranker"; do
@@ -86,8 +93,12 @@ KP="$PV/repo-prog/target/deploy/percolator_prog-keypair.json"
 SO="$PV/repo-prog/target/deploy/percolator_prog.so"
 PROG_ID="$(solana-keygen pubkey "$KP")"
 echo "==> deploying preview program $PROG_ID"
-solana program deploy "$SO" --program-id "$KP" >/dev/null
+solana program deploy --url "$LOCAL_RPC" "$SO" --program-id "$KP" >/dev/null
 
+# The preview deliberately builds against a wrapper other than the
+# scripts/pins.env pin, so the crates' build-time pin check is downgraded
+# to a warning here (and only here).
+export PERCOLATOR_SKIP_PIN_CHECK=1
 echo "==> cranker (preview) CRANKER_CYCLES=${CRANKER_CYCLES:-3}"
 cd "$PV/cranker"
 if [ "${CRANKER_SCENARIO:-}" = "live_shaped" ]; then

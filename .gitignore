@@ -9,8 +9,10 @@ target/
 
 # --- Upstream clones (not ours to redistribute) ---
 # aeyakovenko/percolator + aeyakovenko/percolator-prog live at these paths locally.
-# They're pinned by rev in client/Cargo.toml and cranker/Cargo.toml; anyone
-# reproducing this repo re-clones them separately.
+# The engine is pinned by git rev in client/Cargo.toml and cranker/Cargo.toml.
+# The wrapper is a PATH dependency: its SHA lives in scripts/pins.env,
+# scripts/fetch_upstream.sh checks it out, and both crates' build.rs fail the
+# build if repo-prog/ is at a different commit.
 /repo/
 /repo-prog/
 
