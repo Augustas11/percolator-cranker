@@ -81,8 +81,10 @@ fn check() -> Result<(), String> {
     let git_dir = PathBuf::from(git(&["rev-parse", "--absolute-git-dir"])?);
     println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
     println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
-    for watched in ["src", "Cargo.toml", "Cargo.lock"] {
-        println!("cargo:rerun-if-changed={}", built.join(watched).display());
+    // Every tracked file, matching the dirty check below (which rejects
+    // changes to any tracked file).
+    for tracked in git(&["ls-files"])?.lines() {
+        println!("cargo:rerun-if-changed={}", built.join(tracked).display());
     }
 
     let head = git(&["rev-parse", "HEAD"])?;

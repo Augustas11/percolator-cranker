@@ -137,9 +137,27 @@ fn outcome_cu(o: &CrankOutcome) -> u64 {
 /// Fold one candidate's drain into a scheduler attempt. `rpc_error` is an
 /// RPC failure that ended the drain early; steps that already landed still
 /// count as progress.
-fn attempt_from(outcomes: &[CrankOutcome], rpc_error: Option<&str>) -> Attempt {
+/// Why a drain stopped without an outcome for its last tx.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Interrupt {
+    /// The deadline passed before the send: nothing went on chain.
+    Deferred,
+    /// Sent, fate unknown.
+    Unconfirmed(String),
+}
+
+fn attempt_from(
+    outcomes: &[CrankOutcome],
+    rpc_error: Option<&str>,
+    interrupt: Option<&Interrupt>,
+) -> Attempt {
     let cu: u64 = outcomes.iter().map(outcome_cu).sum();
     let progressed = outcomes.iter().filter(|o| o.class() == OutcomeClass::Progress).count();
+    if let Some(Interrupt::Unconfirmed(signature)) = interrupt {
+        if progressed == 0 {
+            return Attempt::Unconfirmed { signature: signature.clone() };
+        }
+    }
     if progressed > 0 {
         if let Some(o) = outcomes.last().filter(|o| o.class() == OutcomeClass::Failed) {
             println!(
@@ -163,6 +181,7 @@ fn attempt_from(outcomes: &[CrankOutcome], rpc_error: Option<&str>) -> Attempt {
             error: o.error_key().unwrap_or_else(|| "unknown".into()),
             cu,
         },
+        None if interrupt == Some(&Interrupt::Deferred) => Attempt::Deferred,
         _ => Attempt::Idle { cu },
     }
 }
@@ -294,6 +313,7 @@ pub fn run_one_cycle(
         };
         let mut outcomes = Vec::new();
         let mut rpc_error = None;
+        let mut interrupt = None;
         let mut slot = now_slot;
         // Every tx is admitted by the budget first (wall, CU reserve, tx
         // count, per-attempt cap) and counted whatever its outcome.
@@ -316,15 +336,20 @@ pub fn run_one_cycle(
                 Ok(o) => o,
                 Err(e) if e.is::<submit::Unconfirmed>() => {
                     // Sent, fate unknown: keep the reservation charged, stop
-                    // this drain, and do not strike the account.
+                    // this drain, report it, and do not strike the account.
                     ab.settle_tx(None);
-                    println!("  {} {e}", c.pubkey);
+                    let sig = e
+                        .downcast_ref::<submit::Unconfirmed>()
+                        .map(|u| u.signature.to_string())
+                        .unwrap_or_default();
+                    interrupt = Some(Interrupt::Unconfirmed(sig));
                     break;
                 }
                 Err(e) if e.is::<submit::DeadlineReached>() => {
                     // Not sent: refund the reservation and stop. This is the
-                    // budget running out (deferral), not an account failure.
+                    // budget running out (deferral), not an account outcome.
                     ab.settle_tx(Some(0));
+                    interrupt = Some(Interrupt::Deferred);
                     break;
                 }
                 Err(e) => {
@@ -354,7 +379,7 @@ pub fn run_one_cycle(
                 }
             }
         }
-        let attempt = attempt_from(&outcomes, rpc_error.as_deref());
+        let attempt = attempt_from(&outcomes, rpc_error.as_deref(), interrupt.as_ref());
         for o in outcomes {
             records.push(SubmissionRecord {
                 cycle,
@@ -399,19 +424,19 @@ mod tests {
 
     #[test]
     fn drain_then_idle_is_progress() {
-        let a = attempt_from(&[ok(true, 100), ok(true, 100), ok(false, 18)], None);
+        let a = attempt_from(&[ok(true, 100), ok(true, 100), ok(false, 18)], None, None);
         assert_eq!(a, Attempt::Progress { cu: 218, steps: 2 });
     }
 
     #[test]
     fn non_progress_revert_alone_is_idle() {
-        assert_eq!(attempt_from(&[rej("EngineNonProgress")], None), Attempt::Idle { cu: 10 });
+        assert_eq!(attempt_from(&[rej("EngineNonProgress")], None, None), Attempt::Idle { cu: 10 });
     }
 
     #[test]
     fn engine_error_alone_is_failed() {
         assert_eq!(
-            attempt_from(&[rej("EngineCounterUnderflow")], None),
+            attempt_from(&[rej("EngineCounterUnderflow")], None, None),
             Attempt::Failed {
                 error: "EngineCounterUnderflow".into(),
                 cu: 10
@@ -424,11 +449,11 @@ mod tests {
     #[test]
     fn rpc_error_after_progress_is_still_progress() {
         assert_eq!(
-            attempt_from(&[ok(true, 100)], Some("timeout")),
+            attempt_from(&[ok(true, 100)], Some("timeout"), None),
             Attempt::Progress { cu: 100, steps: 1 }
         );
         assert_eq!(
-            attempt_from(&[], Some("timeout")),
+            attempt_from(&[], Some("timeout"), None),
             Attempt::Failed {
                 error: "Rpc: timeout".into(),
                 cu: 0
@@ -443,7 +468,7 @@ mod tests {
             *tx_cu = None;
         }
         assert_eq!(
-            attempt_from(&[o], None),
+            attempt_from(&[o], None, None),
             Attempt::Idle { cu: submit::TX_CU_LIMIT as u64 },
             "same amount the scheduler meter keeps reserved"
         );
@@ -458,7 +483,7 @@ mod tests {
             *unreconciled = Some("read target portfolio post-state: timeout".into());
         }
         assert_eq!(o.class(), OutcomeClass::Progress);
-        assert_eq!(attempt_from(&[o], None), Attempt::Progress { cu: 20_000, steps: 1 });
+        assert_eq!(attempt_from(&[o], None, None), Attempt::Progress { cu: 20_000, steps: 1 });
     }
 
     #[test]

@@ -152,8 +152,16 @@ fn main() -> Result<()> {
         failed += summary.failed;
         // CI sets CRANKER_FAIL_ON_ERRORS=1: on a fresh bootstrap market any
         // failed attempt is a regression, so the dry run must not exit 0.
-        if summary.failed > 0 && env::var("CRANKER_FAIL_ON_ERRORS").as_deref() == Ok("1") {
-            anyhow::bail!("cycle {cycle}: {} failed attempt(s): {:?}", summary.failed, summary.failures);
+        if (summary.failed > 0 || !summary.unconfirmed.is_empty())
+            && env::var("CRANKER_FAIL_ON_ERRORS").as_deref() == Ok("1")
+        {
+            anyhow::bail!(
+                "cycle {cycle}: {} failed, {} unconfirmed: {:?} {:?}",
+                summary.failed,
+                summary.unconfirmed.len(),
+                summary.failures,
+                summary.unconfirmed
+            );
         }
         if cycle + 1 < cycles {
             println!("cycle {cycle} done; sleeping {:?}", CYCLE_INTERVAL);

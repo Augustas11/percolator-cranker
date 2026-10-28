@@ -51,6 +51,13 @@ pub enum Attempt {
     Progress { cu: u64, steps: usize },
     Idle { cu: u64 },
     Failed { error: String, cu: u64 },
+    /// Nothing was sent: the cycle budget ran out (e.g. the deadline passed
+    /// before the send). Not account health: streaks are untouched and the
+    /// account keeps its place for next cycle.
+    Deferred,
+    /// A tx was sent but its fate is unknown (confirmation errored, status
+    /// unknown). Not blamed on the account; reported separately.
+    Unconfirmed { signature: String },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -201,6 +208,8 @@ pub struct CycleSummary {
     /// `pending_work` accounts idle for `idle_stuck_cycles` or more.
     pub idle_pending_stuck: usize,
     pub failures: Vec<(Pubkey, String)>,
+    /// Sent txs whose fate is unknown: (account, signature).
+    pub unconfirmed: Vec<(Pubkey, String)>,
     pub progressed_accounts: Vec<Pubkey>,
     /// Accounts whose attempt was idle (including a no-tx owner-window skip).
     pub idle_accounts: Vec<Pubkey>,
@@ -209,11 +218,12 @@ pub struct CycleSummary {
 impl CycleSummary {
     pub fn line(&self) -> String {
         format!(
-            "cycle {} summary: progressed={} idle={} failed={} quarantined_skipped={} deferred={} new_quarantine={} idle_pending_stuck={} txs={} cu={} max_attempt_cu={}",
+            "cycle {} summary: progressed={} idle={} failed={} unconfirmed={} quarantined_skipped={} deferred={} new_quarantine={} idle_pending_stuck={} txs={} cu={} max_attempt_cu={}",
             self.cycle,
             self.progressed,
             self.idle,
             self.failed,
+            self.unconfirmed.len(),
             self.quarantined_skipped,
             self.budget_deferred,
             self.newly_quarantined,
@@ -355,6 +365,7 @@ where
             }
             break;
         }
+        let prev_visited = visited[c];
         visited[c] = Some(cand.pubkey);
         let txs_before = meter.txs_left;
         let cu_before = meter.cu_left;
@@ -385,6 +396,12 @@ where
         let charged = cu_before - meter.cu_left;
         s.cu_spent = s.cu_spent.saturating_add(charged);
         s.max_attempt_cu = s.max_attempt_cu.max(charged);
+        if attempt == Attempt::Deferred {
+            // Unsent for lack of budget: keep this account (and its class)
+            // first in line next cycle, exactly like an unvisited deferral.
+            visited[c] = prev_visited;
+            turn = pos;
+        }
         record(&mut s, quarantine, budget, &cand, attempt, cycle, slot);
     }
     let st = quarantine.schedule_state_mut();
@@ -432,6 +449,23 @@ fn record(
                     );
                 }
             }
+        }
+        Attempt::Deferred => {
+            s.budget_deferred += 1;
+        }
+        Attempt::Unconfirmed { signature } => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "unconfirmed",
+                    "account": cand.pubkey.to_string(),
+                    "signature": signature,
+                    "cycle": cycle,
+                    "slot": slot,
+                    "plan_class": cand.plan_class,
+                })
+            );
+            s.unconfirmed.push((cand.pubkey, signature));
         }
         Attempt::Failed { error, .. } => {
             s.failed += 1;
@@ -529,6 +563,36 @@ mod tests {
             });
         }
         assert!(quiet_txs >= 5 * 2, "quiet got {quiet_txs} txs over 5 cycles");
+    }
+
+    /// Re-audit finding: a deadline hit before the send used to fall through
+    /// to Idle (clearing history, bumping the idle streak, losing its place).
+    /// Deferred touches no streak and keeps the account first next cycle;
+    /// Unconfirmed is reported, never Idle or Failed.
+    #[test]
+    fn deferred_and_unconfirmed_are_not_account_health() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let budget = CycleBudget { idle_stuck_cycles: 1, ..CycleBudget::default() };
+        let mut order = Vec::new();
+        for cycle in 0..2 {
+            let mut a = cand(pk(1), Priority::Quiet);
+            a.pending_work = true;
+            let cands = vec![a, cand(pk(2), Priority::Quiet)];
+            let s = run(cycle, cands, &budget, &mut q, |c, _| {
+                order.push(c.pubkey.to_bytes()[0]);
+                Ok(match (cycle, c.pubkey.to_bytes()[0]) {
+                    (0, 1) => Attempt::Deferred,
+                    (0, _) => Attempt::Unconfirmed { signature: "sig".into() },
+                    _ => Attempt::Idle { cu: 0 },
+                })
+            });
+            if cycle == 0 {
+                assert_eq!((s.idle, s.failed, s.budget_deferred, s.unconfirmed.len()), (0, 0, 1, 1));
+                assert_eq!(s.idle_pending_stuck, 0);
+            }
+        }
+        // pk(1) was deferred in cycle 0, so it is still first in cycle 1.
+        assert_eq!(order, vec![1, 2, 1, 2]);
     }
 
     /// Audit finding: position cursors broke when class membership changed.

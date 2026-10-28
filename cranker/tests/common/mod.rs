@@ -91,9 +91,38 @@ pub fn skip(test: &str) {
 /// they only need the RPC endpoint + program id, then create the market
 /// themselves. Returns `None` (skip) when either var is missing.
 /// Validator tests send transactions: refuse anything but a local RPC.
+/// Parses the authority and compares the exact host; userinfo (`a@b`) is
+/// rejected so `http://127.0.0.1@remote/` can't pass.
 fn local_rpc(url: &str) -> bool {
-    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).unwrap_or("");
-    rest.starts_with("127.0.0.1") || rest.starts_with("localhost") || rest.starts_with("[::1]")
+    let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split(']').next().map(|h| format!("[{h}]")).unwrap_or_default()
+    } else {
+        authority.split(':').next().unwrap_or("").to_string()
+    };
+    matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]")
+}
+
+#[test]
+fn local_rpc_guard_parses_the_host() {
+    for ok in ["http://127.0.0.1:8899", "http://localhost:8899/", "http://[::1]:8899"] {
+        assert!(local_rpc(ok), "{ok}");
+    }
+    for bad in [
+        "http://localhost.example.com:8899",
+        "http://127.0.0.1@remote.example:8899",
+        "https://localhost@remote.example.invalid:8899",
+        "http://127.0.0.1.evil:8899",
+        "ftp://127.0.0.1",
+    ] {
+        assert!(!local_rpc(bad), "{bad}");
+    }
 }
 
 pub fn rpc_and_program_from_env() -> Option<(RpcClient, Pubkey)> {

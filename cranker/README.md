@@ -47,9 +47,11 @@ Env vars:
     reserves its full compute-unit limit (1.4M) up front, then is settled
     to the whole-tx CU measured from its logs. A tx is counted once it
     begins, whatever its outcome. The wall clock is an *admission*
-    deadline: no tx is sent after it, but a tx already sent waits for its
-    confirmation (bounded by blockhash expiry, about a minute), so a cycle
-    can overrun by at most that one in-flight confirmation.
+    deadline: no tx is sent after it. It does not bound RPC calls already in
+    progress: a tx already sent waits for the client's confirmation, which
+    normally ends at blockhash expiry (about a minute) but can last longer if
+    the validator stops advancing. A tx whose fate stays unknown is reported
+    as `unconfirmed`, never as a failure of the account.
   - **When it runs out**, the rest of the queue is deferred, and rotation
     reaches it first next cycle.
 * `CRANKER_ATTEMPT_MAX_TX` (default `4`): the most txs one account may use
