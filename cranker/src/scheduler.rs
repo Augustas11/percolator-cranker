@@ -394,11 +394,18 @@ where
         // An unsettled tx (the closure bailed mid-tx) keeps its whole
         // reservation charged: the meter was debited in `begin_tx`.
         let result = submit(&cand, &mut ab);
-        let unconfirmed = std::mem::take(&mut ab.unconfirmed);
+        let mut unconfirmed = std::mem::take(&mut ab.unconfirmed);
         let attempt = result.unwrap_or_else(|e| Attempt::Failed {
             error: format!("Rpc: {e}"),
             cu: 0,
         });
+        // A callback may report an unknown tx through the outcome, the budget
+        // note, or both: merge them, once each.
+        if let Attempt::Unconfirmed { signature } = &attempt {
+            if !unconfirmed.contains(signature) {
+                unconfirmed.push(signature.clone());
+            }
+        }
         let sent = txs_before - meter.txs_left;
         used[c] += sent;
         s.txs += sent;
@@ -604,27 +611,45 @@ mod tests {
             let mut a = cand(pk(1), Priority::Quiet);
             a.pending_work = true;
             let cands = vec![a, cand(pk(2), Priority::Quiet)];
-            let s = run(cycle, cands, &budget, &mut q, |c, ab| {
+            let s = run(cycle, cands, &budget, &mut q, |c, _| {
                 order.push(c.pubkey.to_bytes()[0]);
-                Ok(match (cycle, c.pubkey.to_bytes()[0]) {
-                    (0, 2) => {
-                        ab.note_unconfirmed("sig".into());
-                        Attempt::Unconfirmed { signature: "sig".into() }
-                    }
-                    (0, _) => Attempt::Deferred,
+                Ok(match cycle {
+                    0 => Attempt::Deferred,
                     _ => Attempt::Idle { cu: 0 },
                 })
             });
             if cycle == 0 {
-                // pk(2) (Unconfirmed) goes first only if pk(1) was deferred
-                // in a *previous* cycle; here pk(1) is first and defers, which
-                // ends the cycle: pk(2) is counted as deferred, not run.
+                // pk(1) defers, which ends the cycle: pk(2) is counted as
+                // deferred, not run.
                 assert_eq!((s.idle, s.failed, s.budget_deferred, s.unconfirmed.len()), (0, 0, 2, 0));
                 assert_eq!(s.idle_pending_stuck, 0);
             }
         }
         // pk(1) deferred in cycle 0 and ended it; it is still first in cycle 1.
         assert_eq!(order, vec![1, 1, 2]);
+    }
+
+    /// Re-audit finding: a standalone Unconfirmed outcome (no budget note)
+    /// must still be reported once, and must not touch account health.
+    #[test]
+    fn standalone_unconfirmed_is_reported_and_neutral() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let budget = CycleBudget { idle_stuck_cycles: 1, ..CycleBudget::default() };
+        let mut a = cand(pk(1), Priority::Pending);
+        a.pending_work = true;
+        let s = run(0, vec![a.clone(), cand(pk(2), Priority::Pending)], &budget, &mut q, |c, ab| {
+            Ok(if c.pubkey == pk(1) {
+                Attempt::Unconfirmed { signature: "only-outcome".into() }
+            } else {
+                ab.note_unconfirmed("both".into());
+                Attempt::Unconfirmed { signature: "both".into() }
+            })
+        });
+        assert_eq!(
+            s.unconfirmed,
+            vec![(pk(1), "only-outcome".to_string()), (pk(2), "both".to_string())]
+        );
+        assert_eq!((s.idle, s.failed, s.idle_pending_stuck), (0, 0, 0));
     }
 
     /// Re-audit finding: an unconfirmed tail after earlier drain progress
