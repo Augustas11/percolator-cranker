@@ -6,7 +6,9 @@
 #
 # Knobs (env): CRANKER_SCENARIO_SEED, CRANKER_SCENARIO_TRADERS (40),
 # CRANKER_SCENARIO_ASSETS (3), CRANKER_CYCLES (200), PERCOLATOR_PROGRAM_ID
-# (defaults to the SBF keypair id), CRANKER_CYCLE_MS, CRANKER_CYCLE_MAX_TX.
+# (defaults to the SBF keypair id), CRANKER_CYCLE_MS, CRANKER_CYCLE_MAX_TX,
+# CRANKER_SCENARIO_RUN (default 0). Keys derive from (seed, run), so on a
+# reused ledger give every run a new CRANKER_SCENARIO_RUN.
 #
 # Usage: ./scripts/live_shaped.sh 2>&1 | tee live-shaped-run.log
 

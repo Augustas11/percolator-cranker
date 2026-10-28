@@ -62,6 +62,8 @@ pub fn leg_f_settled(basis_pos_q: i128, a_basis: u128, f_snap: i128, f_target: i
     let Some(num) = basis_pos_q.unsigned_abs().checked_mul(gap as u128) else {
         return false;
     };
+    // Overflowing denominator: the true value exceeds u128::MAX >= num, so
+    // floor(num / den) is exactly 0. Settled is the exact answer, not a guess.
     let Some(den) = a_basis.checked_mul(POS_SCALE) else {
         return true;
     };

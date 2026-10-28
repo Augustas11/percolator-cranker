@@ -2675,6 +2675,7 @@ dependencies = [
  "bytemuck",
  "percolator",
  "percolator-prog",
+ "serde_json",
  "solana-account-decoder",
  "solana-client",
  "solana-program 1.18.26",
