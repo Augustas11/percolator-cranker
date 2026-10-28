@@ -32,3 +32,6 @@ Thumbs.db
 
 # --- Step B pre-merge preview worktrees + crate copy (scripts/preview_launch_fixes.sh) ---
 /.preview/
+
+# --- R2 local staging runs (scripts/staging_local.sh): ledger, logs, generated payer key ---
+/.staging-runs/

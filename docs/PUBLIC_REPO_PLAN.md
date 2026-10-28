@@ -1,8 +1,11 @@
 # Public repo plan (R1)
 
-Status: the export script and the leak helper are done and green. The exported tree
-builds and tests on its own, including bring-up and a dry run on a local
-validator. Waiting on the owner for the decisions at the bottom.
+Status: **released.** https://github.com/Augustas11/drip is public, with
+private vulnerability reporting on. Its one initial commit `ae8845f` is the
+export of private `050b0b2`. CI was green there, including e2e by
+dispatch, and `v0.1.0` is tagged
+(https://github.com/Augustas11/drip/releases/tag/v0.1.0). This repo stays
+the code home: drip is updated only by re-running the export.
 
 This private repo (`percolator-cranker`) is never made public. The public
 release is a **new repository** with one fresh initial commit, produced by an
@@ -163,6 +166,9 @@ wrapper checkout, the bring-up crate and the keeper manifest.
 
 ## Release checklist (after the owner creates the repo)
 
+Done for v0.1.0 on 2026-10-28. Later releases repeat steps 2 to 6 on the
+existing repo.
+
 1. The owner creates `Augustas11/drip` (empty) and, in Settings →
    Security, enables **Private vulnerability reporting**. `SECURITY.md`
    points there.
@@ -205,27 +211,21 @@ wrapper checkout, the bring-up crate and the keeper manifest.
   shapes, home paths, emails, and any denylisted handle, repo name or tool
   name. The owner's read before the first push is required.
 
-## Sync model after v0.1.0 (proposal; owner decides)
+## Sync model (owner decision, 2026-10-28)
 
-The public repo becomes the **code home**. This private repo keeps ops,
-strategy, `prep.md` and the watcher outputs, and consumes the public crates
-as a git dependency pinned by tag. Code changes land in public first; this
-repo only bumps the tag. Until the owner decides, code stays here and each
-release is a fresh export (one commit per release, no shared history).
+This private repo stays the **code home**. drip is updated only by
+re-running the export, as one new commit per release; there is no shared
+history.
 
-## Owner decisions needed
+## Owner decisions still open
 
-Name, license and security contact are decided (see the top of this
-file).
+Name, license, security contact, repo creation and the sync model are
+decided (see above).
 
-1. **Repo creation**: you create it and give this session push access.
-   This session never creates repos or changes visibility.
-2. **Sync model**: confirm "public becomes the code home after v0.1.0", or
-   keep export-per-release.
-3. **Oracle-provider names in code comments**: Pyth, Switchboard and
+1. **Oracle-provider names in code comments**: Pyth, Switchboard and
    Chainlink appear because the wrapper supports them. They are protocol
    dependencies, not competing tools, so they are **not** on the denylist.
    Say if you want them generic.
-4. **Known-issue wording**: the public README describes the unreferenced
+2. **Known-issue wording**: the public README describes the unreferenced
    lapsed-backing wedge without naming upstream PRs. Posting it upstream
    stays your call.

@@ -559,7 +559,7 @@ targets):
       and M2.f will be written against current guard semantics
       (no false-green risk).
 
-### R1. Public reference release (new repo): plain keeper only. **Export ready 2026-10-28; waiting on owner.**
+### R1. Public reference release (new repo): plain keeper only. **DONE 2026-10-28: published as `Augustas11/drip` v0.1.0.**
 - [x] Scope (owner decision): keeper core, decoding, tx builders, quarantine
       and budget, docs, CI. The operator stack stays private: staging,
       bots, matcher, backing manager, playbook, devnet and hosting scripts,
@@ -569,12 +569,36 @@ targets):
 - [x] Allowlist export plus a simple leak helper (owner decision: the
       helper is advisory, not a security boundary). The private denylist
       (`scripts/public_denylist.txt`) is never exported.
-- [ ] Owner reads the exported tree before the first push (required).
+- [x] Owner reads the exported tree before the first push (required).
 - [x] Same CI file in both repos (layout-neutral via `scripts/env.sh`).
-- [ ] Owner decisions: public name, LICENSE (Apache-2.0 proposed),
-      security contact, repo creation and push access, sync model.
-- [ ] Push a single commit to the owner-created repo. Tag `v0.1.0` once CI
-      there is green.
+- [x] Owner decisions: name `drip`, Apache-2.0, GitHub private
+      vulnerability reporting. The keeper crate and binary are renamed
+      `drip` in this repo.
+- [x] Published: https://github.com/Augustas11/drip, one initial commit
+      `ae8845f` (the export of private `050b0b2`); CI green there,
+      including e2e by dispatch; tag `v0.1.0`.
+- Sync model: this repo stays the code home; drip is updated only by
+      re-running the export.
+
+### R2. Local staging market as an operator rehearsal (private). Reference / dry-run only; not a paid live service; M3 NO-GO.
+- [x] `staging/` crate: one SOL-PERP market (SOL/USD on AuthMark, test USDC
+      collateral); price pusher (swappable `mock_sol_usd` source), LP
+      matcher (the only LP, 10 SOL cap), backing manager (roll before
+      expiry), insurance and the real keeper cycle as bots; once per run
+      SOL goes Live -> Recovery (SHUTDOWN) -> Resolved -> relisted; JSON
+      summary and an exit code (`docs/STAGING.md`).
+- [x] `scripts/staging_local.sh` (own validator on 8799, run dir
+      `.staging-runs/`); 10-minute smoke run passes.
+- [ ] Owner's 6-hour unattended run exits 0.
+- [x] `docs/OPERATOR_PLAYBOOK.md` (roles, SOL-PERP parameters and reasoning,
+      bots, runbook, operator income).
+- [x] `scripts/staging_devnet_deploy.sh` (SOL-PERP, test USDC mint, Pyth
+      SOL/USD feed id as a parameter; prints steps, `--yes` to act, refuses
+      mainnet), `scripts/staging_usdc_faucet.sh`, and
+      `deploy/systemd/percolator-staging@.service`. Nothing deployed; neither
+      devnet script has been run.
+- [ ] Later option: Pyth SOL/USD read in the pusher on devnet; a direct Pyth
+      (Hybrid) profile.
 
 ### M3. Pre-deployment readiness (only relevant once devnet deployment appears)
 - [ ] Real keeper portfolio funded on the target chain.

@@ -365,7 +365,7 @@ pub fn mint_to(
     Ok(())
 }
 
-fn create_portfolio(
+pub fn create_portfolio(
     rpc: &RpcClient,
     payer: &Keypair,
     owner: &Keypair,

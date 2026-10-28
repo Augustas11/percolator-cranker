@@ -288,7 +288,8 @@ pub fn run_one_cycle(
         });
     }
 
-    let summary = scheduler::run_cycle(cycle, now_slot, started, candidates, budget, quarantine, |c, ab| {
+    let mut drain_rpc_errors = Vec::new();
+    let mut summary = scheduler::run_cycle(cycle, now_slot, started, candidates, budget, quarantine, |c, ab| {
         let (route, hints) = match plans.get(&c.pubkey) {
             Some(Plan::Submit { route_owner: None, hints }) => (
                 CrankRoute::Live {
@@ -382,6 +383,9 @@ pub fn run_one_cycle(
             }
         }
         let attempt = attempt_from(&outcomes, rpc_error.as_deref(), interrupt.as_ref());
+        if let (Some(e), Attempt::Progress { .. }) = (&rpc_error, &attempt) {
+            drain_rpc_errors.push((c.pubkey, e.clone()));
+        }
         for o in outcomes {
             records.push(SubmissionRecord {
                 cycle,
@@ -392,6 +396,7 @@ pub fn run_one_cycle(
         }
         Ok(attempt)
     });
+    summary.drain_rpc_errors = drain_rpc_errors;
     Ok(summary)
 }
 
