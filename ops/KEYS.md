@@ -46,6 +46,8 @@ Rules:
      `UpdateAuthority` moves `marketauth` to the vault **last**. The new key
      must co-sign (playbook: `P 14418-14435`); confirm that a Squads vault
      can co-sign that transaction.
+   - **Chosen: option 2**, with a fresh launch key per launch (below,
+     "Launch key"); `scripts/launch_market.sh` automates it.
 5. Fund the multisig (see `OWNER_ACTIONS.md`), then hot wallets from it
    with ≤ 3 days of SOL each.
 6. Fill in the public keys in the launch config. `scripts/launch_market.sh`
@@ -59,6 +61,29 @@ Rules:
 that still equals the old `marketauth` (playbook: `P 11978-11992`). Move
 oracle, operator, backing, insurance and admin with `UpdateAssetAuthority`
 **first**, and rotate `marketauth` **last**.
+
+### Launch key: the one exception (option 2, owner decision)
+
+A **launch key** holds `marketauth` and every asset 0 role, but only during
+the launch window: from the one transaction that creates and inits the
+market until the `handover` step lands (`docs/LAUNCH.md`). It is the only
+key that ever holds market authority outside the multisig.
+
+- **Why:** create + `InitMarket` must be one transaction, or anyone can
+  init our account first; the Squads vault cannot sign that transaction.
+- **Risk:** while it holds the roles, whoever has it controls the market
+  (prices, insurance, backing, resolve).
+- **Limits:** a fresh key per launch (`keys/launch_authority.json`,
+  `solana-keygen` on the launch host, never reused); it lives only on the
+  launch host; there is no exposure before the handover (no external
+  traders, launch capital only); it is destroyed once `staging roles` shows
+  it holds nothing.
+- **Handover fails or stalls:** the launch key still holds everything. Keep
+  it offline and re-run the handover. Do not open the market meanwhile.
+- **Launch key compromised before the handover:** move the matcher to stop,
+  `ResolveMarket` with the launch key (it is still `marketauth`), withdraw
+  what can be withdrawn, and start a fresh launch with a new key and a new
+  market. Do not try to race the attacker with role changes.
 
 ## Rotation (routine)
 

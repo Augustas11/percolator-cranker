@@ -43,23 +43,29 @@ scripts/launch_market.sh stop <cluster>                 # stops bots + monitor
 
 | # | Step | What | Signer |
 |---|---|---|---|
-| 1 | `init-market` | test mint (if `create`), token accounts, market account, vault, `InitMarket` | authority |
-| 2 | `oracle` | `ConfigurePermissionlessResolve` + `ConfigureAuthMark`, one tx | authority |
-| 3 | `insurance` | `TopUpInsurance` seed | authority |
-| 4 | `backing` | `TopUpBackingBucket` on domains 0 and 1, one tx | authority |
+| 1 | `init-market` | test mint (if `create`), token accounts; market account + `InitMarket` in ONE tx; vault | payer, market key, launch key |
+| 2 | `oracle` | `ConfigurePermissionlessResolve` + `ConfigureAuthMark`, one tx | launch key |
+| 3 | `insurance` | `TopUpInsurance` seed | launch key |
+| 4 | `backing` | `TopUpBackingBucket` on domains 0 and 1, one tx | launch key |
 | 5 | `lp` | LP portfolio + deposit; test-trader portfolio + deposit (not mainnet). The matcher is off-chain (co-signed `TradeNoCpi`), so it has no on-chain config | LP, trader |
-| 6 | start bots | `staging bots` (pusher, matcher, backing, insurance, keeper) and the monitor, in the background with logs and pid files | hot keys |
-| 7 | health | a clean keeper cycle, a fill, the mark lag, and this launch's monitor (its market, a snapshot under 30 s old, process alive) sane: chain read, Live, keeper log read, 2 portfolios, 2 fresh buckets, no senior shortfall | — |
+| 6 | `handover` | asset-0 roles to their holders (`UpdateAssetAuthority`: oracle, insurance operator, backing, insurance, asset admin), then `marketauth` to the multisig (`UpdateAuthority`) last; each new holder co-signs; verified on chain | launch key + each new holder |
+| 7 | start bots | `staging bots` (pusher, matcher, backing, insurance, keeper) and the monitor, in the background with logs and pid files | hot keys |
+| 8 | health | the on-chain role table (below), a clean keeper cycle, a fill, the mark lag, and this launch's monitor (its market, a snapshot under 30 s old, process alive) sane: chain read, Live, keeper log read, 2 portfolios, 2 fresh buckets, no senior shortfall | — |
 
-Steps 1-5 are `staging step <name> <config> <cluster> <run dir>`: the R2
+Steps 1-6 are `staging step <name> <config> <cluster> <run dir>`: the R2
 setup code (`staging/src/main.rs`), split into steps (`staging/src/launch.rs`).
-The authority holds every asset role at `InitMarket`.
+The launch key (local and devnet: `keys/admin.json`; mainnet: a fresh
+`keys/launch_authority.json`) holds marketauth and every asset role from
+create + init until the handover. `staging roles` prints the on-chain table
+and fails unless every role is with its holder and none with the launch key.
 
 **Run dir** `launch-runs/<cluster>/` (gitignored; `LAUNCH_RUN_DIR`
 overrides): `state.json` (program id, mint, market, portfolios, completed
 steps), `keys/` (generated on local and devnet; on mainnet the owner places
-the hot `payer.json` and `lp.json`), `unsigned/`, `bots.log`, `monitor.log`,
-`pids/`, `timings.txt`.
+the hot `payer.json` and `lp.json`), `handover/` (mainnet), `bots.log`,
+`monitor.log`, `pids/`, `timings.txt`. A run dir whose handover is done
+refuses further setup steps. The drill and `staging_local.sh` delete the
+validator ledger at exit unless `KEEP_LEDGER=1`.
 
 **Resume.** Re-run the same command. Completed steps are skipped (state
 file); the failed one is retried. Each step also checks the chain first:
@@ -81,27 +87,55 @@ and an RPC whose genesis is mainnet's; local and devnet refuse an RPC whose
 genesis is mainnet's. Fee shares, bounty paths and the keeper's withdrawal
 test stay off. Never run devnet or mainnet from an agent session.
 
-## Mainnet and the multisig
+## Mainnet: launch key, then hand over
 
-On mainnet the Squads vault (`multisig_vault`, 2-of-3, `ops/KEYS.md`) is the
-market authority (option 1 in `ops/KEYS.md`: `InitMarket` signed by the
-vault). Every authority transaction is **not signed**: the step writes it
-to `unsigned/<label>.b58` (base58 bincode, vault as signer and fee payer, no
-compute-budget instructions) with a `README.md`, prints how to resume, and
-exits 10. After the multisig executes it, the same command sees it on chain
-and goes on. Rounds: `InitMarket`, oracle, insurance, backing (4); the LP
-deposit is signed by the hot LP key. No Squads SDK.
+Option A (owner decision; `ops/KEYS.md`, "Launch key"). A fresh launch key
+signs steps 1-5 locally, as on local and devnet: create + `InitMarket` in
+one transaction (nobody can initialize our account in between; an existing
+market is accepted only with our launch key as marketauth and our mint,
+else "market taken"), then the policies, insurance, backing and LP. Before
+steps 3-4 the owner funds the launch key's USDC account with the insurance
+seed and backing (`CAPITAL_PLAN.md`).
 
-*To verify on devnet before Day 0:* Squads import of these files, that the
-wrapper accepts the vault as signer through Squads' CPI, and the execute
-transaction's compute limit (1.4M) and heap frame (128 KiB).
+Step 6, `handover`, follows the split order in `ops/KEYS.md`. Each role
+change needs the NEW holder's signature (the wrapper's
+`expect_incoming_authority`). On local and devnet the holders' keys are
+generated in `keys/` (marketauth goes to a stand-in `keys/multisig.json`) and
+everything is sent. On mainnet the holders are `[cluster.mainnet.roles]` and
+`multisig_vault` (public keys), and the step writes `handover/`:
 
-Not automated, so mainnet stops after step 5 with a note:
+- `01`-`05-<role>.b58`: `UpdateAssetAuthority`, already signed by the payer
+  and the launch key, each on its own durable nonce (authority: the launch
+  key; `AdvanceNonceAccount` first), so it does not expire while a hardware
+  wallet or Squads co-signs;
+- `06-marketauth.b58`: `UpdateAuthority` for a Squads vault transaction
+  (vault co-signs as the new marketauth; the launch key must also sign the
+  execute);
+- `README.md`: who co-signs each, and the order (each binds the next
+  authority epoch).
 
-- **Role split** (`UpdateAssetAuthority`: oracle to the pusher key, etc.,
-  `ops/KEYS.md` "split order"). The incoming key must co-sign, so it is a
-  multisig + hot-key procedure, not a script step. Until then the vault holds
-  the oracle role and no bot can push. `staging bots` refuses mainnet.
+It exits 10; re-running checks the chain, rewrites what is still pending,
+and completes only when the role table is clean. Bots refuse to start until
+then (on every cluster), and use only role keys that hold their role on
+chain: the pusher's `keys/oracle_authority.json` is required; backing and
+insurance run only where their key is (not on mainnet, where those are
+hardware wallets and the vault).
+
+Rehearsed locally with `LAUNCH_REHEARSE_MAINNET_PATH=1` (the mainnet code
+path on a non-mainnet chain; refused on mainnet's genesis): the five role
+files co-signed and landed, the marketauth one signed by a stand-in vault key
+and the launch key, the table came out clean, bots started with only the
+pusher key, a re-used market key was refused as "market taken", and a
+handed-over run dir refused further steps.
+
+*To verify on devnet before Day 0* (same flag): Squads import and execute
+of `06-marketauth.b58` with the launch key as an extra signer; hardware
+wallet co-signing of a pre-signed durable-nonce transaction (tooling);
+`insurance_authority` held by the vault co-signing through a vault
+transaction.
+
+Not automated:
+
 - **A matcher for external takers.** Our matcher is the rehearsal one: LP and
   our own test trader co-sign `TradeNoCpi`. Serving outside takers needs a
   `TradeCpi` matcher (upstream's `auth_matcher` fixture is the candidate,
@@ -158,8 +192,9 @@ scripts/day0_drill.sh            # DRILL_SKIP_SBF_BUILD=1 reuses the .so
 
 A fresh validator (port 8699), the wrapper deployed with `solana program
 deploy` to a newly generated program id ("upstream publishes a program ID"),
-that id written into a temp copy of the config, `launch_market.sh` on local,
-per-step and total times printed, everything stopped. Measured times: see
+that id written into a temp copy of the config, `launch_market.sh` on local
+(handover included), per-step and total times printed, everything stopped,
+the ledger deleted (`KEEP_LEDGER=1` keeps it). Measured times: see
 `prep.md`, "Day-0 drill".
 
 **Finding (keeper, not changed here):** drip's canonical Pyth PDA

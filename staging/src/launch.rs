@@ -7,16 +7,22 @@ use crate::{Phase, Staging};
 use anyhow::{anyhow, bail, Context, Result};
 use drip::{cycle::SubmissionRecord, setup, submit::CrankOutcome};
 use percolator::MAX_VAULT_TVL;
-use percolator_prog::{ix::Instruction as P, oracle_v16, state::read_portfolio};
+use percolator_prog::{
+    ix::Instruction as P,
+    oracle_v16,
+    processor::{ASSET_AUTH_ADMIN, ASSET_AUTH_BACKING_BUCKET, ASSET_AUTH_INSURANCE, ASSET_AUTH_INSURANCE_OPERATOR, ASSET_AUTH_ORACLE},
+    state::{read_asset_oracle_profile, read_market, read_portfolio, AssetOracleProfileV16},
+};
 use percolator::BackingBucketStatusV16 as Bucket;
 use serde::{Deserialize, Serialize};
-use solana_client::rpc_client::RpcClient;
+use solana_client::{nonce_utils, rpc_client::RpcClient};
 use solana_sdk::{
     bs58,
     commitment_config::CommitmentConfig,
-    instruction::Instruction,
+    instruction::{AccountMeta, Instruction},
     message::Message,
     pubkey::Pubkey,
+    system_instruction,
     signature::{read_keypair_file, write_keypair_file, Keypair, Signer},
     transaction::Transaction,
 };
@@ -61,6 +67,10 @@ pub struct ClusterCfg {
     pub price_source: String,
     #[serde(default)]
     pub multisig_vault: String,
+    /// Mainnet: the asset-0 role holders the `handover` step moves to
+    /// (public keys, ops/KEYS.md). Local and devnet generate them in keys/.
+    #[serde(default)]
+    pub roles: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -212,49 +222,180 @@ pub fn pyth_sol_usd(rpc: &RpcClient, feed: &[u8; 32], o: &OracleCfg) -> Result<(
     Ok((e6, t as u64 * 1000))
 }
 
-// ------------------------------------------------------------ multisig
+// ------------------------------------------------------------ handover
 
-/// Marks a step that stopped on an unsigned multisig transaction.
+/// Marks the handover step waiting for co-signatures (exit 10).
 #[derive(Debug)]
 struct Pending(PathBuf);
 impl std::fmt::Display for Pending {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "waiting for the multisig: {}", self.0.display())
+        write!(f, "waiting for co-signatures: {}", self.0.display())
     }
 }
 impl std::error::Error for Pending {}
 
-const UNSIGNED_README: &str = "# Unsigned authority transactions
+/// Asset-0 roles in ops/KEYS.md's split order (marketauth goes last); the
+/// name is the config key under `[cluster.<name>.roles]` and the keys/ file.
+const ROLES: [(&str, u8); 5] = [
+    ("oracle_authority", ASSET_AUTH_ORACLE),
+    ("insurance_operator", ASSET_AUTH_INSURANCE_OPERATOR),
+    ("backing_bucket_authority", ASSET_AUTH_BACKING_BUCKET),
+    ("insurance_authority", ASSET_AUTH_INSURANCE),
+    ("asset_admin", ASSET_AUTH_ADMIN),
+];
+
+const HANDOVER_README: &str = "# Handover transactions (mainnet)
 
 Reference / dry-run only; not a paid live service; M3 NO-GO.
 
-Each `.b58` file is one legacy transaction, bincode-serialized and base58
-encoded, unsigned, with the Squads vault as its only signer and fee payer.
-`scripts/launch_market.sh` writes one when a step needs the market
-authority, then stops. To land it:
+The launch key holds marketauth and every asset-0 role until these land
+(ops/KEYS.md, \"Launch key\"). Land them IN FILE ORDER: each binds the next
+authority epoch. Every file is base58 bincode of one legacy transaction.
 
-1. Squads app -> the vault -> transaction builder -> import from base58;
-   paste the file. Check the program id and accounts against
-   `launch/sol-perp.toml` and the step named in the file name.
-2. Set the execute transaction's compute limit to 1,400,000 and its heap
-   frame to 128 KiB (the wrapper needs both; budget instructions cannot sit
-   inside the vault transaction). *To verify* on devnet first.
-3. Two signers approve; execute.
-4. Re-run the same `launch_market.sh` command. It sees the change on chain,
-   marks the step done and goes on (it may stop again at the next one).
+- `NN-<role>.b58` (UpdateAssetAuthority, tag 65): already signed by the fee
+  payer and the launch key, on a durable nonce (it does not expire). The NEW
+  holder named in the file adds its signature (hardware wallet for
+  insurance_operator, backing_bucket_authority, asset_admin; the pusher host
+  key for oracle_authority; the Squads vault for insurance_authority, as a
+  vault transaction), then anyone submits it.
+- `06-marketauth.b58` (UpdateAuthority, tag 32): unsigned, the Squads vault
+  as payer. Import into Squads as a vault transaction; the vault co-signs as
+  the new marketauth and the LAUNCH KEY must also sign the execute
+  transaction (it is the current marketauth). *To verify on devnet.*
 
-A file older than its step's on-chain state is stale: re-running rewrites it.
+Then re-run the same launch_market.sh command: it checks the chain, rewrites
+what is still pending, and finishes only when the role table is clean.
 ";
 
-pub fn write_unsigned(rpc: &RpcClient, run: &Path, label: &str, vault: Pubkey, ixs: &[Instruction]) -> Result<()> {
-    let bh = rpc.get_latest_blockhash()?;
-    let tx = Transaction::new_unsigned(Message::new_with_blockhash(ixs, Some(&vault), &bh));
-    let dir = run.join("unsigned");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("README.md"), UNSIGNED_README)?;
-    let file = dir.join(format!("{label}.b58"));
-    std::fs::write(&file, bs58::encode(bincode::serialize(&tx)?).into_string())?;
-    Err(Pending(file).into())
+fn holder(p: &AssetOracleProfileV16, kind: u8) -> [u8; 32] {
+    match kind {
+        ASSET_AUTH_ORACLE => p.oracle_authority,
+        ASSET_AUTH_INSURANCE_OPERATOR => p.insurance_operator,
+        ASSET_AUTH_BACKING_BUCKET => p.backing_bucket_authority,
+        ASSET_AUTH_INSURANCE => p.insurance_authority,
+        _ => p.asset_admin,
+    }
+}
+
+/// Where each role must end: the 5 asset roles, then marketauth (the Squads
+/// vault; local and devnet: a generated stand-in key, keys/multisig.json).
+fn targets(st: &Staging, cluster: &str, run: &Path) -> Result<Vec<(&'static str, Pubkey)>> {
+    let c = &st.cfg.cluster[cluster];
+    let pk = |name: &str, v: Option<&String>| -> Result<Pubkey> {
+        match cluster {
+            "mainnet" => Pubkey::from_str(v.map(String::as_str).unwrap_or(""))
+                .with_context(|| format!("[cluster.mainnet] {name} must be a public key")),
+            _ => Ok(key(run, name, true)?.pubkey()),
+        }
+    };
+    let mut out = Vec::new();
+    for (name, _) in ROLES {
+        out.push((name, pk(name, c.roles.get(name))?));
+    }
+    let vault = if cluster == "mainnet" { pk("multisig_vault", Some(&c.multisig_vault))? } else { pk("multisig", None)? };
+    out.push(("marketauth", vault));
+    Ok(out)
+}
+
+/// The on-chain role table against the targets. Ok only when every holder
+/// is its target and none is the launch (bootstrap admin) key.
+pub fn verify_roles(st: &Staging, cluster: &str, run: &Path) -> Result<()> {
+    let data = st.rpc.get_account_data(&st.market)?;
+    let (cfg, _) = read_market(&data).map_err(|e| anyhow!("read_market: {e:?}"))?;
+    let p = read_asset_oracle_profile(&data, 0).map_err(|e| anyhow!("oracle profile: {e:?}"))?;
+    let launch = st.admin.pubkey();
+    let mut bad = 0;
+    println!("{:<26} {:<45} ok", "role", "holder (on chain)");
+    for ((name, want), kind) in targets(st, cluster, run)?.into_iter().zip(ROLES.iter().map(Some).chain([None])) {
+        let got = Pubkey::new_from_array(kind.map_or(cfg.marketauth, |(_, k)| holder(&p, *k)));
+        let ok = got == want && got != launch;
+        bad += usize::from(!ok);
+        println!("{name:<26} {got:<45} {}", if ok { "yes".into() } else { format!("NO (want {want})") });
+    }
+    if bad > 0 {
+        bail!("{bad} role(s) not handed over; launch key {launch}");
+    }
+    Ok(())
+}
+
+/// Mainnet: one role change, partially signed (payer + launch key) on its
+/// own durable nonce, written for the new holder to co-sign.
+fn write_role_tx(st: &Staging, run: &Path, file: &Path, nonce_name: &str, ix: Instruction) -> Result<()> {
+    let nonce = key(run, nonce_name, true)?;
+    if !st.exists(&nonce.pubkey())? {
+        let rent = st.rpc.get_minimum_balance_for_rent_exemption(solana_sdk::nonce::State::size())?;
+        let ixs = system_instruction::create_nonce_account(&st.payer.pubkey(), &nonce.pubkey(), &st.admin.pubkey(), rent);
+        let bh = st.rpc.get_latest_blockhash()?;
+        let tx = Transaction::new_signed_with_payer(&ixs, Some(&st.payer.pubkey()), &[&st.payer, &nonce], bh);
+        st.rpc.send_and_confirm_transaction(&tx).context("create nonce account")?;
+    }
+    let hash = nonce_utils::data_from_account(&st.rpc.get_account(&nonce.pubkey())?)?.blockhash();
+    let ixs = [system_instruction::advance_nonce_account(&nonce.pubkey(), &st.admin.pubkey()), ix];
+    let mut tx = Transaction::new_with_payer(&ixs, Some(&st.payer.pubkey()));
+    tx.partial_sign(&[&st.payer, &st.admin], hash);
+    std::fs::write(file, bs58::encode(bincode::serialize(&tx)?).into_string())?;
+    Ok(())
+}
+
+/// The handover: asset-0 roles first, marketauth last (ops/KEYS.md split
+/// order). Each change needs the new holder's co-signature (the wrapper's
+/// `expect_incoming_authority`). Local/devnet: generated keys sign here.
+/// Mainnet: written to `<run>/handover/` and the step stops (exit 10).
+fn handover(st: &Staging, run: &Path, cluster: &str) -> Result<()> {
+    let mainnet = cluster == "mainnet";
+    let t = targets(st, cluster, run)?;
+    if !mainnet && st.own_mint {
+        // The bots' backing and insurance keys fund top-ups from their own
+        // token accounts once they hold the roles.
+        for (_, holder) in &t[2..4] {
+            let ata = spl_associated_token_account::get_associated_token_address(holder, &st.mint);
+            if !st.exists(&ata)? {
+                setup::create_ata(&st.rpc, &st.payer, holder, &st.mint)?;
+                setup::mint_to(&st.rpc, &st.payer, &st.mint, &ata, &st.payer, st.cfg.amounts.authority_test_mint / 2)?;
+            }
+        }
+    }
+    let dir = run.join("handover");
+    if mainnet {
+        std::fs::create_dir_all(&dir)?;
+    }
+    let (data, g, s) = st.read()?;
+    let p = read_asset_oracle_profile(&data, 0).map_err(|e| anyhow!("oracle profile: {e:?}"))?;
+    let (mut epoch, mut pending) = (s.authority_epoch, false);
+    let metas = |new: &Pubkey| {
+        vec![AccountMeta::new(st.admin.pubkey(), true), AccountMeta::new(*new, true), AccountMeta::new(st.market, false)]
+    };
+    for (i, ((name, kind), (_, new))) in ROLES.iter().zip(&t).enumerate() {
+        if holder(&p, *kind) == new.to_bytes() {
+            continue;
+        }
+        let ix = P::UpdateAssetAuthority { asset_index: 0, market_id: g.assets[0].market_id, authority_epoch: epoch, kind: *kind, new_pubkey: new.to_bytes() };
+        let ix = st.prog_ix(ix, metas(new));
+        if mainnet {
+            write_role_tx(st, run, &dir.join(format!("{:02}-{name}.b58", i + 1)), &format!("nonce_{name}"), ix)?;
+            pending = true;
+        } else {
+            st.send(&[ix], &[&st.admin, &key(run, name, false)?]).with_context(|| format!("UpdateAssetAuthority {name}"))?;
+        }
+        epoch += 1;
+    }
+    let vault = t[5].1;
+    let (cfg, _) = read_market(&data).map_err(|e| anyhow!("read_market: {e:?}"))?;
+    if cfg.marketauth != vault.to_bytes() {
+        let ix = st.prog_ix(P::UpdateAuthority { authority_epoch: epoch, new_pubkey: vault.to_bytes() }, metas(&vault));
+        if mainnet {
+            let tx = Transaction::new_unsigned(Message::new(&[ix], Some(&vault)));
+            std::fs::write(dir.join("06-marketauth.b58"), bs58::encode(bincode::serialize(&tx)?).into_string())?;
+            pending = true;
+        } else {
+            st.send(&[ix], &[&st.admin, &key(run, "multisig", false)?]).context("UpdateAuthority")?;
+        }
+    }
+    if pending {
+        std::fs::write(dir.join("README.md"), HANDOVER_README)?;
+        return Err(Pending(dir).into());
+    }
+    verify_roles(st, cluster, run)
 }
 
 // ------------------------------------------------------------ keeper log
@@ -350,7 +491,11 @@ fn open(args: &[String]) -> Result<(Staging, State, PathBuf, String)> {
     // The chain decides mainnet, not the label: every entry point (script,
     // direct binary, hosting) is checked here before any key is used.
     let genesis = rpc.get_genesis_hash().context("read genesis hash")?.to_string();
-    if (genesis == MAINNET_GENESIS) != mainnet {
+    // LAUNCH_REHEARSE_MAINNET_PATH=1: run the mainnet code path (launch key,
+    // co-sign handover files) on a NON-mainnet chain, to rehearse it on
+    // local or devnet. It can only ever relax toward a test chain.
+    let rehearse = mainnet && genesis != MAINNET_GENESIS && env("LAUNCH_REHEARSE_MAINNET_PATH").as_deref() == Some("1");
+    if (genesis == MAINNET_GENESIS) != mainnet && !rehearse {
         bail!("RPC genesis {genesis} does not match cluster {cluster:?}");
     }
     if !state.genesis.is_empty() && state.genesis != genesis {
@@ -358,8 +503,10 @@ fn open(args: &[String]) -> Result<(Staging, State, PathBuf, String)> {
     }
     let payer = key(&run, "payer", !mainnet)?;
     let lp = key(&run, "lp", !mainnet)?;
-    // Mainnet: the vault is the authority and there is no test trader.
-    let (admin, trader) = if mainnet { (Keypair::new(), Keypair::new()) } else { (key(&run, "admin", true)?, key(&run, "trader", true)?) };
+    // The admin holds marketauth from create + InitMarket to the handover.
+    // Mainnet: a fresh launch key per run dir; no test trader.
+    let admin = key(&run, if mainnet { "launch_authority" } else { "admin" }, true)?;
+    let trader = if mainnet { Keypair::new() } else { key(&run, "trader", true)? };
     let (mint, own_mint) = match c.collateral_mint.as_str() {
         "create" if mainnet => bail!("mainnet needs a real collateral_mint"),
         "create" => (key(&run, "mint", true)?.pubkey(), true),
@@ -369,12 +516,6 @@ fn open(args: &[String]) -> Result<(Staging, State, PathBuf, String)> {
         bail!("{} uses mint {}, the config says {mint}; use a fresh run dir", run.display(), state.mint);
     }
     let mut st = Staging::new(cfg, rpc, program_id, payer, admin, lp, trader, mint, own_mint);
-    st.run_dir = Some(run.clone());
-    if mainnet {
-        let vault = Pubkey::from_str(&c.multisig_vault).context("[cluster.mainnet] multisig_vault must be the Squads vault")?;
-        st.multisig = Some(vault);
-        st.admin_ata = spl_associated_token_account::get_associated_token_address(&vault, &mint);
-    }
     if c.price_source == "pyth" {
         st.pyth_feed = Some(feed_id(&st.cfg.oracle)?);
     }
@@ -395,10 +536,10 @@ const MAINNET_GENESIS: &str = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 
 // ------------------------------------------------------------ steps
 
-pub const STEPS: [&str; 5] = ["init-market", "oracle", "insurance", "backing", "lp"];
+pub const STEPS: [&str; 6] = ["init-market", "oracle", "insurance", "backing", "lp", "handover"];
 
-/// `staging step <name> <config> <cluster> <run dir>`. Exit 10: stopped on
-/// an unsigned multisig transaction (re-run after it lands).
+/// `staging step <name> <config> <cluster> <run dir>`. Exit 10: the mainnet
+/// handover waits for co-signatures (re-run after they land).
 pub fn step_main(args: &[String]) -> Result<()> {
     let name = args.first().map(String::as_str).unwrap_or("");
     if !STEPS.contains(&name) {
@@ -408,6 +549,9 @@ pub fn step_main(args: &[String]) -> Result<()> {
     if state.done.iter().any(|d| d == name) {
         println!("step {name}: already done");
         return Ok(());
+    }
+    if state.done.iter().any(|d| d == "handover") {
+        bail!("{}: handover done, the launch key is retired; use a fresh run dir", run.display());
     }
     state.program_id = st.program_id.to_string();
     let r = run_step(&mut st, &mut state, &run, &cluster, name);
@@ -444,8 +588,8 @@ fn run_step(st: &mut Staging, state: &mut State, run: &Path, cluster: &str, name
                 setup::create_spl_mint(&st.rpc, &st.payer, &kp, &st.payer.pubkey(), 6).context("create test mint")?;
             }
             state.mint = st.mint.to_string();
-            let mut owners = vec![st.admin_pubkey(), st.lp.pubkey()];
-            if st.multisig.is_none() {
+            let mut owners = vec![st.admin.pubkey(), st.lp.pubkey()];
+            if cluster != "mainnet" {
                 owners.push(st.trader.pubkey());
             }
             for o in owners {
@@ -458,10 +602,10 @@ fn run_step(st: &mut Staging, state: &mut State, run: &Path, cluster: &str, name
             if st.own_mint && held == 0 {
                 setup::mint_to(&st.rpc, &st.payer, &st.mint, &st.admin_ata, &st.payer, st.cfg.amounts.authority_test_mint)?;
             }
-            st.create_market(&key(run, "market", true)?)?;
-            state.market = st.market.to_string();
+            let market = key(run, "market", true)?;
+            state.market = market.pubkey().to_string();
             state.save(run)?;
-            st.init_market()
+            st.create_market(&market)
         }
         "oracle" => st.configure_oracle(),
         "insurance" => {
@@ -485,7 +629,7 @@ fn run_step(st: &mut Staging, state: &mut State, run: &Path, cluster: &str, name
             // matcher config, only the LP (and, off mainnet, the test
             // trader) portfolio with its deposit.
             let mut legs = vec![(true, st.cfg.amounts.lp_deposit)];
-            if st.multisig.is_none() {
+            if cluster != "mainnet" {
                 legs.push((false, st.cfg.amounts.trader_deposit));
             }
             for (is_lp, amount) in legs {
@@ -507,6 +651,7 @@ fn run_step(st: &mut Staging, state: &mut State, run: &Path, cluster: &str, name
             }
             Ok(())
         }
+        "handover" => handover(st, run, cluster),
         _ => unreachable!(),
     }
 }
@@ -514,25 +659,40 @@ fn run_step(st: &mut Staging, state: &mut State, run: &Path, cluster: &str, name
 /// `staging bots <config> <cluster> <run dir>`: roles 1-5 on the launched
 /// market, logging in the format the monitor reads.
 pub fn bots(args: &[String]) -> Result<Staging> {
-    let (mut st, state, _, cluster) = open(args)?;
-    if cluster == "mainnet" {
-        bail!("mainnet bots run from deploy/ after the role split (docs/LAUNCH.md)");
-    }
+    let (mut st, state, run, cluster) = open(args)?;
     if let Some(s) = STEPS.iter().find(|s| !state.done.iter().any(|d| d == *s)) {
         bail!("step {s} not done; run scripts/launch_market.sh first");
     }
-    let (_, g, _) = st.read()?;
+    verify_roles(&st, &cluster, &run).context("handover not verified on chain; bots refuse")?;
+    // Role keys on this host that hold their role on chain: the pusher's is
+    // required; backing and insurance run only where their key is.
+    let (data, g, _) = st.read()?;
+    let p = read_asset_oracle_profile(&data, 0).map_err(|e| anyhow!("oracle profile: {e:?}"))?;
+    let load = |name: &str, kind: u8| key(&run, name, false).ok().filter(|k| k.pubkey().to_bytes() == holder(&p, kind));
+    st.oracle_kp = load("oracle_authority", ASSET_AUTH_ORACLE).context("keys/oracle_authority.json missing or not the on-chain oracle")?;
+    st.backing_kp = load("backing_bucket_authority", ASSET_AUTH_BACKING_BUCKET);
+    st.insurance_kp = load("insurance_authority", ASSET_AUTH_INSURANCE);
     (st.mark, st.feed) = (g.assets[0].effective_price, g.assets[0].effective_price);
     // A restart keeps managing an open trader position: the matcher only ever
     // holds 0 or one `size_q` either way, so the leg's sign gives it back.
-    let p = read_portfolio(&st.rpc.get_account_data(&st.trader_pf)?).map_err(|e| anyhow!("read_portfolio: {e:?}"))?;
-    let q = p.legs[0].basis_pos_q.get();
+    let q = if st.trader_pf == Pubkey::default() {
+        0 // mainnet: no test trader, the matcher is idle
+    } else {
+        read_portfolio(&st.rpc.get_account_data(&st.trader_pf)?).map_err(|e| anyhow!("read_portfolio: {e:?}"))?.legs[0].basis_pos_q.get()
+    };
     if q != 0 {
         st.open = Some(q.signum() * st.cfg.matcher.size_q as i128);
         println!("bots: trader holds a position ({q}); the matcher closes it first");
     }
     (st.keeper_log, st.phase) = (true, Phase::Live);
     Ok(st)
+}
+
+/// `staging roles <config> <cluster> <run dir>`: print the on-chain role
+/// table; fail unless the handover is complete (the health check).
+pub fn roles_main(args: &[String]) -> Result<()> {
+    let (st, _, run, cluster) = open(args)?;
+    verify_roles(&st, &cluster, &run)
 }
 
 /// An RPC URL without credentials (paid endpoints carry them in the path,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Day-0 launch: one SOL-PERP market from the launch config, in seven timed,
+# Day-0 launch: one SOL-PERP market from the launch config, in eight timed,
 # resumable steps. Reference / dry-run only; not a paid live service; M3 NO-GO.
 #
 #   scripts/launch_market.sh <config> local|devnet          # launch, or resume
@@ -8,19 +8,20 @@
 #
 # Steps (docs/LAUNCH.md): 1 init-market, 2 oracle (resolve policy + AuthMark),
 # 3 insurance, 4 backing, 5 lp (the off-chain matcher has no on-chain config;
-# LP and test-trader portfolios with deposits) run as `staging step`; then
-# 6 start the bots (`staging bots`: pusher, matcher, backing, insurance,
-# keeper) and the monitor, 7 health check (a landed crank, a fill, the mark
-# lag, sane monitor metrics).
+# LP and test-trader portfolios with deposits), 6 handover (asset-0 roles to
+# their holders, then marketauth to the multisig) run as `staging step`; then
+# 7 start the bots (`staging bots`: pusher, matcher, backing, insurance,
+# keeper) and the monitor, 8 health check (a clean crank cycle, a fill, the
+# mark lag, sane monitor metrics, the on-chain role table).
 #
 # Run dir launch-runs/<cluster>/ (LAUNCH_RUN_DIR overrides; gitignored):
-# state.json (addresses, completed steps), keys/, unsigned/ (mainnet),
+# state.json (addresses, completed steps), keys/, handover/ (mainnet),
 # bots.log, monitor.log, pids/, timings.txt.
 # Local expects a running validator at the config's RPC (scripts/day0_drill.sh
-# starts one). Mainnet: authority transactions are written unsigned for
-# Squads and the run stops (exit 10); re-run after they land. Mainnet bots run
-# from deploy/, not from here.
-# Exit 0 launched; 10 waiting for the multisig; else failed (re-run retries).
+# starts one). Mainnet: a fresh launch key (keys/launch_authority.json) signs
+# steps 1-5; the handover writes co-sign transactions and stops (exit 10);
+# re-run after they land. Mainnet bots run from deploy/, not from here.
+# Exit 0 launched; 10 waiting for co-signatures; else failed (re-run retries).
 # Knobs: LAUNCH_RPC_URL (overrides the config's rpc), LAUNCH_SKIP_BUILD=1, LAUNCH_HEALTH_TIMEOUT (s, 180),
 # LAUNCH_LAG_STRICT=1 (mark lag over target fails instead of warning),
 # LAUNCH_LAG_SAMPLES (pushes measured before judging the lag, 5).
@@ -106,15 +107,15 @@ timed() {
   return "$rc"
 }
 
-# ---- steps 1-5: on-chain setup, resumable (state.json)
+# ---- steps 1-6: on-chain setup and handover, resumable (state.json)
 n=0
-for s in init-market oracle insurance backing lp; do
+for s in init-market oracle insurance backing lp handover; do
   n=$((n + 1))
   rc=0
   timed "$n $s" "$STAGING" step "$s" "$CONFIG" "$CLUSTER" "$RUN_DIR" || rc=$?
   if [ "$rc" = 10 ]; then
-    echo "==> waiting for the multisig: import $RUN_DIR/unsigned/*.b58 into Squads ($RUN_DIR/unsigned/README.md)."
-    echo "    After it lands, resume with: $0 $1 $CLUSTER --mainnet-i-understand"
+    echo "==> waiting for co-signatures: $RUN_DIR/handover/*.b58, in order ($RUN_DIR/handover/README.md)."
+    echo "    After they land, resume with: $0 $1 $CLUSTER --mainnet-i-understand"
     exit 10
   fi
   [ "$rc" = 0 ] || die "step $s failed; fix the cause and re-run the same command (completed steps are skipped)"
@@ -122,12 +123,12 @@ done
 MARKET="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["market"])' "$RUN_DIR/state.json")"
 
 if [ "$CLUSTER" = mainnet ]; then
-  echo "==> market $MARKET is set up. Next (docs/LAUNCH.md): role split per ops/KEYS.md, then start"
-  echo "    the bots and monitor on the host (deploy/), then the health check against it."
+  echo "==> market $MARKET is set up and handed over. Next (docs/LAUNCH.md): retire the launch key,"
+  echo "    start the bots and monitor on the host (deploy/), then the health check against it."
   exit 0
 fi
 
-# ---- step 6: bots + monitor (background, logs and pid files in the run dir)
+# ---- step 7: bots + monitor (background, logs and pid files in the run dir)
 LISTEN="$(cfg monitor.listen)"
 touch "$RUN_DIR/bots.log"
 FROM_LINE=$(($(wc -l < "$RUN_DIR/bots.log") + 1))
@@ -142,13 +143,13 @@ start_bots() {
     echo $! > "$RUN_DIR/pids/monitor.pid"
   fi
 }
-timed "6 start-bots" start_bots
+timed "7 start-bots" start_bots
 
-# ---- step 7: health check
+# ---- step 8: health check
 health() {
   python3 -I - "$RUN_DIR/bots.log" "$FROM_LINE" "http://$LISTEN/snapshot.json" "$(cfg oracle.lag_target_ms)" \
     "${LAUNCH_HEALTH_TIMEOUT:-180}" "${LAUNCH_LAG_STRICT:-0}" "$RUN_DIR/pids/bots.pid" "${LAUNCH_LAG_SAMPLES:-5}" \
-    "$MARKET" "$RUN_DIR/pids/monitor.pid" <<'PY'
+    "$MARKET" "$RUN_DIR/pids/monitor.pid" <<'PY' || return 1
 import json, os, re, statistics, sys, time, urllib.request
 log, first, url, target, timeout, strict, pidfile, samples, market, monpid = sys.argv[1:]
 first, target, samples, deadline = int(first), int(target), int(samples), time.time() + int(timeout)
@@ -200,7 +201,8 @@ if p50 > target:
         sys.exit("health: " + msg)
     print("WARN: " + msg)
 PY
+  "$STAGING" roles "$CONFIG" "$CLUSTER" "$RUN_DIR"
 }
-timed "7 health" health || die "health check failed; bots left running (stop: $0 stop $CLUSTER)"
+timed "8 health" health || die "health check failed; bots left running (stop: $0 stop $CLUSTER)"
 printf '%-16s %7ss\n' "total" "$(since "$T_START")" | tee -a "$RUN_DIR/timings.txt"
 echo "==> SOL-PERP live on $CLUSTER: market $MARKET, monitor http://$LISTEN/ ; stop: $0 stop $CLUSTER"

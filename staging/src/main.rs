@@ -130,12 +130,14 @@ struct Staging {
     rpc: RpcClient,
     program_id: Pubkey,
     payer: Keypair,
-    /// Holds every market role (marketauth at InitMarket). On mainnet the
-    /// Squads vault (`multisig`) does instead, and this key is unused.
+    /// marketauth at InitMarket, holding every asset-0 role until the
+    /// launch `handover` (launch.rs). Mainnet: the fresh launch key.
     admin: Keypair,
-    multisig: Option<Pubkey>,
-    /// Launch run dir: unsigned multisig transactions go to `<run>/unsigned`.
-    run_dir: Option<std::path::PathBuf>,
+    /// Role signers for the bots: the admin until the handover, then the
+    /// holders' keys. `None`: that role's key is not on this host (skipped).
+    oracle_kp: Keypair,
+    backing_kp: Option<Keypair>,
+    insurance_kp: Option<Keypair>,
     /// Price source: this Pyth feed (SOL/USD) when set, else the seeded mock.
     pyth_feed: Option<[u8; 32]>,
     /// Bots mode: also print drip-format crank lines and `mark_lag` events,
@@ -221,28 +223,23 @@ impl Staging {
         Instruction { program_id: self.program_id, accounts, data: ix.encode() }
     }
 
-    fn admin_pubkey(&self) -> Pubkey {
-        self.multisig.unwrap_or_else(|| self.admin.pubkey())
+    fn role_metas(&self, k: &Keypair) -> Vec<AccountMeta> {
+        vec![AccountMeta::new(k.pubkey(), true), AccountMeta::new(self.market, false)]
     }
 
     fn admin_metas(&self) -> Vec<AccountMeta> {
-        vec![AccountMeta::new(self.admin_pubkey(), true), AccountMeta::new(self.market, false)]
+        self.role_metas(&self.admin)
     }
 
-    /// An authority transaction: signed by the local admin key, or, with a
-    /// multisig, written unsigned for Squads (`launch::write_unsigned`) and
-    /// the step stops until it lands.
+    /// An authority transaction, signed by the admin (launch) key.
     fn send_admin(&self, label: &str, ixs: &[Instruction]) -> Result<()> {
-        match (self.multisig, &self.run_dir) {
-            (Some(vault), Some(dir)) => launch::write_unsigned(&self.rpc, dir, label, vault, ixs),
-            _ => self.send(ixs, &[&self.admin]).context(label.to_string()),
-        }
+        self.send(ixs, &[&self.admin]).context(label.to_string())
     }
 
-    /// admin, market, admin ATA, vault, token program: the top-up shape.
-    fn funding_metas(&self) -> Vec<AccountMeta> {
-        let mut m = self.admin_metas();
-        m.push(AccountMeta::new(self.admin_ata, false));
+    /// role key, market, its token account, vault, token program: the top-up shape.
+    fn funding_metas(&self, k: &Keypair) -> Vec<AccountMeta> {
+        let mut m = self.role_metas(k);
+        m.push(AccountMeta::new(spl_associated_token_account::get_associated_token_address(&k.pubkey(), &self.mint), false));
         m.push(AccountMeta::new(self.vault, false));
         m.push(AccountMeta::new_readonly(spl_token::ID, false));
         m
@@ -314,9 +311,10 @@ impl Staging {
             rpc,
             program_id,
             payer,
+            oracle_kp: admin.insecure_clone(),
+            backing_kp: Some(admin.insecure_clone()),
+            insurance_kp: Some(admin.insecure_clone()),
             admin,
-            multisig: None,
-            run_dir: None,
             pyth_feed: None,
             keeper_log: false,
             mint,
@@ -381,7 +379,6 @@ impl Staging {
     /// portfolios and deposits. Used at setup and to relist SOL.
     fn open_market(&mut self) -> Result<()> {
         self.create_market(&Keypair::new())?;
-        self.init_market()?;
         self.configure_oracle()?;
         self.lp_pf = setup::create_portfolio(&self.rpc, &self.payer, &self.lp, &self.market, self.program_id)?;
         self.trader_pf = setup::create_portfolio(&self.rpc, &self.payer, &self.trader, &self.market, self.program_id)?;
@@ -391,12 +388,28 @@ impl Staging {
         Ok(())
     }
 
-    /// The market account (created when absent) and its collateral vault.
+    /// The market account and `InitMarket` (`[market]` in the config) in
+    /// ONE tx (payer, market key, admin), so no one can initialize our
+    /// account in between; then the collateral vault. An existing market is
+    /// accepted only with our admin as marketauth and our mint.
     fn create_market(&mut self, market: &Keypair) -> Result<()> {
         self.set_market(market.pubkey());
         if !self.exists(&self.market)? {
             let len = state::market_account_len_for_capacity(1).map_err(|e| anyhow!("{e:?}"))?;
-            setup::create_program_owned_account(&self.rpc, &self.payer, market, len, &self.program_id)?;
+            let rent = self.rpc.get_minimum_balance_for_rent_exemption(len)?;
+            let create = system_instruction::create_account(&self.payer.pubkey(), &self.market, rent, len as u64, &self.program_id);
+            let mut metas = self.admin_metas();
+            metas.push(AccountMeta::new_readonly(self.mint, false));
+            let init = self.prog_ix(self.cfg.market.init_ix(self.mark)?, metas);
+            self.send(&[create, init], &[market, &self.admin]).context("create market + InitMarket")?;
+        } else {
+            let data = self.rpc.get_account_data(&self.market)?;
+            let ours = read_market(&data).is_ok_and(|(c, _)| {
+                c.marketauth == self.admin.pubkey().to_bytes() && c.collateral_mint == self.mint.to_bytes()
+            });
+            if !ours {
+                bail!("market {} exists without our marketauth {} and mint {}: market taken; use a fresh run dir", self.market, self.admin.pubkey(), self.mint);
+            }
         }
         if !self.exists(&self.vault)? {
             setup::create_ata(&self.rpc, &self.payer, &self.vault_auth, &self.mint)?;
@@ -410,19 +423,8 @@ impl Staging {
         self.vault = spl_associated_token_account::get_associated_token_address(&self.vault_auth, &self.mint);
     }
 
-    /// InitMarket (`[market]` in the config), unless already initialized.
-    fn init_market(&self) -> Result<()> {
-        if self.read().is_ok() {
-            return Ok(());
-        }
-        let mut metas = self.admin_metas();
-        metas.push(AccountMeta::new_readonly(self.mint, false));
-        self.send_admin("InitMarket", &[self.prog_ix(self.cfg.market.init_ix(self.mark)?, metas)])
-    }
-
     /// Permissionless-resolve policy and AuthMark, each unless already set
-    /// (their control sequences start at 0). One authority tx, so one
-    /// multisig round on mainnet.
+    /// (their control sequences start at 0), in one authority tx.
     fn configure_oracle(&mut self) -> Result<()> {
         let (_, g, s) = self.read()?;
         let now = self.rpc.get_slot()?;
@@ -504,7 +506,7 @@ impl Staging {
         // every 50 ms); then wait for confirmed as the other roles do.
         // No preflight: one RPC round trip less on the latency path; a
         // failed push still surfaces through its status below.
-        let tx = self.tx(&[self.prog_ix(ix, self.admin_metas())], &[&self.admin])?;
+        let tx = self.tx(&[self.prog_ix(ix, self.role_metas(&self.oracle_kp))], &[&self.oracle_kp])?;
         let no_preflight = RpcSendTransactionConfig { skip_preflight: true, ..Default::default() };
         let sig = self.rpc.send_transaction_with_config(&tx, no_preflight)?;
         let mut lag = None;
@@ -537,6 +539,9 @@ impl Staging {
     }
 
     fn match_trade(&mut self) -> Result<Option<String>> {
+        if self.trader_pf == Pubkey::default() {
+            return Ok(None); // no test trader (mainnet)
+        }
         let (data, g, _) = self.read()?;
         if self.rolling && self.open.is_none() {
             return Ok(None);
@@ -587,6 +592,9 @@ impl Staging {
     }
 
     fn manage_backing(&mut self) -> Result<Option<String>> {
+        if self.backing_kp.is_none() {
+            return Ok(None);
+        }
         let (data, g, _) = self.read()?;
         if g.mode != MarketModeV16::Live {
             return Ok(None);
@@ -634,6 +642,7 @@ impl Staging {
 
     /// Top up the `domains` (0 long, 1 short) in one authority tx.
     fn top_up_backing(&self, domains: &[usize], expiry_slot: u64) -> Result<()> {
+        let k = self.backing_kp.as_ref().context("no backing key on this host")?;
         let (data, g, s) = self.read()?;
         let p = read_asset_oracle_profile(&data, 0).map_err(|e| anyhow!("oracle profile: {e:?}"))?;
         let mut ixs = Vec::new();
@@ -654,17 +663,18 @@ impl Staging {
                 amount: self.cfg.amounts.backing_per_domain as u128,
                 expiry_slot,
             };
-            ixs.push(self.prog_ix(ix, self.funding_metas()));
+            ixs.push(self.prog_ix(ix, self.funding_metas(k)));
         }
-        self.send_admin("TopUpBackingBucket", &ixs)
+        self.send(&ixs, &[k]).context("TopUpBackingBucket")
     }
 
     fn withdraw_backing(&self, data: &[u8], d: usize, amount: u128) -> Result<()> {
         let (_, g, s) = self.read()?;
+        let k = self.backing_kp.as_ref().context("no backing key on this host")?;
         let mut ixs = self.fresh_cranks(data, &[self.trader_pf, self.lp_pf])?;
-        let mut metas = self.admin_metas();
+        let mut metas = self.role_metas(k);
         metas.extend([
-            AccountMeta::new(self.admin_ata, false),
+            AccountMeta::new(spl_associated_token_account::get_associated_token_address(&k.pubkey(), &self.mint), false),
             AccountMeta::new(self.vault, false),
             AccountMeta::new_readonly(self.vault_auth, false),
             AccountMeta::new_readonly(spl_token::ID, false),
@@ -677,10 +687,11 @@ impl Staging {
             amount,
         };
         ixs.push(self.prog_ix(ix, metas));
-        self.send(&ixs, &[&self.admin]).context("WithdrawBackingBucket")
+        self.send(&ixs, &[k]).context("WithdrawBackingBucket")
     }
 
     fn top_up_insurance(&self, amount: u64) -> Result<Option<String>> {
+        let Some(k) = &self.insurance_kp else { return Ok(None) };
         let (_, g, s) = self.read()?;
         // Mirrors v16_svm.rs `top_up_insurance`.
         let ix = P::TopUpInsurance {
@@ -689,7 +700,7 @@ impl Staging {
             authority_epoch: s.authority_epoch,
             amount: amount as u128,
         };
-        self.send_admin("TopUpInsurance", &[self.prog_ix(ix, self.funding_metas())])?;
+        self.send(&[self.prog_ix(ix, self.funding_metas(k))], &[k]).context("TopUpInsurance")?;
         Ok(Some(format!("+{amount}")))
     }
 }
@@ -796,7 +807,8 @@ fn main() -> Result<()> {
         None => run(r2_setup()?, false),
         Some("step") => launch::step_main(&args[1..]),
         Some("bots") => run(launch::bots(&args[1..])?, true),
-        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots] <config> <cluster> <run dir>"),
+        Some("roles") => launch::roles_main(&args[1..]),
+        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles] <config> <cluster> <run dir>"),
     }
 }
 

@@ -35,9 +35,18 @@ rpc = ""                # the paid RPC endpoint
 program_id = ""         # the official program id, set on Day 0
 collateral_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
 price_source = "pyth"
-# Squads vault (2-of-3, ops/KEYS.md). It becomes marketauth and signs every
-# authority transaction; launch_market.sh writes those unsigned for import.
+# Squads vault (2-of-3, ops/KEYS.md): marketauth after the handover. Until
+# then a fresh launch key (keys/launch_authority.json) holds it.
 multisig_vault = ""
+
+# Asset-0 role holders after the handover (public keys, ops/KEYS.md). Local
+# and devnet generate these in the run dir's keys/ instead.
+[cluster.mainnet.roles]
+oracle_authority = ""           # pusher host key (hot)
+insurance_operator = ""         # warm hardware wallet
+backing_bucket_authority = ""   # hardware wallet, used at each roll
+insurance_authority = ""        # the Squads vault
+asset_admin = ""                # cold hardware wallet C
 
 [oracle]
 # Pyth SOL/USD. price_source = "pyth" reads its PriceUpdateV2 account (the

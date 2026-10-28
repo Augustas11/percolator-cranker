@@ -600,16 +600,19 @@ targets):
       (Hybrid) profile. (On-chain Pyth read built in the Day-0 kit; a low-latency Hermes or Lazer source and Hybrid not.)
 - [x] **Day-0 drill, 2026-10-29** (`scripts/day0_drill.sh`, `docs/LAUNCH.md`):
       fresh local validator, wrapper deployed to a fresh program id, id written
-      into a temp config, `launch_market.sh` on local. Program id to live with
-      bots, liquidity and a passing health check: **26.8 s** (init-market 5.2,
-      oracle 0.5, insurance 0.5, backing 0.5, lp 5.6, start bots 0.0, health
-      14.2, which waits for 5 measured pushes); 3 runs with the final check: 20.6-32.1 s. Deploy
-      itself 14-15 s, not counted. Mark lag on local p50 233-515 ms (target
-      400 ms; over it the check warns). Resume (partial run, rerun while
-      running, lost state file), the mainnet unsigned-tx stop and the Pyth
-      source (devnet's account cloned locally) pass. Not run: devnet (owner:
-      `launch_market.sh launch/sol-perp.toml devnet` after funding the payer),
-      mainnet.
+      into a temp config, `launch_market.sh` on local, including the handover
+      (roles to their holders, marketauth to the multisig stand-in, verified on
+      chain). Program id to live with bots, liquidity, a clean role table and
+      a passing health check: **29.7 s** (init-market 4.1, oracle 1.0,
+      insurance 0.5, backing 0.5, lp 3.6, handover 5.6, start bots 0.0, health
+      14.1, which waits for 5 measured pushes); 2 runs with the handover:
+      29.0-29.7 s. Deploy itself ~15 s, not counted. Mark lag on local p50
+      364-386 ms (target 400 ms; over it the check warns). Resume, the Pyth
+      source (devnet's account cloned locally) and the mainnet code path
+      (launch key, durable-nonce co-sign files landed, "market taken",
+      handed-over run dir refuses steps; `LAUNCH_REHEARSE_MAINNET_PATH=1`)
+      pass on local. Not run: devnet (owner: `launch_market.sh
+      launch/sol-perp.toml devnet` after funding the payer), mainnet.
 
 ### M3. Pre-deployment readiness (only relevant once devnet deployment appears)
 - [ ] Real keeper portfolio funded on the target chain.
