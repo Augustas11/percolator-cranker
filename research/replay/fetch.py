@@ -121,22 +121,27 @@ def fetch_day(kind, day):
 
 
 def fetch_funding(start, end):
+    """Hourly SOL funding for [start, end). Fails, leaving any old cache in place, unless every hour is present once."""
     out, cur = [], start
     for _ in range(MAX_FUNDING_PAGES):
         if cur >= end:
             break
         batch = json.loads(get(HL, {"type": "fundingHistory", "coin": "SOL", "startTime": cur, "endTime": end}))
-        if not isinstance(batch, list) or not batch:
+        if not isinstance(batch, list):
+            raise ValueError(f"bad funding response {str(batch)[:200]}")
+        if not batch:
             break
         for b in batch:
-            rate = float(b["fundingRate"])
-            if not (math.isfinite(rate) and abs(rate) < 0.01 and start <= int(b["time"]) <= end):
+            ts, rate = int(b["time"]), float(b["fundingRate"])
+            if b.get("coin") != "SOL" or not (math.isfinite(rate) and abs(rate) < 0.01) or not cur <= ts < end:
                 raise ValueError(f"bad funding row {b!r}")
-            out.append({"time": int(b["time"]), "rate": rate})
-        nxt = int(batch[-1]["time"]) + 1
-        if nxt <= cur:
-            break
-        cur = nxt
+            if out and ts <= out[-1]["time"]:
+                raise ValueError(f"unordered or duplicate funding row {b!r}")
+            out.append({"time": ts, "rate": rate})
+        cur = out[-1]["time"] + 1
+    hour = 3_600_000
+    if [r["time"] // hour for r in out] != list(range(start // hour, (end - 1) // hour + 1)):
+        raise ValueError(f"incomplete funding history: {len(out)} rows for {(end - start) // hour} hours")
     atomic_write(os.path.join(DATA, "hl_funding_SOL.json"), lambda f: f.write(json.dumps(out).encode()))
     print(f"funding: {len(out)} hourly rates")
 

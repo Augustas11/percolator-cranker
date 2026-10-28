@@ -153,6 +153,7 @@ class Book:
         self.expo = []        # |LP + hedge| USD, sampled each minute
         self.lpabs = []       # |LP| USD (on-chain inventory), sampled each minute
         self.hedge_usd = 0.0
+        self.expo_max = 0.0   # |LP + filled hedge| USD, max over every fill
 
     def run_day(self, day0, t, qlp, m, p_now, fee_bps, cap, funding):
         n_lp0, h0 = self.lp, self.h
@@ -193,6 +194,9 @@ class Book:
         hs = hh[np.searchsorted(ht, s, side="right") - 1]
         ps = px(s)
         self.expo.append((np.abs(lps + hs) * ps).astype(np.float32))
+        if len(lp_path):  # event-level peak: exposure only jumps at our fills
+            hf = hh[np.searchsorted(ht, t, side="right") - 1]
+            self.expo_max = max(self.expo_max, float((np.abs(lp_path + hf) * p_now).max()))
         self.lpabs.append((np.abs(lps) * ps).astype(np.float32))
         pnl = eq - self.eq
         self.days.append({"pnl": pnl, "fees": fees, "hedge_cost": hcost, "funding": fund,
@@ -296,24 +300,25 @@ def main():
 
     report(days, day_info, books, mk_base, mk_arb, arb_vol, mk_size, size_edges, mean_raw, len(days), fill)
     P = print
-    P("\n### Sensitivity: toxic flow, tight hedge, $1M/day, one input changed per row\n")
-    P("| Variant | Fee | Lag | Edge bps | Net/day | SD/day | Max DD | Filled |\n|---|---:|---:|---:|---:|---:|---:|---:|")
-    for (name, fee, lag, *_), sm, fr in sensitivity(days, mean_raw, fund_all):
-        P(f"| {name} | {fee} | {lag} ms | {sm['trade_bps']:.2f} | {sm['net_day']:,.0f} | {sm['sd']:,.0f} | {fmt_usd(sm['dd'])} | {fr:.0%} |")
+    P("\n### Sensitivity: toxic flow, tight hedge (whole tickets: every N-th trade, N = mean notional / volume, offsets 0, N/3, 2N/3)\n")
+    P("| Variant | Offset | Volume/day | Fee | Lag | Edge bps | Net/day | SD/day | Max DD | Filled |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for (name, fee, lag, k, afrac, phase, v), sm, fr in sensitivity(days, mean_raw, fund_all):
+        off = "" if k is None else f"{k}/3 N"
+        P(f"| {name} | {off} | {fmt_usd(v)} | {fee} | {lag} ms | {sm['trade_bps']:.2f} | {sm['net_day']:,.0f} | {sm['sd']:,.0f} | {fmt_usd(sm['dd'])} | {fr:.0%} |")
 
 
 def sensitivity(days, mean_raw, fund_all):
-    """Toxic flow, tight hedge, $1M/day, with one input changed per row (architect review).
-    thin: whole Binance tickets, every N-th trade (N = mean notional / V) from a fixed offset, no size scaling.
-    arb: ticket size as a fraction of daily volume, and the slot phase of the arb clock."""
-    V = 1_000_000
-    N = int(round(mean_raw / V))
-    rows = [("reference (as headline)", 12, 1000, None, ARB_CAP_FRAC, 0)]
-    rows += [(f"arb ticket x4 ({4 * ARB_CAP_FRAC:.0%} of volume)", f, lag, None, 4 * ARB_CAP_FRAC, 0)
-             for f in (8, 12) for lag in (400, 1000)]
-    rows += [("arb slot phase +200 ms", 12, 1000, None, ARB_CAP_FRAC, 200)]
-    rows += [(f"whole tickets, every {N:,}th from offset {o:,}", f, lag, o, ARB_CAP_FRAC, 0)
-             for f, lag in ((12, 1000), (8, 400)) for o in (0, N // 3, 2 * N // 3)]
+    """Toxic flow, tight hedge, with inputs changed per row (review rounds 1-2).
+    thin: whole Binance tickets, every N-th trade (N = mean notional / V) starting at a fixed offset, no size scaling.
+    arb: ticket size as a fraction of daily volume, and the slot phase of the arb clock. V: daily volume."""
+    M = 1_000_000
+    x4 = 4 * ARB_CAP_FRAC
+    rows = [("reference (as headline)", 12, 1000, None, ARB_CAP_FRAC, 0, M)]
+    rows += [("arb ticket x4", f, lag, None, x4, 0, M) for f in (8, 12) for lag in (400, 1000)]
+    rows += [("arb slot phase +200 ms", 12, 1000, None, ARB_CAP_FRAC, 200, M)]
+    rows += [("whole tickets", f, lag, k, ARB_CAP_FRAC, 0, M) for f, lag in ((12, 1000), (8, 400), (12, 400)) for k in range(3)]
+    rows += [("whole tickets + arb ticket x4", 12, lag, k, x4, 0, M) for lag in (400, 1000) for k in range(3)]
+    rows += [("whole tickets", 12, 1000, k, ARB_CAP_FRAC, 0, v) for v in (500_000, 2_000_000, 4_000_000) for k in range(3)]
     books = [Book() for _ in rows]
     pos = [0.0] * len(rows)
     filled = [[0.0, 0.0] for _ in rows]
@@ -325,11 +330,12 @@ def sensitivity(days, mean_raw, fund_all):
         funding = [(ft, r) for ft, r in fund_all if day0 <= ft < day0 + DAY_MS]
         gidx = idx0 + np.arange(len(t_all))
         idx0 += len(t_all)
-        for i, (_, fee, lag, off, afrac, phase) in enumerate(rows):
-            if off is None:
+        for i, (_, fee, lag, k, afrac, phase, V) in enumerate(rows):
+            if k is None:
                 t, qlp = t_all, -q_all * (V / mean_raw)
             else:
-                sel = (gidx + off) % N == 0
+                N = int(round(mean_raw / V))
+                sel = (gidx - k * N // 3) % N == 0   # offsets 0, N/3, 2N/3
                 t, qlp = t_all[sel], -q_all[sel]
             ticks = day0 + phase + np.arange(0, DAY_MS - phase, ARB_TICK_MS)
             m_tick, p_tick = px(ticks - lag), px(ticks)
@@ -344,7 +350,7 @@ def sensitivity(days, mean_raw, fund_all):
             filled[i][0] += float(np.abs(qq * pn).sum())
             filled[i][1] += float(np.abs(offered * pn).sum())
             books[i].run_day(day0, tt[o], qq, mm, pn, fee, HEDGES["tight"] * V, funding)
-    return [(r, summary(b, r[1], V, "toxic", len(days)), f[0] / f[1]) for r, b, f in zip(rows, books, filled)]
+    return [(r, summary(b, r[1], r[6], "toxic", len(days)), f[0] / f[1]) for r, b, f in zip(rows, books, filled)]
 
 
 def fmt_usd(x):
@@ -365,7 +371,7 @@ def summary(b, fee, v, flow, n):
             "hedge_usd_day": sum(x["hedge_usd"] for x in D) / n,
             "fund_bps": sum(x["funding"] for x in D) / (v * n) * 1e4,
             "inv_bps": sum(x["inventory"] for x in D) / (v * n) * 1e4,
-            "expo": np.concatenate(b.expo), "lpabs": np.concatenate(b.lpabs)}
+            "expo": np.concatenate(b.expo), "lpabs": np.concatenate(b.lpabs), "expo_max": b.expo_max}
 
 
 def breakeven(bps_by_v, other_bps=0.0):
@@ -455,8 +461,8 @@ def report(days, info, books, mk_base, mk_arb, arb_vol, mk_size, edges, mean_raw
         s = S[key]
         P(f"\n### Setting {key[1]} bps / {key[2]} ms / {key[3]} hedge, toxic, $1M/day\n")
         P(f"Net/day mean {s['net_day']:,.0f}, SD {s['sd']:,.0f}, max drawdown {fmt_usd(s['dd'])}, "
-          f"days positive {np.mean(s['net'] > 0):.0%}.\n")
-        P("| Inventory | p50 | p95 | p99 | max |\n|---|---:|---:|---:|---:|")
+          f"days positive {np.mean(s['net'] > 0):.0%}. Peak net exposure over every fill {fmt_usd(s['expo_max'])}.\n")
+        P("| Inventory, sampled each minute | p50 | p95 | p99 | max |\n|---|---:|---:|---:|---:|")
         for name, arr in (("net exposure, LP + hedge", s["expo"]), ("LP on-chain position", s["lpabs"])):
             P(f"| {name} | " + " | ".join(fmt_usd(float(np.percentile(arr, q))) for q in (50, 95, 99, 100)) + " |")
         b = books[key]

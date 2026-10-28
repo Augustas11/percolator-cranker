@@ -97,6 +97,8 @@ def main(argv):
         if len(parts) != 2:
             die(f"bad manifest line: {raw!r}")
         src, to = parts
+        if any(part in FORBIDDEN_NAMES for part in posixpath.normpath(src).split("/")):
+            die(f"manifest source is under a never-export path: {src}")  # e.g. ops/, research/
         check_dest(to)
         if to.lower() in dests:  # lower(): case-insensitive filesystems collide too
             die(f"duplicate manifest destination: {to}")

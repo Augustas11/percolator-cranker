@@ -4,33 +4,35 @@
 flow loses money at every pusher lag we can reach: hedged, −1.0 bps of volume at 400 ms and −10.6 bps
 at 1 s.
 
-**At 12 bps, hedged, with lag of 1 s or less, it makes money, but the size of the edge depends on what
-our flow looks like:**
+**At 12 bps, hedged, with the pusher kept within 400 ms of the market, it makes money in every case
+we tested. With 1 s lag it can lose.** Results at 12 bps, tight hedge:
 
-| Flow shape | Edge at 12 bps / 1 s | Net at $1M/day | Break-even |
+| Flow shape | 400 ms lag | 1 s lag | Break-even at 1 s |
 |---|---:|---:|---:|
-| Many small tickets (Binance flow scaled down) | **+7.7 bps** | +$669/day | ~$133k/day |
-| Fewer whole Binance-size tickets | **+2.2–2.6 bps** | +$115–160/day | ~$400–470k/day |
+| Many small tickets (Binance flow scaled down) | **+9.5 bps** ($845/day at $1M) | **+7.7 bps** ($669/day) | ~$133k/day |
+| Whole Binance-size tickets | **+3.9 bps** ($290/day) | **+2.4–2.6 bps** ($136–159/day) | ~$550k/day (loses at $500k, earns at $1M) |
+| Whole tickets + 4× larger arb | **+1.9–2.0 bps** ($91–101/day) | **−2.9 bps** (−$395/day) | none |
 
 - **Small tickets:** 97% of days are positive, the worst day is −$2.8k and the max drawdown is $3k.
 - **Whole tickets:** the inventory cap refuses about a quarter of the volume, and large tickets carry more
   adverse selection.
-- **8 bps is marginal.** It is +4.1 bps at 400 ms, and about zero at 1 s or with whole tickets.
+- **8 bps is not enough on its own:**
+  - +4.1 bps with small tickets at 400 ms;
+  - about zero with whole tickets;
+  - −1.6 bps with a 4× arb.
 
 **Adverse selection:**
 - **Measured on real flow: 2.2–2.4 bps** at 400 ms–2 s lag, so the model's 2 bps was about right.
 - **The model missed the latency arb.** At fees of 5 bps or more and 400 ms–1 s lag, it costs another
-  0.4–18 bps gross, about half that net of the fee it pays. At 1 s, a 4× larger arb ticket cuts the
-  12 bps edge to +2.6 bps.
+  0.4–18 bps gross, about half that net of the fee it pays.
 
 **The risks:**
-- **Lag and fee together are the business.**
+- **Lag and fee together are the business.** Run 12 bps with lag ≤ 400 ms.
 - **Volume is unproven.** These results hold flow fixed as the fee rises.
-- **The flow shape is unknown.** Our real ticket mix decides whether the edge is closer to 2.5 or
-  8 bps.
+- **The flow shape is unknown.** Our real ticket mix decides whether the edge is closer to 2 or 9 bps.
 - **Profit is locked.** Fees land in insurance behind the Live gate.
 
-**Against Jupiter.** Jupiter/JLP keeps about 17–23 bps. Our hedged 2.5–9 bps at 12 bps is a fraction of
+**Against Jupiter.** Jupiter/JLP keeps about 17–23 bps. Our hedged 2–9.5 bps at 12 bps / 400 ms is a fraction of
 that, and it carries no directional bet.
 
 **What would change this verdict:** measuring two numbers in the PoC beta, our real ticket-size mix and
@@ -69,35 +71,43 @@ SOL rose 37% in the window and the capped LP sat long, so the unhedged column is
   don't recommend them on this evidence.
 - **Lag 0 is not reachable.** Our oracle stand-in is the Binance spot print, and Pyth itself trails it.
   So 400 ms is the best case and 1 s is a realistic pusher.
-- **The hedge fills 500 ms after it is sent.** So net exposure briefly exceeds the 1% threshold, to a
-  maximum of about 2%.
+- **The hedge fills 500 ms after it is sent.** So net exposure briefly exceeds the 1% threshold. The peak
+  over every fill was $39k, 3.9% of daily volume, on Aug 22; minute samples peak near 2%.
 
-## Sensitivity (toxic, tight hedge, $1M/day)
+## Sensitivity (toxic, tight hedge)
 
-This was added at review: one input changes per row. Full rows are in the appendix.
+This was added at review. Edge in bps of volume; full rows, including offsets, are in the appendix.
 
-| Variant | 12 bps / 1 s | 8 bps / 400 ms |
-|---|---:|---:|
-| Reference: flow scaled down, arb ticket 0.5% of daily volume | +7.71 | +4.06 |
-| Arb ticket ×4 (2%) | +2.61 | −1.59 |
-| Arb ticket ×4, at 12 bps / 400 ms | +7.35 | |
-| Arb slot clock shifted 200 ms | +7.79 | |
-| Whole Binance tickets, every 1,778th trade, three offsets | +2.17 to +2.61 | −0.08 to +0.11 |
+| Variant | 12 bps / 400 ms | 12 bps / 1 s | 8 bps / 400 ms |
+|---|---:|---:|---:|
+| Reference: flow scaled down, arb ticket 0.5% of daily volume, $1M/day | +9.47 | +7.71 | +4.06 |
+| Arb ticket ×4 (2%) | +7.35 | +2.61 | −1.59 |
+| Arb slot clock shifted 200 ms | | +7.79 | |
+| Whole Binance tickets (every N-th trade, three offsets), $1M/day | +3.85 to +3.97 | +2.38 to +2.61 | −0.06 to +0.05 |
+| Whole tickets + arb ticket ×4 | +1.93 to +2.03 | **−2.92 to −2.94** | |
+| Whole tickets at $500k / $2M / $4M per day | | +1.5–1.8 / +3.2–3.3 / +3.9–4.5 | |
 
-- **Whole tickets** keep real sizes and timing. The volume is about the same, but there are about 100
-  lumpy trades a day. The $100k inventory cap fills only 74–79% of the volume, and large tickets have
-  2.7–4.8 bps of adverse selection.
-- **Real flow on our venue is somewhere between the two:** small-venue retail tickets are smaller than
-  Binance's average.
-- **The arb at 12 bps is robust at 400 ms but not at 1 s.** A larger arb ticket at 1 s lag takes most of
-  the edge.
+- **Whole tickets** keep real sizes and timing. There are about 100 lumpy trades a day at $1M/day,
+  fewer at lower volume. The inventory cap is 10% of volume, so it refuses more of the volume as
+  volume falls (65% filled at $500k, 89% at $4M). Tickets over $100k carry 2.7–4.8 bps of adverse
+  selection.
+- **Whole-ticket break-even at 12 bps / 1 s is measured, not extrapolated:**
+  - −$11 to −$25/day at $500k;
+  - +$136 to +$159/day at $1M;
+  - so about $550k/day.
+- **Real flow on our venue could be smaller than Binance's average (retail) or lumpier (a few whales).**
+  The beta has to measure it.
+- **Lag decides robustness:**
+  - at 400 ms, 12 bps stays positive in every combination tested;
+  - at 1 s, the combination of whole tickets and a larger arb loses −2.9 bps.
 
 ## Best settings
 
 | | Fee | Lag | Hedge | Why |
 |---|---:|---|---|---|
-| **Recommended start** | **12 bps** | **≤ 400 ms if possible**, ≤ 1 s at most | tight (net ≤ 1% of daily volume) | +7.4 to +9.5 bps at 400 ms in both arb-size variants; +2.2 to +7.7 bps across flow shapes at 1 s. 12 bps per trade is close to Jupiter's 6 bps base plus borrow plus impact for a one-day hold |
-| Not on its own | 8 bps | ≤ 400 ms | tight | +4.1 bps with small tickets; ~0 with whole tickets or a 4× arb |
+| **Recommended start** | **12 bps** | **≤ 400 ms** | tight (net ≤ 1% of daily volume) | +1.9 to +9.5 bps in every flow and arb variant tested. 12 bps per trade is close to Jupiter's 6 bps base plus borrow plus impact for a one-day hold |
+| Acceptable only with small tickets | 12 bps | ≤ 1 s | tight | +7.7 bps with small tickets, but −2.9 bps with whole tickets and a 4× arb |
+| Not on its own | 8 bps | ≤ 400 ms | tight | +4.1 bps with small tickets; ~0 with whole tickets; −1.6 bps with a 4× arb |
 | Do not run | ≤ 5 bps | any reachable lag | any | Negative edge under the arb overlay |
 
 ## Adverse selection (measured, replaces the model's 2 bps)
@@ -165,8 +175,9 @@ The parent session gathered them; see "Sources".
 | JLP pool + protocol take, 67 weeks | ~24 (≈19.5 to JLP) | 18 bps fees plus ~6 bps of trader losses |
 | JLP, Q3 2026 / Q2 2026 | 20.7 / 26.5 (17.3 / 22.9 to JLP) | |
 | JLP trader-loss part, by half-year | −12.7 to +1.2 | Directional: OI is ~90% long and JLP holds the coins |
-| **Us, 12 bps, ≤ 1 s, hedged** | **+2.2 to +9.5** | Depends on flow shape and lag; no directional bet |
-| Us, 8 bps, 400 ms, hedged | −0.1 to +4.1 | |
+| **Us, 12 bps, 400 ms, hedged** | **+1.9 to +9.5** | Depends on flow shape and arb; no directional bet |
+| Us, 12 bps, 1 s, hedged | −2.9 to +7.8 | |
+| Us, 8 bps, 400 ms, hedged | −1.6 to +4.1 | |
 | Us, 5 bps (model default), 1 s, hedged | −10.6 | |
 
 - **Jupiter charges more than our grid.** It takes 6 bps on open and 6 on close, plus a price-impact
@@ -176,6 +187,45 @@ The parent session gathered them; see "Sources".
 - **JLP's extra edge comes from holding the coins against long-skewed flow.** We treat that as risk,
   not edge. Our unhedged column shows the same effect: +0.3 to +3.3 bps over hedged in a +37% SOL
   window, with 1.5–6× the daily SD.
+
+## Price model: fills settle at the mark on both trade paths (no spread)
+
+Every number here assumes fills settle at the market's effective mark, so the fee is the whole edge.
+This was checked at the pin (wrapper `5cb331dd`, engine `4db11a8c`) because upstream's matcher
+advertises a spread.
+
+**What upstream's matcher does.** `aeyakovenko/percolator-match` (HEAD `60aac3a`) is a passive LP
+matcher. It quotes bid = ⌊oracle × (1 − edge)⌋ and ask = ⌈oracle × (1 + edge)⌉, with
+`edge_bps: 50` as its config default. Its `vamm.rs` also has `base_spread_bps` and `impact_k_bps`.
+It is called through `TradeCpi`.
+
+**Why the spread is not captured at our pin:**
+- `TradeCpi` invokes the matcher and checks its return (`P 9402-9443`): same oracle, same request,
+  non-zero price, and the taker's `limit_price` against the matcher's price. It then hands
+  `ret.exec_price_e6` to the same `handle_trade_nocpi_zero_copy` path (`P 9450-9471`).
+- There the price goes through `accepted_reported_trade_price_view` (`P 15237-15262`). Under AuthMark,
+  and in any mode without trade-driven mark discovery, that returns the **effective price**.
+- The engine uses `exec_price` only to size the fee (`E 17656-17660`). It applies the position change
+  with no cash transfer at the quoted price (`E 17676-17694`). Gains and losses then accrue against
+  the shared mark.
+- So a 50 bps quote changes:
+  - the fee notional, by 0.5%;
+  - which taker limits pass, so a taker with a tight limit is refused rather than charged;
+  - in EWMA or hybrid oracle modes only, the mark-discovery input.
+
+  It does not move cash from taker to LP.
+- **`TradeNoCpi` (our staging path) behaves the same.** Settlement is at the mark, and `exec_price` is
+  the fee basis (`P 8076-8098`).
+- **The two paths differ on the fee.** `TradeCpi` charges only `trade_fee_base_bps`, because the
+  unsigned LP cannot approve more (`P 9465-9468`). `TradeNoCpi`, co-signed by our LP, can charge any
+  `fee_bps` up to `max_trading_fee_bps`.
+- **So any per-trade fee policy needs `TradeNoCpi`:** the size-based fee below, or a fee raised while
+  the mark is stale.
+
+This matches `ops/MONEY_MODEL.md` fact 1, so nothing in the ops model needs fixing on this point. If a
+later pin settles at the matcher's price, a spread line would be added to the replay, and it would
+widen the arb's threshold. The 50 bps in percolator-match reads as a quoting convention carried over
+from earlier engine versions, *to confirm with upstream*.
 
 ## Size-based fee: possible, but it does nothing with scaled tickets
 
@@ -239,15 +289,15 @@ The parent session gathered them; see "Sources".
 | Hedge latency | 500 ms | assumption |
 | Hedge funding | Hyperliquid SOL hourly funding, same window | measured |
 | Inventory limit | 10% of daily volume | from `ops/CAPITAL_PLAN.md` ($100k at $1M/day), scaled |
-| Arb cost / size / rate | 2 bps / 0.5% of daily volume (and 2%) / one per 400 ms slot | assumption |
+| Arb cost / size / rate | 2 bps / 0.5% of daily volume (and 2%) / one per 400 ms slot (and shifted 200 ms) | assumption |
 | Fixed cost | $101.85/day (SOL tx, RPC, servers, capital cost) | `ops/money_model.py` defaults (unverified there) |
 | Other lines | +0.68 bps (liquidation, backing, maintenance, minus 0.5 bps bad debt) | `ops/money_model.py` defaults (unverified there) |
 | Jupiter / JLP | see "Benchmark" | external reports |
 
 ## Limits
 
-- **Flow shape.** This is the biggest open question: whole-ticket and scaled flow differ by about 5 bps
-  of edge.
+- **Flow shape.** This is the biggest open question: whole-ticket and scaled flow differ by 5–6 bps of
+  edge.
   - Binance flow is the most informed, HFT-heavy SOL flow there is, and its markout includes its own
     price impact, which our tiny venue would not cause. So 2.2–2.4 bps is likely an **upper** estimate
     for organic flow. Retail-sized trades show 0.1–1.0 bps.
@@ -257,8 +307,9 @@ The parent session gathered them; see "Sources".
   12 bps than at 5 bps: Jupiter's SOL volume fell 21–28% when its imbalance fee arrived. So the 15–20
   bps rows are not achievable as shown. Fee elasticity is unmeasured.
 - **Toxic flow is a stress scenario, not a bound.**
-  - The arb's 2 bps cost, ticket size and one-per-slot rate are guesses. A 4× ticket is shown, and a
-    better-timed or larger arb could take more.
+  - The arb's 2 bps cost, ticket size and one-per-slot rate are guesses. A 4× ticket, a shifted clock
+    and their combination with whole tickets are shown. A better-timed or still larger arb could take
+    more.
   - The matcher's real defence is not modelled: the LP co-signs `TradeNoCpi` and can refuse fills
     while target ≠ effective (`ops/MONEY_MODEL.md`). That would cut the arb's take.
   - The base-flow grid, with no arb, is in the appendix for comparison.
@@ -557,9 +608,9 @@ Inventory limit 10% of daily volume: base flow filled 98.6% of offered notional.
 
 ### Setting 12 bps / 1000 ms / tight hedge, toxic, $1M/day
 
-Net/day mean 669, SD 546, max drawdown $3k, days positive 97%.
+Net/day mean 669, SD 546, max drawdown $3k, days positive 97%. Peak net exposure over every fill $39k.
 
-| Inventory | p50 | p95 | p99 | max |
+| Inventory, sampled each minute | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
 | net exposure, LP + hedge | $3k | $8k | $9k | $17k |
 | LP on-chain position | $69k | $99k | $100k | $100k |
@@ -576,9 +627,9 @@ Five worst days:
 
 ### Setting 5 bps / 1000 ms / tight hedge, toxic, $1M/day
 
-Net/day mean -1,164, SD 1,790, max drawdown $105k, days positive 8%.
+Net/day mean -1,164, SD 1,790, max drawdown $105k, days positive 8%. Peak net exposure over every fill $38k.
 
-| Inventory | p50 | p95 | p99 | max |
+| Inventory, sampled each minute | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
 | net exposure, LP + hedge | $3k | $9k | $10k | $20k |
 | LP on-chain position | $64k | $100k | $100k | $100k |
@@ -593,19 +644,37 @@ Five worst days:
 | 2026-08-27 | -3,928 | 3,729 | -5,807 | 1,743 | +6.9% | 9.3% | 91% |
 | 2026-08-28 | -3,861 | 3,683 | -5,825 | 1,625 | -4.6% | 7.3% | 85% |
 
-### Sensitivity: toxic flow, tight hedge, $1M/day, one input changed per row
+### Sensitivity: toxic flow, tight hedge (whole tickets: every N-th trade, N = mean notional / volume, offsets 0, N/3, 2N/3)
 
-| Variant | Fee | Lag | Edge bps | Net/day | SD/day | Max DD | Filled |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| reference (as headline) | 12 | 1000 ms | 7.71 | 669 | 546 | $3k | 96% |
-| arb ticket x4 (2% of volume) | 8 | 400 ms | -1.59 | -261 | 1,075 | $31k | 92% |
-| arb ticket x4 (2% of volume) | 8 | 1000 ms | -15.39 | -1,641 | 2,966 | $149k | 83% |
-| arb ticket x4 (2% of volume) | 12 | 400 ms | 7.35 | 633 | 646 | $5k | 95% |
-| arb ticket x4 (2% of volume) | 12 | 1000 ms | 2.61 | 159 | 1,342 | $16k | 86% |
-| arb slot phase +200 ms | 12 | 1000 ms | 7.79 | 678 | 502 | $3k | 96% |
-| whole tickets, every 1,778th from offset 0 | 12 | 1000 ms | 2.61 | 159 | 372 | $3k | 74% |
-| whole tickets, every 1,778th from offset 592 | 12 | 1000 ms | 2.17 | 115 | 442 | $4k | 75% |
-| whole tickets, every 1,778th from offset 1,185 | 12 | 1000 ms | 2.37 | 135 | 440 | $5k | 77% |
-| whole tickets, every 1,778th from offset 0 | 8 | 400 ms | -0.06 | -107 | 314 | $11k | 76% |
-| whole tickets, every 1,778th from offset 592 | 8 | 400 ms | -0.08 | -110 | 339 | $10k | 77% |
-| whole tickets, every 1,778th from offset 1,185 | 8 | 400 ms | 0.11 | -91 | 304 | $10k | 79% |
+| Variant | Offset | Volume/day | Fee | Lag | Edge bps | Net/day | SD/day | Max DD | Filled |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reference (as headline) |  | $1.0M | 12 | 1000 ms | 7.71 | 669 | 546 | $3k | 96% |
+| arb ticket x4 |  | $1.0M | 8 | 400 ms | -1.59 | -261 | 1,075 | $31k | 92% |
+| arb ticket x4 |  | $1.0M | 8 | 1000 ms | -15.39 | -1,641 | 2,966 | $149k | 83% |
+| arb ticket x4 |  | $1.0M | 12 | 400 ms | 7.35 | 633 | 646 | $5k | 95% |
+| arb ticket x4 |  | $1.0M | 12 | 1000 ms | 2.61 | 159 | 1,342 | $16k | 86% |
+| arb slot phase +200 ms |  | $1.0M | 12 | 1000 ms | 7.79 | 678 | 502 | $3k | 96% |
+| whole tickets | 0/3 N | $1.0M | 12 | 1000 ms | 2.61 | 159 | 372 | $3k | 74% |
+| whole tickets | 1/3 N | $1.0M | 12 | 1000 ms | 2.38 | 136 | 456 | $5k | 77% |
+| whole tickets | 2/3 N | $1.0M | 12 | 1000 ms | 2.42 | 140 | 437 | $5k | 75% |
+| whole tickets | 0/3 N | $1.0M | 8 | 400 ms | -0.06 | -107 | 314 | $11k | 76% |
+| whole tickets | 1/3 N | $1.0M | 8 | 400 ms | 0.03 | -99 | 282 | $10k | 78% |
+| whole tickets | 2/3 N | $1.0M | 8 | 400 ms | 0.05 | -97 | 312 | $10k | 75% |
+| whole tickets | 0/3 N | $1.0M | 12 | 400 ms | 3.85 | 284 | 256 | $602 | 73% |
+| whole tickets | 1/3 N | $1.0M | 12 | 400 ms | 3.94 | 292 | 269 | $1k | 76% |
+| whole tickets | 2/3 N | $1.0M | 12 | 400 ms | 3.97 | 295 | 290 | $1k | 73% |
+| whole tickets + arb ticket x4 | 0/3 N | $1.0M | 12 | 400 ms | 1.96 | 94 | 450 | $5k | 73% |
+| whole tickets + arb ticket x4 | 1/3 N | $1.0M | 12 | 400 ms | 2.03 | 101 | 534 | $7k | 77% |
+| whole tickets + arb ticket x4 | 2/3 N | $1.0M | 12 | 400 ms | 1.93 | 91 | 536 | $6k | 74% |
+| whole tickets + arb ticket x4 | 0/3 N | $1.0M | 12 | 1000 ms | -2.92 | -394 | 1,309 | $39k | 72% |
+| whole tickets + arb ticket x4 | 1/3 N | $1.0M | 12 | 1000 ms | -2.93 | -395 | 1,392 | $40k | 74% |
+| whole tickets + arb ticket x4 | 2/3 N | $1.0M | 12 | 1000 ms | -2.94 | -396 | 1,363 | $39k | 73% |
+| whole tickets | 0/3 N | $500k | 12 | 1000 ms | 1.82 | -11 | 212 | $3k | 66% |
+| whole tickets | 1/3 N | $500k | 12 | 1000 ms | 1.54 | -25 | 221 | $4k | 65% |
+| whole tickets | 2/3 N | $500k | 12 | 1000 ms | 1.66 | -19 | 207 | $4k | 65% |
+| whole tickets | 0/3 N | $2.0M | 12 | 1000 ms | 3.32 | 562 | 804 | $7k | 84% |
+| whole tickets | 1/3 N | $2.0M | 12 | 1000 ms | 3.26 | 550 | 857 | $8k | 84% |
+| whole tickets | 2/3 N | $2.0M | 12 | 1000 ms | 3.15 | 528 | 822 | $7k | 85% |
+| whole tickets | 0/3 N | $4.0M | 12 | 1000 ms | 4.47 | 1,685 | 1,953 | $14k | 89% |
+| whole tickets | 1/3 N | $4.0M | 12 | 1000 ms | 4.01 | 1,503 | 1,942 | $17k | 88% |
+| whole tickets | 2/3 N | $4.0M | 12 | 1000 ms | 3.90 | 1,456 | 1,885 | $17k | 87% |
