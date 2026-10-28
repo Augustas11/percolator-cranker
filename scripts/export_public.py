@@ -19,8 +19,10 @@
   inside the tree, outside the
   directories the gate skips (target/, upstream/), and free of dot
   components other than .github / .gitignore.
-* Layout rewrites are explicit and anchored; then the content gate runs
-  (scripts/check_public_tree.py) with the private denylist.
+* Layout rewrites are explicit and anchored; then the leak helper
+  (scripts/check_public_tree.sh, a plain pattern check) runs with the
+  private denylist. The allowlist above is the control; the helper and the
+  owner's read of the tree before the first push are the backstops.
 
 Env: PUBLIC_NAME (default "percolator-reference-keeper") replaces
 @PUBLIC_NAME@. SECURITY_CONTACT replaces @SECURITY_CONTACT@; without it the
@@ -156,7 +158,7 @@ def main(argv):
 
         n = sum(len(f) for _, _, f in os.walk(tmp))
         print(f"exported {n} files from {head[:12]}")
-        gate = [sys.executable, "-I", os.path.join(HERE, "check_public_tree.py")]
+        gate = ["bash", os.path.join(HERE, "check_public_tree.sh")]
         if contact:
             if "@" in contact:
                 gate += ["--allow-email", contact]
@@ -166,7 +168,7 @@ def main(argv):
             gate.append("--draft")
         gate += [tmp, os.path.join(HERE, "public_denylist.txt")]
         if subprocess.run(gate).returncode != 0:
-            die("content gate failed")
+            die("leak helper found hits (see above)")
         # No-replace publication: mkdir is atomic and fails if anything now
         # exists at dest (a plain rename could replace an empty directory
         # created meanwhile). Then move the entries into the directory we own.

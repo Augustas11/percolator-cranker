@@ -28,7 +28,6 @@ client/src/main.rs crates/bringup/src/main.rs
 client/src/plan_gate.rs crates/bringup/src/plan_gate.rs
 scripts/m1_bringup.sh scripts/m1_bringup.sh
 scripts/check_public_tree.sh scripts/check_public_tree.sh
-scripts/check_public_tree.py scripts/check_public_tree.py
 scripts/fetch_upstream.sh scripts/fetch_upstream.sh
 scripts/pins.env scripts/pins.env
 .github/workflows/ci.yml .github/workflows/ci.yml

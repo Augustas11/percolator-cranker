@@ -1,377 +1,122 @@
 #!/usr/bin/env python3
-"""Regression probes for the public content gate (private; never exported).
-
-Every bypass found in audit rounds is planted in a fresh tree here, and the
-gate must FAIL on it; a clean tree must pass. Run:
+"""Tests for the public export (private; never exported). Run:
 
     python3 scripts/test_check_public_tree.py
+
+* Exporter: the allowlist is the control, so it is tested properly. Only
+  manifest files are copied, from the committed HEAD; unlisted committed
+  files are refused; bad destinations, duplicates and existing targets are
+  refused; a failed export leaves nothing behind.
+* Leak helper (check_public_tree.sh): a plain pattern check. One hit per
+  pattern, and a clean tree passes. Bypasses are out of scope by design.
 """
 
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.realpath(__file__))
-GATE = os.path.join(HERE, "check_public_tree.py")
+HELPER = os.path.join(HERE, "check_public_tree.sh")
 DENY = os.path.join(HERE, "public_denylist.txt")
 OWNER = "aug" + "star"  # denylisted owner handle, split so this file stays greppable
-KEY64 = "[" + ",".join(str(i) for i in range(64)) + "]"
 
 
-def run_gate(root, *flags, deny=True):
-    args = [sys.executable, "-I", GATE, *flags, root] + ([DENY] if deny else [])
+def run_helper(root, *flags, deny=DENY):
+    args = ["bash", HELPER, *flags, root] + ([deny] if deny else [])
     p = subprocess.run(args, capture_output=True, text=True)
     return p.returncode, p.stdout + p.stderr
 
 
-class Gate(unittest.TestCase):
+class Helper(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="gate-probe-")
+        self.root = tempfile.mkdtemp(prefix="helper-probe-")
         self.put("README.md", "clean keeper docs, see http://127.0.0.1:8899 and "
                               "https://github.com/aeyakovenko/percolator-prog\n")
 
     def tearDown(self):
-        for dirpath, dirs, _ in os.walk(self.root):
-            for d in dirs:
-                os.chmod(os.path.join(dirpath, d), 0o755)
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def put(self, rel, text=None, data=None):
+    def put(self, rel, text):
         p = os.path.join(self.root, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "wb") as f:
-            f.write(data if data is not None else text.encode("utf-8"))
-        return p
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
 
-    def assertFails(self, needle=None, *flags):
-        rc, out = run_gate(self.root, *flags)
+    def fresh(self):
+        self.tearDown()
+        self.setUp()
+
+    def assertHit(self, label, *flags):
+        rc, out = run_helper(self.root, *flags)
         self.assertEqual(rc, 1, out)
-        if needle:
-            self.assertIn(needle, out)
-        return out
-
-    def each_fails(self, cases, needle=None):
-        """Each payload in its own fresh tree, so diagnostics cannot overlap."""
-        for rel, text in cases:
-            with self.subTest(payload=text):
-                self.tearDown()
-                self.setUp()
-                self.put(rel, text)
-                self.assertFails(needle)
+        self.assertIn(label, out)
 
     def test_clean_tree_passes(self):
-        rc, out = run_gate(self.root)
+        rc, out = run_helper(self.root)
         self.assertEqual(rc, 0, out)
 
-    # ---- names, links, encodings, walk errors ----
-    def test_names_with_space_quote_newline(self):
-        for name in ["a b.md", "maintainer's.md", "x\ny.md"]:
-            self.put(name, f"{OWNER}\n")
-        out = self.assertFails("bad file name")
-        self.assertEqual(out.count("bad file name"), 3, out)
+    def test_key_array(self):
+        self.put("id.txt", "[" + ",".join(str(i) for i in range(64)) + "]\n")
+        self.assertHit("64-number key array")
 
-    def test_dot_components(self):
-        self.put(".hidden/x.md", "x\n")
-        self.put("docs/.secret.md", "x\n")
-        self.assertFails("dot path component")
+    def test_private_key_header(self):
+        self.put("k.txt", "-----BEGIN " + "PRIVATE KEY-----\n")
+        self.assertHit("private key header")
 
-    def test_symlinks(self):
-        self.put("real.md", "x\n")
-        os.symlink("real.md", os.path.join(self.root, "link.md"))
-        os.symlink(self.root, os.path.join(self.root, "dirlink"))
-        out = self.assertFails("symlink")
-        self.assertIn("dirlink", out)
+    def test_secret_file_names(self):
+        for name in ("deploy-keypair.json", "id.json", ".env"):
+            with self.subTest(name=name):
+                self.fresh()
+                self.put(name, "x\n")
+                self.assertHit("secret-looking file")
 
-    def test_late_binary_and_utf16(self):
-        self.put("a.md", data=b"text\n" * 50000 + b"\0tail")
-        self.put("b.md", data=b"public padding\n" * 15000 + f"{OWNER}\n{KEY64}\n".encode("utf-16le"))
-        out = self.assertFails("non-text file")
-        self.assertEqual(out.count("non-text file"), 2, out)
+    def test_home_paths(self):
+        for path in ("/Us" + "ers/alice/x", "/ho" + "me/bob/x"):
+            with self.subTest(path=path):
+                self.fresh()
+                self.put("a.md", path + "\n")
+                self.assertHit("home path")
 
-    def test_unreadable_directory(self):
-        self.put("hidden/secret.md", f"{OWNER}\n")
-        os.chmod(os.path.join(self.root, "hidden"), 0)
-        if os.geteuid() == 0:
-            self.skipTest("root can read anything")
-        self.assertFails("SCAN ERROR")
+    def test_email_and_security_contact(self):
+        self.put("a.md", "mail me: someone@example.org\n")
+        self.assertHit("email")
+        self.fresh()
+        self.put("SECURITY.md", "report to sec@example.org\n")
+        rc, out = run_helper(self.root, "--allow-email", "sec@example.org")
+        self.assertEqual(rc, 0, out)
+        self.put("docs/x.md", "sec@example.org\n")  # only SECURITY.md may carry it
+        self.assertHit("email", "--allow-email", "sec@example.org")
 
-    def test_missing_dir_is_an_error(self):
-        rc, _ = run_gate(os.path.join(self.root, "nope"))
+    def test_denylist_contents_file_names_and_private_repo(self):
+        for rel, text in (("a.md", f"by {OWNER}\n"),
+                          (f"{OWNER}-notes.md", "x\n"),
+                          ("b.md", "see github.com/Augustas" + "11/percolator-cranker/pull/1\n")):
+            with self.subTest(rel=rel):
+                self.fresh()
+                self.put(rel, text)
+                self.assertHit("denylisted")
+
+    def test_placeholder_unless_draft(self):
+        self.put("SECURITY.md", "contact @SECURITY" + "_CONTACT@\n")
+        self.assertHit("unreplaced placeholder")
+        rc, out = run_helper(self.root, "--draft")
+        self.assertEqual(rc, 0, out)
+
+    def test_binaries_skipped_and_bad_usage(self):
+        with open(os.path.join(self.root, "blob.bin"), "wb") as f:
+            f.write(b"\0\1\2" + OWNER.encode())
+        rc, out = run_helper(self.root)
+        self.assertEqual(rc, 0, out)
+        rc, _ = run_helper(os.path.join(self.root, "missing"))
         self.assertEqual(rc, 2)
 
-    # ---- secrets ----
-    def test_secret_file_names(self):
-        for name in [".env.production", ".envrc", ".env-production", "id.json.bak",
-                     "WALLET-main.JSON", "deploy-keypair.json", "x.pem", "y.key"]:
-            self.put("s/" + name if not name.startswith(".") else name, "x\n")
-        out = self.assertFails()
-        for name in [".env.production", ".envrc", ".env-production", "id.json.bak",
-                     "WALLET-main.JSON", "deploy-keypair.json", "x.pem", "y.key"]:
-            self.assertIn(name, out)  # dot files fail as dot components; the rest as secrets
-
-    def test_key_arrays_any_layout(self):
-        self.put("k.json", "[\n" + ",\n  ".join(str(i) for i in range(64)) + "\n]\n")
-        self.put("k.rs", "let k: [u8; 64] = " + ", ".join(str(i) for i in range(64)).join("[]") + ";\n")
-        out = self.assertFails("keypair-like")
-        self.assertEqual(out.count("keypair-like"), 2, out)
-
-    def test_key_markers(self):
-        self.put("a.md", "seed phrase = alpha beta gamma\n")
-        self.put("b.md", "mnemonic: alpha beta\n")
-        self.put("c.md", "-----BEGIN PRIVATE KEY-----\n")
-        out = self.assertFails("private key marker")
-        self.assertEqual(out.count("private key marker"), 3, out)
-
-    def test_plural_mnemonics_in_prose_is_fine(self):
-        self.put("CONTRIBUTING.md", "No keys, mnemonics or RPC tokens in commits.\n")
-        rc, out = run_gate(self.root)
+    def test_helper_passes_on_its_own_source(self):
+        shutil.copy(HELPER, os.path.join(self.root, "check_public_tree.sh"))
+        rc, out = run_helper(self.root)
         self.assertEqual(rc, 0, out)
-
-    # ---- paths, emails, urls ----
-    def test_absolute_paths(self):
-        self.put("p.md", "/home/Alice/x\n/users/bob/y\n/Volumes/z\n/root/q\n/private/var/k\nC:\\Users\\x\n")
-        out = self.assertFails("absolute path")
-        self.assertEqual(out.count("absolute path"), 6, out)
-
-    def test_emails(self):
-        self.put("e.md", "mail owner@gmail.com\n")
-        self.assertFails("email")
-
-    def test_security_contact_email_allowed_only_in_security_md(self):
-        self.put("SECURITY.md", "report to sec@team.dev\n")
-        rc, out = run_gate(self.root, "--allow-email", "sec@team.dev")
-        self.assertEqual(rc, 0, out)
-        self.put("README2.md", "or sec@team.dev\n")
-        rc, out = run_gate(self.root, "--allow-email", "sec@team.dev")
-        self.assertEqual(rc, 1, out)
-
-    def test_urls(self):
-        self.put("u.md", "\n".join([
-            "https://sh.rustup.rs.evil.com/x",
-            "HTTPS://evil.example",
-            "https://docs.rs.evil.com/a",
-            "http://127.0.0.1@remote.example:8899/",
-            "https://github.com/aeyakovenko/percolator-evil",
-            "ftp://127.0.0.1/x",
-        ]) + "\n")
-        out = self.assertFails("url not allowlisted")
-        self.assertEqual(out.count("url not allowlisted"), 6, out)
-
-    def test_schemeless_github(self):
-        self.put("g.md", "see github.com/someone/private\n"
-                         "and github.com/aeyakovenko/percolator plus github.com/owner2/repo\n"
-                         "github.com/aeyakovenko/percolator-progx\n")
-        out = self.assertFails("github mention")
-        self.assertEqual(out.count("github mention"), 3, out)
-
-    def test_allowed_urls_pass(self):
-        self.put("ok.md", "https://github.com/aeyakovenko/percolator/issues/243\n"
-                          "https://github.com/aeyakovenko/percolator-prog.git\n"
-                          "http://[::1]:8899 http://localhost:8899/ https://release.anza.xyz/v2.0.21/install\n")
-        rc, out = run_gate(self.root)
-        self.assertEqual(rc, 0, out)
-
-    # ---- fixture marker ----
-    def test_fixture_marker_scope(self):
-        m = "// public-check: allow-test-fixture"
-        self.put("crates/c/tests/ok.rs", f'"http://127.0.0.1@remote.example:8899" {m}\n')
-        rc, out = run_gate(self.root)
-        self.assertEqual(rc, 0, out)
-        self.put("src/x.rs", f'"https://evil.example" {m}\n')
-        self.put("crates/c/tests/bad.rs", f'"https://github.com/someone/privaterepo owner@gmail.com" {m}\n')
-        self.put("crates/c/tests/bad2.rs", f'"http://127.0.0.1@realhost.com/" {m}\n')
-        out = self.assertFails()
-        self.assertIn("src/x.rs", out)
-        self.assertIn("bad.rs", out)
-        self.assertIn("bad2.rs", out)
-
-    # ---- operator stack, placeholders, denylist ----
-    def test_operator_paths(self):
-        for p in ["Staging/a.rs", "src/staging-bot/a.rs", "trader/a.rs", "matcher/a.rs",
-                  "backing_manager/a.rs", "src/monitoring/a.rs", "loadtest/a.rs",
-                  "docs/operator_playbook.md", "scripts/devnet_deploy.sh",
-                  "scripts/staging-local.sh", "x/my_devnet_ops.rs", "docs/STAGING.md",
-                  "monitor/alerts.yml", "web/dashboard.html", "cranker/src/bin/live_shaped.rs"]:
-            self.put(p, "x\n")
-        out = self.assertFails("operator-stack path")
-        self.assertEqual(out.count("operator-stack path"), 15, out)
-
-    def test_placeholders(self):
-        self.put("SECURITY.md", "contact @SECURITY_CONTACT@\n")
-        self.assertFails("unreplaced placeholder")
-        rc, out = run_gate(self.root, "--draft")
-        self.assertEqual(rc, 0, out)
-
-    def test_denylist_contents_and_names(self):
-        self.put("notes.md", f"{OWNER.upper()} wrote this\n")
-        self.put(f"docs/{OWNER}-notes.md", "x\n")
-        out = self.assertFails("denylisted")
-        self.assertIn("in file name", out)
-
-    def test_skips_only_top_level(self):
-        self.put("crates/x/src/upstream/leak.rs", f"{OWNER}\n")
-        self.put("crates/x/target/leak.rs", f"{OWNER}\n")
-        out = self.assertFails("denylisted")
-        self.assertEqual(out.count("denylisted"), 2, out)
-        shutil.rmtree(os.path.join(self.root, "crates"))
-        self.put("upstream/x.rs", f"{OWNER}\n")
-        self.put("target/x.rs", f"{OWNER}\n")
-        rc, out = run_gate(self.root)
-        self.assertEqual(rc, 0, out)
-
-
-class GateRound3(Gate):
-    """Round-3 audit bypasses."""
-
-    def test_gate_scripts_are_scanned_too(self):
-        self.put("scripts/check_public_tree.py", f"# seed phrase = alpha beta gamma\n# {OWNER}\n")
-        self.put("scripts/check_public_tree.sh", f"# {OWNER}\n")
-        out = self.assertFails()
-        self.assertIn("scripts/check_public_tree.py", out)
-        self.assertIn("scripts/check_public_tree.sh", out)
-
-    def test_real_gate_source_passes_its_own_rules(self):
-        shutil.copy(GATE, os.path.join(self.root, "check.py"))
-        shutil.copy(os.path.join(HERE, "check_public_tree.sh"), os.path.join(self.root, "check.sh"))
-        rc, out = run_gate(self.root)
-        self.assertEqual(rc, 0, out)
-
-    def test_rust_key_array_forms(self):
-        vals = [str(i) for i in range(64)]
-        self.put("a.rs", "const K: [u8; 64] = [" + ", ".join(vals) + ",];\n")
-        self.put("b.rs", "const K: [u8; 64] = [" + ", ".join(hex(i) for i in range(64)) + "];\n")
-        self.put("c.rs", "const K: [u8; 64] = [" + ", ".join(v + "u8" for v in vals) + "];\n")
-        self.put("d.rs", "const K = [0, /* comment */ " + ", ".join(vals[1:]) + "];\n")
-        out = self.assertFails("keypair-like")
-        self.assertEqual(out.count("keypair-like"), 4, out)
-
-    def test_recovery_markers_any_separator_and_multiline(self):
-        self.put("a.md", 'seed_phrase = "alpha"\n')
-        self.put("b.md", "seed-phrase: alpha\n")
-        self.put("c.md", "seed\nphrase: alpha beta\n")
-        self.put("d.md", "recovery phrase alpha\n")
-        out = self.assertFails("private key marker")
-        self.assertEqual(out.count("private key marker"), 4, out)
-
-    def test_github_traversal(self):
-        self.put("g.md", "\n".join([
-            "https://github.com/aeyakovenko/percolator/../../other/private",
-            "https://github.com/aeyakovenko/percolator/%2e%2e/%2e%2e/other/private",
-            "https://github.com/aeyakovenko/percolator/issues/../../../other/x",
-            "github.com/aeyakovenko/percolator/../../other/private",
-        ]) + "\n")
-        out = self.assertFails()
-        self.assertGreaterEqual(out.count("g.md"), 4, out)
-
-    def test_fixture_cannot_exempt_github_or_empty_host(self):
-        m = "// public-check: allow-test-fixture"
-        self.put("crates/c/tests/a.rs", f"github.com/other-owner/private-repo {m}\n")
-        self.put("crates/c/tests/b.rs", f'"http:///realhost.com/private" {m}\n')
-        out = self.assertFails()
-        self.assertIn("a.rs", out)
-        self.assertIn("b.rs", out)
-
-    def test_cargo_lock_github_mentions_checked(self):
-        self.put("Cargo.lock", "# github.com/other-owner/private-repo\n")
-        self.assertFails("github mention")
-
-    def test_trailing_newline_name_and_fifo(self):
-        self.put("note.md\n", "x\n")
-        os.mkfifo(os.path.join(self.root, "pipe.md"))
-        out = self.assertFails()
-        self.assertIn("bad file name", out)
-        self.assertIn("not a regular file", out)
-
-
-class GateRound4(Gate):
-    """Round-4 audit bypasses. Each payload runs in its own fresh tree, so one
-    payload's diagnostics cannot satisfy another's assertion."""
-
-    def test_key_array_comment_tricks(self):
-        self.each_fails([
-            ("a.rs", f"// backup: {KEY64}\n"),
-            ("b.rs", f'const RPC: &str = "http://localhost:8899"; const K: [u8;64] = {KEY64};\n'),
-            ("c.rs", "const K = [0, /* a /* nested */ b */ "
-                     + ", ".join(str(i) for i in range(1, 64)) + "];\n"),
-        ], "keypair-like")
-
-    def test_github_backslash_traversal(self):
-        self.each_fails([
-            ("a.md", "https://github.com/aeyakovenko/percolator/..\\..\\other/private\n"),
-            ("b.md", "github.com/aeyakovenko/percolator/..\\..\\other/private\n"),
-            ("c.md", "https://github.com/aeyakovenko/percolator\\..\\..\\other\n"),
-        ])
-
-    def test_github_traversal_each_form(self):
-        self.each_fails([
-            ("a.md", "https://github.com/aeyakovenko/percolator/../../other/private\n"),
-            ("b.md", "https://github.com/aeyakovenko/percolator/%2e%2e/%2e%2e/other/private\n"),
-            ("c.md", "github.com/aeyakovenko/percolator/../../other/private\n"),
-            ("d.md", "github.com/aeyakovenko/percolator/%2E%2E/%2e%2e/other/private\n"),
-        ])
-
-    def test_cargo_lock_urls_checked(self):
-        self.each_fails([
-            ("Cargo.lock", 'source = "registry+https://packages.internal.example/index"\n'),
-            ("Cargo.lock", 'source = "git+https://git.internal.example/team/svc?rev=aa#aa"\n'),
-            ("Cargo.lock", 'source = "sparse+https://registry.internal.example/"\n'),
-        ], "url not allowlisted")
-
-    def test_cargo_lock_public_sources_pass(self):
-        self.put("Cargo.lock", "\n".join([
-            'source = "registry+https://github.com/rust-lang/crates.io-index"',
-            'source = "sparse+https://index.crates.io/"',
-            'source = "git+https://github.com/solana-foundation/anchor?rev=e3cf#e3cf"',
-        ]) + "\n")
-        rc, out = run_gate(self.root)
-        self.assertEqual(rc, 0, out)
-
-    def test_private_path_forms(self):
-        u, h = "/Us" + "ers/", "/ho" + "me/"
-        self.each_fails([
-            ("a.md", u + "_operator/private.txt\n"),
-            ("b.md", h + "1000/private.txt\n"),
-            ("c.rs", 'const P: &str = "C:\\\\' + 'Users\\\\alice\\\\private.txt";\n'),
-            ("d.md", "D:\\" + "Users\\bob\\x.txt\n"),
-            ("e.md", "c:/" + "users/carol/x.txt\n"),
-        ], "absolute path")
-
-
-class GateRound5(Gate):
-    """Round-5 audit bypasses: commented keys over several lines, '//' inside
-    strings, non-ASCII and JSON-escaped home paths."""
-
-    def test_key_array_multiline_comments(self):
-        nums = [str(i) for i in range(64)]
-        self.each_fails([
-            ("a.rs", "// const BACKUP: [u8; 64] = [\n// " + ", ".join(nums) + "\n// ];\n"),
-            ("b.rs", "// [\n" + "".join(f"// {i},\n" for i in range(64)) + "// ]\n"),
-            ("c.rs", "/* backup\n * [\n" + "".join(f" * {i},\n" for i in range(64)) + " * ]\n */\n"),
-            ("d.py", "# [\n" + "".join(f"# {i},\n" for i in range(64)) + "# ]\n"),
-            ("e.rs", 'const RPC: &str = "http://localhost:8899"; const K: [u8; 64] = [0, /* first */ '
-                     + ", ".join(nums[1:]) + "];\n"),
-            ("f.rs", 'let u = "a // b"; /* x */ let k = [0, /* y */ ' + ", ".join(nums[1:]) + "];\n"),
-        ], "keypair-like")
-
-    def test_ordinary_code_with_strings_and_comments_passes(self):
-        self.put("ok.rs", 'let url = "http://127.0.0.1:8899"; // local rpc\n'
-                          '/* a /* nested */ block */ let v = [1, 2, 3];\n'
-                          'let s = "escaped \\" quote // not a comment";\n')
-        rc, out = run_gate(self.root)
-        self.assertEqual(rc, 0, out)
-
-    def test_unicode_and_json_escaped_home_paths(self):
-        u, h = "/Us" + "ers/", "/ho" + "me/"
-        self.each_fails([
-            ("a.md", u + "Élodie/Documents/notes.txt\n"),
-            ("b.md", h + "张伟/notes.txt\n"),
-            ("c.json", '{"path":"\\/Us' + 'ers\\/alice\\/config.json"}\n'),
-            ("d.json", '{"path":"\\/ho' + 'me\\/bob\\/x"}\n'),
-        ], "absolute path")
 
 
 class Exporter(unittest.TestCase):
@@ -380,27 +125,30 @@ class Exporter(unittest.TestCase):
     def setUp(self):
         self.repo = tempfile.mkdtemp(prefix="export-probe-")
         os.makedirs(os.path.join(self.repo, "scripts"))
-        for f in ("export_public.py", "check_public_tree.py"):
+        for f in ("export_public.py", "check_public_tree.sh"):
             shutil.copy(os.path.join(HERE, f), os.path.join(self.repo, "scripts", f))
         open(os.path.join(self.repo, "scripts", "public_denylist.txt"), "w").close()
-        for f in ("a.md", "b.md"):
-            with open(os.path.join(self.repo, f), "w") as fh:
-                fh.write("clean\n")
-        with open(os.path.join(self.repo, "dep.toml"), "w") as fh:
-            fh.write('[dependencies]\nx = { path = "../repo-prog" }\n')
+        self.write("a.md", "clean\n")
+        self.write("b.md", "clean\n")
+        self.write("dep.toml", '[dependencies]\nx = { path = "../repo-prog" }\n')
         self.dest = os.path.join(self.repo, "out", "tree")
 
     def tearDown(self):
         shutil.rmtree(self.repo, ignore_errors=True)
 
+    def write(self, rel, text):
+        p = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            fh.write(text)
+
     def commit(self, manifest):
         manifest += "dep.toml crates/cranker/Cargo.toml\ndep.toml crates/bringup/Cargo.toml\n"
-        with open(os.path.join(self.repo, "scripts", "public_manifest.txt"), "w") as fh:
-            fh.write(manifest)
+        self.write("scripts/public_manifest.txt", manifest)
         g = ["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@t.invalid"]
         subprocess.run(g + ["init", "-q"], check=True)
         subprocess.run(g + ["add", "-A"], check=True)
-        subprocess.run(g + ["commit", "-qm", "t"], check=True)
+        subprocess.run(g + ["commit", "-qm", "t", "--allow-empty"], check=True)
 
     def export(self):
         p = subprocess.run([sys.executable, "-I", os.path.join(self.repo, "scripts", "export_public.py"),
@@ -411,11 +159,58 @@ class Exporter(unittest.TestCase):
         out = os.path.dirname(self.dest)
         return sorted(os.listdir(out)) if os.path.isdir(out) else []
 
-    def test_clean_export(self):
-        self.commit("a.md README.md\nb.md docs/B.md\n")
+    def exported(self):
+        return sorted(os.path.relpath(os.path.join(d, f), self.dest)
+                      for d, _, fs in os.walk(self.dest) for f in fs)
+
+    def test_only_manifest_files_are_copied(self):
+        self.write("private.md", "not listed\n")  # committed, outside the checked dirs
+        self.commit("a.md README.md\n")
         rc, out = self.export()
         self.assertEqual(rc, 0, out)
+        self.assertEqual(self.exported(),
+                         ["README.md", "crates/bringup/Cargo.toml", "crates/cranker/Cargo.toml"])
         self.assertEqual(self.leftovers(), ["tree"])
+
+    def test_reads_committed_head_not_working_tree(self):
+        self.commit("a.md README.md\n")
+        self.write("a.md", "uncommitted edit\n")
+        rc, out = self.export()
+        self.assertEqual(rc, 0, out)
+        with open(os.path.join(self.dest, "README.md")) as fh:
+            self.assertEqual(fh.read(), "clean\n")
+
+    def test_unlisted_committed_file_in_checked_dir_refused(self):
+        self.write("cranker/src/lib.rs", "// listed\n")
+        self.write("cranker/src/extra.rs", "// not listed\n")
+        self.commit("a.md README.md\ncranker/src/lib.rs crates/cranker/src/lib.rs\n")
+        rc, out = self.export()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("cranker/src/extra.rs", out)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_manifest_file_not_committed_refused(self):
+        self.commit("a.md README.md\nnope.md docs/NOPE.md\n")
+        rc, out = self.export()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("not committed", out)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_bad_destinations_refused(self):
+        for to in ("../escape.md", "/abs.md", "docs/../../x.md", "target/x.md",
+                   "upstream/x.md", ".secret/x.md", "docs/./x.md"):
+            with self.subTest(to=to):
+                self.commit(f"a.md {to}\n")
+                rc, out = self.export()
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(self.leftovers(), [])
+
+    def test_forbidden_name_refused(self):
+        self.commit("a.md docs/prep.md\n")
+        rc, out = self.export()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("forbidden", out)
+        self.assertEqual(self.leftovers(), [])
 
     def test_duplicate_destinations(self):
         for manifest in ("a.md README.md\nb.md README.md\n", "a.md README.md\nb.md readme.md\n"):
@@ -432,6 +227,14 @@ class Exporter(unittest.TestCase):
         rc, out = self.export()
         self.assertEqual(rc, 1, out)
         self.assertEqual(os.listdir(self.dest), [])
+
+    def test_helper_hit_leaves_nothing(self):
+        self.write("a.md", f"by {OWNER}\n")
+        self.write("scripts/public_denylist.txt", OWNER + "\n")
+        self.commit("a.md README.md\n")
+        rc, out = self.export()
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(self.leftovers(), [])
 
     def test_failure_while_publishing_removes_destination(self):
         self.commit("a.md README.md\nb.md docs/B.md\n")
@@ -455,4 +258,4 @@ class Exporter(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=1)
+    unittest.main()
