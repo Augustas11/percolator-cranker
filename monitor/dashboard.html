@@ -33,7 +33,7 @@ function render(s){
   const alerts=[];
   for(const q of k?.quarantined_accounts||[])if(q.slots>QUARANTINE_SLOTS)alerts.push(`KeeperAccountUnrefreshable: ${q.account} (${q.slots} slots, ${q.error})`);
   if(b?.expiring_with_liens>0)alerts.push(`BackingBucketExpiringWithLiens: ${b.expiring_with_liens}`);
-  if(k?.slots_since_last_success>NO_SUCCESS_SLOTS)alerts.push(`KeeperNoSuccessfulCrank: ${k.slots_since_last_success} slots`);
+  if(s.mode==='live'&&k?.slots_since_last_success>NO_SUCCESS_SLOTS)alerts.push(`KeeperNoSuccessfulCrank: ${k.slots_since_last_success} slots`);
   if(k&&(k.log_age_seconds>LOG_STALE_SECONDS||!k.log_ok))alerts.push('KeeperLogStale');
   if(s.chain_read_ok===0)alerts.push('MonitorChainReadFailing (fires after 5m)');
   if(lastMarket!==s.market){history=[];lastMarket=s.market;}

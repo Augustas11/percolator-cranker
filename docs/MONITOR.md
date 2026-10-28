@@ -99,7 +99,10 @@ v16_program.rs:318, engine `ResolvedPayoutLedgerV16`, v16.rs:5954).
   0 while `payout_halted` (the engine refuses claims then). The engine's wide
   mul-div is private at the pin, so the monitor uses an exact u128
   decomposition; if an intermediate would overflow, the metric is **omitted**
-  (JSON `null`) instead of approximated.
+  (JSON `null`) instead of approximated. That happens roughly once
+  `face × residual` exceeds ~3.4e26 atoms² (e.g. a 1e13-atom claim against a
+  ~3.4e13-atom residual), i.e. on large markets; `receipt_face_remaining` is
+  still reported then.
 - `{component="receipt_face_remaining"}`: exact Σ `face − paid_effective`, the
   ceiling before the rate haircut.
 - `{component="unreceipted_equity_upper_bound"}`: Σ `max(capital + pnl, 0)` for
@@ -237,4 +240,55 @@ The proxy ignores the absolute request target host and forwards to the explicit
 plain-HTTP upstream. Remove an account from the fault file to stop injection.
 This binary belongs only in isolated tests; it does forward transactions.
 
-## Validation (filled in by integrator)
+## Validation
+
+Run on 2026-10-28 against a fresh local market: a `solana-test-validator`
+on a private port with the wrapper at `5cb331dd` loaded, and unmodified `drip`
+(`CRANKER_CYCLES=600`) bootstrapping its own market `A6eM…kbZM`: 2 portfolios,
+Live, `vault = c_tot = 1,000,000`, all cranks `Ok(no-mut)`. drip ran through
+`fault-proxy` (`HTTP_PROXY`), with the monitor polling every 2 s. No Prometheus
+server was run. Each alert expression was checked by hand against captured
+`/metrics`, and the rules file was YAML-parsed (`promtool` not installed; run
+`promtool check rules monitor/alerts.yml` where it is).
+
+**Baseline.** `accounts_total 2`, `accounts_discovered 2`, all out-of-date
+counters 0, `market_mode{mode="live"} 1`, `unowned_collateral_atoms 0`,
+`senior_shortfall_atoms 0`, `keeper_crank_cu{stat="p50"} 18039`,
+`keeper_attempts_total{outcome="idle"} 38`, 0 failed.
+
+**Fault 1: a forced-failing account.** At 18:56 one cranked portfolio
+(`J3kAj…7BWfe`) was written to the fault file. drip quarantined it on the
+injected preflight error (strike 1 at slot 1114, backed off and retried up to
+strike 8). The monitor tracked it throughout. At 19:09:46:
+
+```
+percolator_keeper_quarantined_accounts 1
+percolator_keeper_account_quarantined_slots{account="J3kAj…7BWfe",error="RPC response error -32002: Transaction simulation failed: injected fault [1 log messages]",strike="8"} 1521
+percolator_keeper_attempts_total{outcome="failed"} 10
+```
+
+KeeperAccountUnrefreshable (`> 1500`) is **true**. The dashboard listed it
+under Conditions. Every other condition was false: log age 2 s, 5 slots since
+the last landed crank, chain read OK.
+
+**Fault 2: a stopped cranker.** drip was killed at 19:10:08, with the last
+landed crank at slot 2683.
+
+| after kill | log age (s) | slots since landed crank |
+|---|---|---|
+| +6 s | 5 | 10 |
+| +2m06s | **126** | 134 |
+| +5m06s | 307 | 470 |
+| +7m37s | 457 | **785** |
+
+KeeperLogStale (`> 120 s`) became true at about +2 min, and
+KeeperNoSuccessfulCrank (`> 750`, Live) at about +7.5 min. MonitorChainReadFailing
+stayed false.
+
+**Not covered here.** Buckets, Resolved claims and non-zero unowned collateral
+stayed at their trivial values on this bootstrap market. They are covered by
+unit tests only. Running the monitor against the SOL-PERP staging market is a
+follow-up once that market lands.
+
+Unit tests: `cargo test --release --manifest-path monitor/Cargo.toml` has 13
+passing (10 monitor, 3 fault-proxy).
