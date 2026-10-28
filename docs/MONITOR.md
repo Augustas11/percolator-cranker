@@ -49,7 +49,8 @@ pins. Counters are identified below; other families are gauges.
 
 | Metric suffix (additional labels) | Source / meaning |
 |---|---|
-| `accounts_total` | Discovered portfolios with matching market and layout 18 |
+| `accounts_total` | Engine header `materialized_portfolio_count`, v16.rs:8133 |
+| `accounts_discovered` | Discovered portfolios with matching market and layout 18 (separate RPC read; can differ briefly) |
 | `accounts_decode_errors` | Matching portfolios rejected by wrapper `read_portfolio`, v16_program.rs:2881 |
 | `accounts_out_of_date{kind}` | `stale_certificate`: header `stale_certificate_count`, v16.rs:8134; `b_stale`: `b_stale_account_count`, v16.rs:8135; `kf_stale`: sum of asset long/short counters, v16.rs:4926–4927 |
 | `asset_kf_stale_accounts{asset,side}` | Individual `stale_account_count_long/short`, v16.rs:4926–4927 |
@@ -87,11 +88,26 @@ status, not reclassified by wall-clock expiry.
 Resolved metrics are zero outside Resolved mode. Wrapper `read_portfolio`
 returns the engine Pod (v16_program.rs:217,2881), exposing capital/PnL
 (v16.rs:20599) and `resolved_payout_receipt` (v16.rs:20627).
-Receipt fields are in `ResolvedPayoutReceiptV16Account`, v16.rs:20510.
-`receipt_face_remaining` sums `terminal_positive_claim_face − paid_effective`
-for present, unfinalized receipts. `capital` is the exact field sum across
-market portfolios. `unreceipted_positive_pnl` sums positive PnL without a
-present receipt: **face only, not exact owed payout**. Decode failures are
+Receipt fields are in `ResolvedPayoutReceiptV16Account`, v16.rs:20510; the
+payout rate is in the market's `resolved_payout_ledger` (wrapper mirror
+v16_program.rs:318, engine `ResolvedPayoutLedgerV16`, v16.rs:5954).
+- `resolved_claimants_unpaid`: open receipts (present, not finalized), plus
+  portfolios with no receipt and `capital + pnl > 0`.
+- `resolved_owed_atoms{component="receipt_claimable_now"}`: **exact**. Σ
+  `floor(face · rate_num / rate_den) − paid_effective` over open receipts, as
+  the engine's `resolved_receipt_claimable_against_ledger` (v16.rs:18365). It is
+  0 while `payout_halted` (the engine refuses claims then). The engine's wide
+  mul-div is private at the pin, so the monitor uses an exact u128
+  decomposition; if an intermediate would overflow, the metric is **omitted**
+  (JSON `null`) instead of approximated.
+- `{component="receipt_face_remaining"}`: exact Σ `face − paid_effective`, the
+  ceiling before the rate haircut.
+- `{component="unreceipted_equity_upper_bound"}`: Σ `max(capital + pnl, 0)` for
+  portfolios with no receipt. **An upper bound, not exact owed**: the resolved
+  close (v16.rs:~19452) still settles fees and K/F, and the receipt's
+  positive face is then paid at the haircut rate.
+- `resolved_payout_halted`: ledger `payout_halted`.
+Decode failures are
 counted and excluded from sums; inspect `accounts_decode_errors` alongside them.
 
 ## Exact collateral calculation
@@ -131,15 +147,19 @@ Summary fields map directly to totals and the latest cycle. Any landed crank
 line (`Ok(mut)`, `Ok(unreconciled)`, `Ok(no-mut)`; `cranker/src/main.rs`
 `log_outcome`) clears that account's observed quarantine, mirroring drip:
 Progress calls `Quarantine::record_ok` and Idle calls `Quarantine::record_idle`,
-and both remove the strike entry (`cranker/src/quarantine.rs`). `HardReject`
-does not clear it. JSON quarantine events keep the first strike slot and update
+and both remove the strike entry (`cranker/src/quarantine.rs`). A
+`HardReject (EngineNonProgress)` line also clears it, since drip classes it as
+Idle (`submit::is_non_progress`, reused here). Any other `HardReject` keeps the
+account and updates its last error. JSON quarantine events keep the first strike slot and update
 error, strike, until-cycle and last-event slot. JSON `unconfirmed` and
 `idle_with_pending_work` events are kept in `keeper.last_events`; other event
 types are ignored.
 
 The latest landed-crank signature is resolved to a slot with
 `getSignatureStatuses` (history search), retried each poll until found, then
-cached. Log errors do not abort chain collection. Monitor restarts and log
+cached. Until a success is known, `keeper_slots_since_last_success` counts
+from the first chain slot the monitor saw with this log, so a keeper that fails
+from its start still trips the alert. Log errors do not abort chain collection. Monitor restarts and log
 truncation reset log counters. The keeper needs no change: it already prints
 every line used here.
 
@@ -149,7 +169,7 @@ Load `monitor/alerts.yml` into Prometheus (group `percolator-monitor`).
 
 | Alert | Threshold | Hold / severity |
 |---|---|---|
-| KeeperAccountUnrefreshable | quarantined slots > 1500 (≈10 min at 400 ms/slot) | 1m / warning |
+| KeeperAccountUnrefreshable | `max by (market, account)` quarantined slots > 1500 (≈10 min at 400 ms/slot) | 1m / warning |
 | UnownedCollateralDrift | abs(delta(unowned[1h])) > 1000 atoms; tune per market | 1m / warning |
 | BackingBucketExpiringWithLiens | expiring with liens > 0 | 1m / warning |
 | KeeperNoSuccessfulCrank | slots since last landed crank > 750 | 1m / warning |

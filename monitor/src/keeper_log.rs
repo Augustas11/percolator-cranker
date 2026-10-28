@@ -15,6 +15,7 @@ pub struct KeeperLog {
     pub market: Option<String>,
     pub signature: Option<String>,
     pub last_success_slot: Option<u64>,
+    pub first_seen_slot: Option<u64>,
     last_cycle: u64,
     summary: BTreeMap<String, u64>,
     attempts: [u64; 3],
@@ -123,6 +124,17 @@ impl KeeperLog {
                 {
                     self.signature = Some(sig.into());
                 }
+            } else if let Some((name, error)) = outcome
+                .strip_prefix("HardReject (")
+                .and_then(|s| s.split_once("): "))
+            {
+                // drip classes `EngineNonProgress` as Idle (`submit::is_non_progress`),
+                // which clears strikes; any other reject is a failure: keep its error.
+                if drip::submit::is_non_progress(Some(name)) {
+                    self.quarantine.remove(account);
+                } else if let Some(q) = self.quarantine.get_mut(account) {
+                    q["error"] = json!(error);
+                }
             }
         }
     }
@@ -177,7 +189,9 @@ impl KeeperLog {
             "last_cycle_summary":self.summary,"last_cycle_attempts":last,"last_cycle_cu":self.summary.get("cu").copied().unwrap_or(0),
             "attempts_total":outcomes(self.attempts),"cycles_total":outcomes(self.cycles),"crank_cu":{"p50":p50,"max":max},
             "quarantined_accounts":rows,"last_success_signature":self.signature,"last_success_slot":self.last_success_slot,
-            "slots_since_last_success":self.last_success_slot.map(|s|slot.saturating_sub(s)),"last_events":self.events})
+            // Before any known success, count from the first slot this log was watched,
+            // so a keeper failing from its start still trips the no-success alert.
+            "slots_since_last_success":self.last_success_slot.or(self.first_seen_slot).map(|s|slot.saturating_sub(s)),"last_events":self.events})
     }
 }
 
@@ -216,6 +230,22 @@ mod tests {
                 .replace("failed=1", "failed=0"),
         );
         assert_eq!(k.cycles, [1, 1, 1]);
+    }
+    #[test]
+    fn non_progress_reject_clears_other_rejects_update_error_and_no_success_baseline() {
+        let pk = "11111111111111111111111111111111";
+        let q = format!(r#"{{"event":"quarantine","account":"{pk}","error":"A","cycle":1,"slot":10,"strike":1,"until_cycle":3}}"#);
+        let mut k = KeeperLog::default();
+        k.line(&q);
+        k.line(&format!("  {pk} [live] ← HardReject (Custom): B"));
+        assert_eq!(k.quarantine[pk]["error"], "B");
+        k.line(&format!("  {pk} [live] ← HardReject (EngineNonProgress): idle"));
+        assert!(k.quarantine.is_empty());
+        // Failing from the start: no success yet, measured from the first watched slot.
+        k.first_seen_slot = Some(100);
+        assert_eq!(k.snapshot(900, true, None, None)["slots_since_last_success"], 800);
+        k.last_success_slot = Some(850);
+        assert_eq!(k.snapshot(900, true, None, None)["slots_since_last_success"], 50);
     }
     #[test]
     fn tail_partial_line_and_shrink_reset() {

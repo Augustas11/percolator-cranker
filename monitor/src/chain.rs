@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use percolator::{
     AssetLifecycleV16, BackingBucketStatusV16, BackingBucketV16, MarketGroupV16HeaderAccount,
-    MarketModeV16, PortfolioAccountV16Account, BOUND_SCALE,
+    MarketModeV16, PortfolioAccountV16Account, ResolvedPayoutLedgerV16, BOUND_SCALE,
 };
 use percolator_prog::{
     constants::MARKET_GROUP_OFF,
@@ -77,41 +77,63 @@ pub fn buckets(rows: &[BackingBucketV16], now: u64, window: u64) -> Value {
         "window_slots":window,"rows":nonempty})
 }
 
+/// Exact `floor(a * b / d)` without a 256-bit product: `a = q*d + r` gives
+/// `q*b + floor(r*b / d)`. None when `d == 0` or an intermediate overflows u128.
+/// (The engine's `wide_mul_div_floor_u128` is private at the pin.)
+pub fn mul_div_floor(a: u128, b: u128, d: u128) -> Option<u128> {
+    if d == 0 {
+        return None;
+    }
+    let (q, r) = (a / d, a % d);
+    q.checked_mul(b)?.checked_add(r.checked_mul(b)? / d)
+}
+
+/// Resolved-market claims. Open receipts are exact at the current payout rate, as
+/// engine `resolved_receipt_claimable_against_ledger` (v16.rs:18365). A portfolio
+/// with no receipt yet reports `max(capital + pnl, 0)`: an upper bound only, since
+/// the close path still settles fees and K/F and haircuts positive PnL.
 pub fn resolved_sums<'a>(
-    resolved: bool,
+    ledger: Option<&ResolvedPayoutLedgerV16>,
     portfolios: impl IntoIterator<Item = &'a PortfolioAccountV16Account>,
 ) -> Result<Value> {
-    let (mut unpaid, mut face, mut capital, mut pnl) = (0u64, 0u128, 0u128, 0u128);
-    if resolved {
-        for p in portfolios {
-            let r = p.resolved_payout_receipt;
-            let pending = r.present != 0 && r.finalized == 0;
-            if p.capital.get() > 0 || p.pnl.get() > 0 || pending {
+    let (mut unpaid, mut face, mut equity) = (0u64, 0u128, 0u128);
+    // None once any receipt's claimable amount can't be computed exactly.
+    let mut claimable = Some(0u128);
+    let Some(ledger) = ledger else {
+        return Ok(json!({"claimants_unpaid":0,"payout_halted":false,"owed_atoms":{
+            "receipt_face_remaining":"0","receipt_claimable_now":"0","unreceipted_equity_upper_bound":"0"}}));
+    };
+    let (num, den) = (ledger.current_payout_rate_num, ledger.current_payout_rate_den);
+    for p in portfolios {
+        let r = p.resolved_payout_receipt;
+        let (face_total, paid) = (r.terminal_positive_claim_face.get(), r.paid_effective.get());
+        if r.present != 0 {
+            if r.finalized == 0 {
                 unpaid += 1;
-            }
-            capital = capital
-                .checked_add(p.capital.get())
-                .context("capital sum overflow")?;
-            if pending {
-                let remaining = r
-                    .terminal_positive_claim_face
-                    .get()
-                    .checked_sub(r.paid_effective.get())
-                    .context("receipt paid exceeds face")?;
                 face = face
-                    .checked_add(remaining)
+                    .checked_add(face_total.checked_sub(paid).context("receipt paid exceeds face")?)
                     .context("receipt sum overflow")?;
+                // The engine refuses claims while halted; report 0 claimable then.
+                if !ledger.payout_halted {
+                    claimable = claimable.and_then(|sum| {
+                        let gross = mul_div_floor(face_total, num, den)?;
+                        sum.checked_add(gross.saturating_sub(paid))
+                    });
+                }
             }
-            if r.present == 0 {
-                pnl = pnl
-                    .checked_add(p.pnl.get().max(0) as u128)
-                    .context("pnl sum overflow")?;
-            }
+            continue;
+        }
+        let net = i128::try_from(p.capital.get())
+            .context("capital exceeds i128")?
+            .saturating_add(p.pnl.get());
+        if net > 0 {
+            unpaid += 1;
+            equity = equity.checked_add(net as u128).context("equity sum overflow")?;
         }
     }
-    Ok(json!({"claimants_unpaid":unpaid,"owed_atoms":{
-        "receipt_face_remaining":face.to_string(),"capital":capital.to_string(),
-        "unreceipted_positive_pnl":pnl.to_string()}}))
+    Ok(json!({"claimants_unpaid":unpaid,"payout_halted":ledger.payout_halted,"owed_atoms":{
+        "receipt_face_remaining":face.to_string(),"receipt_claimable_now":claimable.map(|c| c.to_string()),
+        "unreceipted_equity_upper_bound":equity.to_string()}}))
 }
 
 pub fn fetch(rpc: &RpcClient, program: &Pubkey, market: &Pubkey, window: u64) -> Result<Value> {
@@ -166,11 +188,11 @@ pub fn fetch(rpc: &RpcClient, program: &Pubkey, market: &Pubkey, window: u64) ->
         MarketModeV16::Recovery => "recovery",
     };
     Ok(
-        json!({"chain_slot":slot,"mode":mode,"accounts":{"total":total,"decode_errors":errors,
+        json!({"chain_slot":slot,"mode":mode,"accounts":{"total":group.materialized_portfolio_count,"discovered":total,"decode_errors":errors,
         "out_of_date":{"stale_certificate":group.stale_certificate_count,"b_stale":group.b_stale_account_count,"kf_stale":kf_stale},
         "asset_kf_stale":kf_rows},"assets":assets,
         "buckets":buckets(&group.source_backing_buckets,slot,window),
-        "collateral":collateral(&header)?,"resolved_claims":resolved_sums(group.mode == MarketModeV16::Resolved,&decoded)?}),
+        "collateral":collateral(&header)?,"resolved_claims":resolved_sums((group.mode == MarketModeV16::Resolved).then_some(&group.resolved_payout_ledger),&decoded)?}),
     )
 }
 
@@ -238,29 +260,36 @@ mod tests {
         assert_eq!(v["rows"][0]["slots_to_expiry"], "-10");
     }
     #[test]
-    fn resolved_receipts_and_unreceipted_face() {
+    fn resolved_receipts_at_rate_and_unreceipted_equity() {
+        let mut ledger = ResolvedPayoutLedgerV16::EMPTY;
+        ledger.current_payout_rate_num = 1;
+        ledger.current_payout_rate_den = 2;
+        // No receipt: capital 9 + pnl 12 = 21 upper bound.
         let mut a = PortfolioAccountV16Account::default();
         a.capital = V16PodU128::new(9);
         a.pnl = V16PodI128::new(12);
+        // Open receipt: face 100, paid 30, rate 1/2 -> claimable 20, face remaining 70.
         let mut b = PortfolioAccountV16Account::default();
-        b.pnl = V16PodI128::new(99);
         b.resolved_payout_receipt.present = 1;
-        b.resolved_payout_receipt.terminal_positive_claim_face = V16PodU128::new(80);
+        b.resolved_payout_receipt.terminal_positive_claim_face = V16PodU128::new(100);
         b.resolved_payout_receipt.paid_effective = V16PodU128::new(30);
+        // Capital fully consumed by losses: not a claimant.
         let mut c = PortfolioAccountV16Account::default();
-        c.pnl = V16PodI128::new(-5);
-        let v = resolved_sums(true, [&a, &b, &c]).unwrap();
+        c.capital = V16PodU128::new(100);
+        c.pnl = V16PodI128::new(-100);
+        let v = resolved_sums(Some(&ledger), [&a, &b, &c]).unwrap();
         assert_eq!(v["claimants_unpaid"], 2);
         assert_eq!(
             v["owed_atoms"],
-            json!({"capital":"9","receipt_face_remaining":"50","unreceipted_positive_pnl":"12"})
+            json!({"receipt_face_remaining":"70","receipt_claimable_now":"20","unreceipted_equity_upper_bound":"21"})
         );
+        assert_eq!(mul_div_floor(u128::MAX, 3, 4), Some(u128::MAX / 4 * 3 + 2));
+        assert_eq!(mul_div_floor(7, 1, 0), None);
+        ledger.payout_halted = true;
+        let v = resolved_sums(Some(&ledger), [&b]).unwrap();
+        assert_eq!(v["owed_atoms"]["receipt_claimable_now"], "0");
         b.resolved_payout_receipt.finalized = 1;
-        b.pnl = V16PodI128::new(0);
-        assert_eq!(resolved_sums(true, [&b]).unwrap()["claimants_unpaid"], 0);
-        assert_eq!(
-            resolved_sums(false, [&a]).unwrap()["owed_atoms"]["capital"],
-            "0"
-        );
+        assert_eq!(resolved_sums(Some(&ledger), [&b]).unwrap()["claimants_unpaid"], 0);
+        assert_eq!(resolved_sums(None, [&a]).unwrap()["claimants_unpaid"], 0);
     }
 }

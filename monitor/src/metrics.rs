@@ -49,6 +49,7 @@ pub fn render(s: &Value) -> String {
     }
     let c = &s["accounts"];
     emit("accounts_total", vec![], &c["total"], false);
+    emit("accounts_discovered", vec![], &c["discovered"], false);
     emit("accounts_decode_errors", vec![], &c["decode_errors"], false);
     if let Some(o) = c["out_of_date"].as_object() {
         for (k, v) in o {
@@ -121,6 +122,9 @@ pub fn render(s: &Value) -> String {
         &r["claimants_unpaid"],
         false,
     );
+    if let Some(halted) = r["payout_halted"].as_bool() {
+        emit("resolved_payout_halted", vec![], &Value::from(u64::from(halted)), false);
+    }
     if let Some(o) = r["owed_atoms"].as_object() {
         for (k, v) in o {
             emit(

@@ -4,7 +4,8 @@ groups:
       - record: percolator:unowned_collateral_drift_atoms_per_hour
         expr: delta(percolator_unowned_collateral_atoms[1h])
       - alert: KeeperAccountUnrefreshable
-        expr: percolator_keeper_account_quarantined_slots > 1500
+        # Aggregate away strike/error: they change on re-quarantine and would reset `for`.
+        expr: max by (market, account) (percolator_keeper_account_quarantined_slots) > 1500
         for: 1m
         labels:
           severity: warning

@@ -123,32 +123,31 @@ fn poll(
     s["snapshot_unix_seconds"] = json!(now());
     if let Some(path) = &args.log {
         let result = keeper.read(path);
-        // Look up the latest progress signature's slot until one lookup succeeds; then cache it.
-        // History search, so a monitor restarted on an old log still finds it.
+        // Look up the latest landed-crank signature's slot until one lookup succeeds, then
+        // cache it; the previous slot stays in place meanwhile. History search, so a
+        // monitor restarted on an old log still finds it.
         if keeper.signature != *cached_sig {
-            keeper.last_success_slot = None;
-            if let Some(sig) = keeper
+            let found = keeper
                 .signature
                 .as_ref()
                 .and_then(|s| s.parse::<Signature>().ok())
-            {
-                if let Ok(status) = rpc.get_signature_statuses_with_history(&[sig]) {
-                    keeper.last_success_slot = status
-                        .value
-                        .first()
-                        .and_then(|v| v.as_ref())
-                        .map(|v| v.slot);
-                }
-            }
-            if keeper.last_success_slot.is_some() {
+                .and_then(|sig| rpc.get_signature_statuses_with_history(&[sig]).ok())
+                .and_then(|status| status.value.first().cloned().flatten())
+                .map(|v| v.slot);
+            if found.is_some() {
+                keeper.last_success_slot = found;
                 *cached_sig = keeper.signature.clone();
             }
+        }
+        let slot = s["chain_slot"].as_u64();
+        if keeper.first_seen_slot.is_none() {
+            keeper.first_seen_slot = slot;
         }
         let (ok, age, error) = match result {
             Ok(age) => (true, Some(age), None),
             Err(e) => (false, None, Some(e.to_string())),
         };
-        s["keeper"] = keeper.snapshot(s["chain_slot"].as_u64().unwrap_or(0), ok, age, error);
+        s["keeper"] = keeper.snapshot(slot.unwrap_or(0), ok, age, error);
     }
     s
 }
