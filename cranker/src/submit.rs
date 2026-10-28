@@ -383,6 +383,13 @@ pub fn submit_crank_routed(
             &[payer],
             bh,
         );
+        // Re-check right before the send: the blockhash fetch itself may have
+        // crossed the deadline. The deadline is an ADMISSION deadline: once a
+        // tx is sent, its confirmation is bounded by blockhash expiry (the
+        // client's own wait), not by the cycle deadline.
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err(anyhow!("cycle deadline reached before send"));
+        }
         match rpc.send_and_confirm_transaction(&tx) {
             Ok(signature) => {
                 // The tx LANDED. From here on, read failures must not turn it

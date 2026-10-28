@@ -16,9 +16,12 @@ PERCOLATOR_PROGRAM_ID=<from bringup> CRANKER_CYCLES=3 \
 
 Reference / dry-run only. Not a paid live service. M3 is NO-GO until a
 non-null program id lands on a public cluster. No bounty or mainnet path
-exists in this crate. A liquidation cranker share accrues into the keeper's
-own reward portfolio when the market enables one (local bootstrap: 5000
-bps); nothing withdraws it unless `CRANKER_WITHDRAWAL_TEST=1` is set.
+exists in this crate. **Fee paths are off by default:** the default
+bootstrap has no maintenance fee and zero cranker shares, and cranks attach
+no reward portfolio. `CRANKER_ENABLE_FEE_SHARES=1` opts in (maintenance
+fee plus 50% shares, so a share accrues into the keeper's own portfolio).
+Nothing withdraws it unless `CRANKER_WITHDRAWAL_TEST=1` is also set, which
+requires the opt-in.
 
 Pre-merge preview of the upstream launch fixes (not the default):
 
@@ -38,9 +41,13 @@ Env vars:
 * `CRANKER_CYCLE_MS` (default `30000`), `CRANKER_CYCLE_CU` (default
   `24000000`), `CRANKER_CYCLE_MAX_TX` (default `64`): the per-cycle budget.
   - **Wall clock** starts at cycle entry, so discovery and planning count.
-  - **Enforced before every tx:** each tx reserves its full compute-unit
-    limit (1.4M) up front, then is settled to the CU measured from its logs.
-    A tx is counted once it begins, whatever its outcome.
+  - **Admission is checked before every tx**, retries included: each tx
+    reserves its full compute-unit limit (1.4M) up front, then is settled
+    to the whole-tx CU measured from its logs. A tx is counted once it
+    begins, whatever its outcome. The wall clock is an *admission*
+    deadline: no tx is sent after it, but a tx already sent waits for its
+    confirmation (bounded by blockhash expiry, about a minute), so a cycle
+    can overrun by at most that one in-flight confirmation.
   - **When it runs out**, the rest of the queue is deferred, and rotation
     reaches it first next cycle.
 * `CRANKER_ATTEMPT_MAX_TX` (default `4`): the most txs one account may use
@@ -153,8 +160,9 @@ line; the run ends with the mirror-custody table and CU stats.
   SettleBChunk, RefreshAccount{Some}).
 * **Instruction encoding.** Reuses `percolator_prog::ix::Instruction::encode()`
   from the wrapper crate; no hand-written wire format.
-* **Reward-portfolio append.** Enabled via `UpdateLiquidationFeePolicy
-  { cranker_share_bps: 5000 }` in `setup::bootstrap`. The wrapper's
+* **Reward-portfolio append.** Only with `CRANKER_ENABLE_FEE_SHARES=1`
+  (or the explicit `setup::bootstrap_with_fee` the integration tests use),
+  which sets `UpdateLiquidationFeePolicy { cranker_share_bps: 5000 }`. The wrapper's
   reward-append path only accepts a trailing writable portfolio when
   `liquidation_cranker_fee_share_bps != 0`
   (`repo-prog/src/v16_program.rs:10467`), and the tx signer must own it

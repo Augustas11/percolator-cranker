@@ -246,6 +246,10 @@ const CLASS_PATTERN: [Priority; 4] = [
 #[derive(Debug, Default, Clone)]
 pub struct ScheduleState {
     cursors: [usize; 3],
+    /// Position in [`CLASS_PATTERN`] where the next cycle starts. Persisted
+    /// so that a budget admitting only a few attempts still rotates the
+    /// first turn across classes instead of always starting liquidatable.
+    turn: usize,
 }
 
 /// Tx quota per class for one cycle: the cycle tx budget split 2:1:1 over
@@ -296,6 +300,7 @@ where
     let mut cands = candidates;
     cands.sort_by(|a, b| a.pubkey.to_bytes().cmp(&b.pubkey.to_bytes()));
     let cursors = quarantine.schedule_state().cursors;
+    let mut turn = quarantine.schedule_state().turn;
     let mut queues: [std::collections::VecDeque<Candidate>; 3] = Default::default();
     for (c, p) in [Priority::Liquidatable, Priority::Pending, Priority::Quiet].into_iter().enumerate() {
         let mut class: Vec<Candidate> = cands.iter().filter(|x| x.priority == p).cloned().collect();
@@ -308,7 +313,6 @@ where
     let quotas = class_quotas(budget.max_submissions, [0, 1, 2].map(|c| !queues[c].is_empty()));
     let mut used = [0usize; 3];
     let mut visited = [0usize; 3];
-    let mut turn = 0usize;
 
     loop {
         // Next class: follow the pattern among classes with candidates left,
@@ -317,14 +321,15 @@ where
         let any_under = (0..3).any(|c| has(c, &queues) && used[c] < quotas[c]);
         let mut pick = None;
         for k in 0..CLASS_PATTERN.len() {
-            let c = CLASS_PATTERN[(turn + k) % CLASS_PATTERN.len()] as usize;
+            let pos = (turn + k) % CLASS_PATTERN.len();
+            let c = CLASS_PATTERN[pos] as usize;
             if has(c, &queues) && (!any_under || used[c] < quotas[c]) {
-                pick = Some(c);
-                turn = (turn + k + 1) % CLASS_PATTERN.len();
+                pick = Some((c, pos));
                 break;
             }
         }
-        let Some(c) = pick else { break };
+        let Some((c, pos)) = pick else { break };
+        turn = (pos + 1) % CLASS_PATTERN.len();
         let cand = queues[c].pop_front().expect("non-empty");
         if quarantine.is_blocked(&cand.pubkey, cycle) {
             s.quarantined_skipped += 1;
@@ -334,7 +339,9 @@ where
         if !meter.can_send() {
             // Out of budget: this and every remaining candidate is deferred
             // (quarantined ones still count as skipped). Not visited, so the
-            // cursors leave them first in line next cycle.
+            // cursors leave them first in line next cycle, and the class turn
+            // stays on this class so it opens the next cycle.
+            turn = pos;
             s.budget_deferred += 1;
             for q in queues.iter_mut() {
                 for rest in q.drain(..) {
@@ -373,6 +380,7 @@ where
     for c in 0..3 {
         st.cursors[c] = st.cursors[c].wrapping_add(visited[c]);
     }
+    st.turn = turn;
     s
 }
 
@@ -479,6 +487,33 @@ mod tests {
             });
         }
         assert_eq!(order, vec![0, 1, 2, 3, 4, 0]);
+    }
+
+    /// Audit finding: with a 1-tx budget every cycle used to start (and end)
+    /// with a liquidatable account. The class turn now persists across
+    /// cycles, and a deferred class opens the next cycle.
+    #[test]
+    fn one_tx_budget_still_rotates_classes() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let budget = CycleBudget { max_submissions: 1, ..CycleBudget::default() };
+        let mut hits: HashMap<Priority, usize> = HashMap::new();
+        for cycle in 0..20 {
+            let cands = vec![
+                cand(pk(1), Priority::Liquidatable),
+                cand(pk(2), Priority::Pending),
+                cand(pk(3), Priority::Quiet),
+            ];
+            run(cycle, cands, &budget, &mut q, |c, ab| {
+                *hits.entry(c.priority).or_default() += 1;
+                one_tx(ab, 1, Attempt::Progress { cu: 1, steps: 1 })
+            });
+        }
+        // One candidate per class: the pattern's second liquidatable slot
+        // finds that class empty, so service evens out. What matters is
+        // that no class is starved.
+        for p in [Priority::Liquidatable, Priority::Pending, Priority::Quiet] {
+            assert!(hits.get(&p).copied().unwrap_or(0) >= 6, "{p:?} starved: {hits:?}");
+        }
     }
 
     /// Review probe: 64-tx budget, 40 liquidatable accounts draining 2 txs

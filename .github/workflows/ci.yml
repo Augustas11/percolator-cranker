@@ -118,13 +118,13 @@ jobs:
       - name: keeper dry-run (3 cycles)
         run: |
           export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
-          CRANKER_CYCLES=3 cargo run --release --bin cranker --manifest-path "$CRANKER_MANIFEST"
-      - name: validator integration tests (lifecycle, rollback, conservation)
+          CRANKER_CYCLES=3 CRANKER_FAIL_ON_ERRORS=1 cargo run --release --bin cranker --manifest-path "$CRANKER_MANIFEST"
+      - name: validator integration tests (lifecycle, rollback, conservation, cycle through Resolved)
         run: |
           export PERCOLATOR_TEST_RPC=http://127.0.0.1:8899
           export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
           cargo test --release --manifest-path "$CRANKER_MANIFEST" \
-            --test lifecycle --test hard_reject --test invariants -- --include-ignored
+            --test lifecycle --test hard_reject --test invariants --test cycle_resolved -- --include-ignored
       - uses: actions/upload-artifact@v4
         if: always()
         with:

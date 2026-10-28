@@ -74,10 +74,16 @@ fn check() -> Result<(), String> {
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-    // Re-run when the checkout moves or its index changes.
+    // Re-run when the checkout moves, its index changes, or any wrapper
+    // source/manifest changes (a directory is scanned recursively), so an
+    // unstaged edit followed by an incremental build re-runs the dirty check
+    // instead of reusing an earlier pass.
     let git_dir = PathBuf::from(git(&["rev-parse", "--absolute-git-dir"])?);
     println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
     println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
+    for watched in ["src", "Cargo.toml", "Cargo.lock"] {
+        println!("cargo:rerun-if-changed={}", built.join(watched).display());
+    }
 
     let head = git(&["rev-parse", "HEAD"])?;
     if head != want {
