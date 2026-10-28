@@ -1,7 +1,6 @@
 # Roadmap: from reference cranker to product
 
-Written 2026-10-28 from the percolator-watch digest `digests/2026-10-28.md` and
-the follow-up analysis. Positioning is unchanged: **open-source reference
+Written 2026-10-28. Positioning is unchanged: **open-source reference
 cranker + service operator** (see `prep.md`). This file orders the work. It
 records facts as of 2026-10-28, and items marked *to verify* are not
 established yet.
@@ -17,23 +16,16 @@ established yet.
   default to 0.
 - **Crank pay is undecided.** The keeper-reward rule during Hybrid catch-up is
   an open policy question (prog #456 leaves 5 tests red on purpose).
-- **Live-shaped test deployments exist outside this repo.** Commoneffort runs
-  two v16 test deployments on a forked engine (~40 accounts each) and calls
-  `PermissionlessCrank` against them. Within 30 minutes they found an account
-  no crank could refresh (engine `5f2a7151`, percolator #226). It is unknown
-  whether they run a cranker service, and no public repo of theirs has been
-  found.
-- **A competing public keeper exists, but it is stale.** `kamiyoai/percli`
-  (the same org as upstream contributor mizuki0x) ships a `keeper` command,
-  but on the pre-v16 engine API and its own program, with `master` last
-  changed 2026-04-13. A v16 port would make it a direct competitor.
+- **Live-shaped load finds real liveness bugs.** On v16 test deployments with
+  ~40 accounts, `PermissionlessCrank` hit an account that no crank could
+  refresh within 30 minutes (engine `5f2a7151`, percolator #226). A cranker
+  must assume more such cases exist.
 - **No public cranker for the current engine and wrapper is known.** The
   reference spot is open.
 
 ## In flight
 
-- **Re-pin to the launch fixes:** `percolator-watch/prompts/cranker-repin-launch-fixes.md`
-  (session "Cranker re-pin and upstream changes"). Covers the new pins,
+- **Re-pin to the launch fixes.** Covers the new pins,
   Resolved-mode asset hint, recovery position epoch, exact funding,
   per-account quarantine, and a `live_shaped` local load scenario.
 
@@ -43,8 +35,7 @@ established yet.
 
 Release it as a tagged version with a runbook, quarantine logic and
 load-test results.
-- **Why:** being first, documented and current is the cheapest moat. It
-  lasts until someone ports `percli keeper` to v16.
+- **Why:** being first, documented and current is the cheapest moat.
 - **Done when:**
   - tag `v0.1.0` exists on the re-pinned surface;
   - the README, `docs/RUNBOOK.md`, `CHANGELOG.md` and the license are in
@@ -59,7 +50,7 @@ load-test results.
 Run your own copy of the wrapper (own program ID) on devnet, 24/7, with the
 cranker and scripted traders: several assets, funding on, and at least one
 asset driven through Recovery → Resolved.
-- **Why:** it reproduces what Commoneffort learned under load, gives you
+- **Why:** it reproduces live-shaped failure modes under load, gives
   operating data, and serves as a live demo for market operators.
 - **Done when:**
   - the local-validator version runs unattended;
@@ -76,8 +67,8 @@ A monitor built from the state the cranker already reads.
   - accounts no crank can refresh (from the quarantine list);
   - backing buckets near expiry;
   - unpaid resolved claimants;
-  - unowned collateral (`vault − c_tot − insurance − pnl_pos_tot`, the
-    metric Commoneffort tracked by hand; map it to field names, *to verify*);
+  - unowned collateral (`vault − c_tot − insurance − pnl_pos_tot`;
+    map it to field names, *to verify*);
   - cranks by outcome (progress, idle, failed), and CU used.
 - **Why:** every market operator needs this at launch, and it is the first
   thing you can sell beyond cranking.
@@ -88,9 +79,8 @@ A monitor built from the state the cranker already reads.
 
 ### Cross-cutting decision: posting upstream
 
-The watcher stays read-only. For the cranker work, the visible path to
-influence is posting bug reports with reproductions upstream, as Commoneffort
-and mizuki0x did. **Owner decision.** Until it's made, bugs found are written
+The visible path to influence is posting bug reports with reproductions
+upstream. **Owner decision.** Until it's made, bugs found are written
 up in `prep.md` under "Found in load test" and nothing is posted.
 
 ## At launch
@@ -123,7 +113,7 @@ withdrawn (#223). Automating that, or pooling it, is real work.
 ### 7. v16 market-setting simulator
 
 It would cover margins, OI caps, backing horizon and funding, for people
-listing markets. This is the gap `percli` leaves by staying on the old engine.
+listing markets. No such tool exists for the v16 engine.
 
 ### 8. Own venue or frontend
 
@@ -139,16 +129,15 @@ compensation are known.
 
 - Crank pay could settle near zero.
 - Upstream could ship an official keeper.
-- kamiyoai could port `percli keeper` to v16 first.
+- Another team could publish a v16 keeper first.
 - Upstream API churn could make each release cost a re-pin. Mitigate by
   pinning to the wrapper's `main` and keeping the re-pin path scripted.
 
-## Signals that change this plan (watched by percolator-watch)
+## Signals that change this plan
 
 - prog #456 merge;
 - `declare_id!` change or a first release tag;
 - the keeper-reward decision;
 - fee-share defaults;
 - how backing providers are paid;
-- any v16 activity in `kamiyoai/percli`;
-- a public Commoneffort cranker or fork.
+- another public v16 cranker appearing.

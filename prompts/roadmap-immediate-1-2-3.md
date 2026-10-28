@@ -23,8 +23,7 @@ Turn the re-pinned cranker into three things:
 - `ROADMAP.md` (this repo): the why and the ordering. Don't re-argue it.
 - `prep.md`: pins, milestones, baked-in assumptions, drift log. Keep it
   current. Leave `## Watcher notes` for the watcher.
-- `percolator-watch/prompts/cranker-repin-launch-fixes.md`: the re-pin
-  brief you are already executing.
+- The re-pin brief you are already executing.
 - `cranker/README.md`, `scripts/m1_bringup.sh`,
   `cranker-strategic-questions.md`.
 
@@ -79,11 +78,20 @@ continuing.
    - Cache the toolchain.
    - If the SBF toolchain can't run in CI, gate that job and say so in the
      README instead of faking green.
-3. **Separate watcher outputs from the product.**
+3. **Separate watcher outputs from the product.** The repo will be made
+   public. It must not mention other projects or contributors beyond the
+   upstream dependencies.
    - `digests/`, `signals.md`, `radar.md`, `contributors.md`, `watchlist.md`,
-     `releases/` and `state/` are watcher context, not product.
+     `releases/` and `state/` are watcher context, not product, and name
+     third parties.
    - Write `docs/PUBLISH_CHECKLIST.md` proposing their removal from the
-     published tree. They already live in `percolator-watch`.
+     published tree.
+   - **Git history also contains them.** Removing files leaves them in
+     history, so the checklist must propose publishing from a fresh history
+     (a new repo or a squashed orphan branch). That is an owner decision;
+     never rewrite or force-push `main` yourself.
+   - Grep the tree for third-party handles, org names and competitor tools
+     before release, and keep new docs, commits and PR text free of them.
    - The checklist should also cover: secrets scan, no keypairs in the tree,
      license, and the strategy docs to keep private or move
      (`cranker-strategic-questions.md`, the strategy section of `prep.md`,
