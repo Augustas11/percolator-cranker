@@ -167,7 +167,10 @@ impl Quarantine {
         if e.streak < cfg.threshold {
             return None;
         }
-        e.streak = 0;
+        // After a quarantine, the next same-error failure re-quarantines
+        // at once (with a longer window) instead of spending another
+        // `threshold` txs on an account already known to be stuck.
+        e.streak = cfg.threshold.saturating_sub(1);
         e.strikes += 1;
         let backoff_cycles = cfg.backoff_for_strike(e.strikes);
         e.until_cycle = f.cycle.saturating_add(1).saturating_add(backoff_cycles);
@@ -264,6 +267,24 @@ mod tests {
         let pk = Pubkey::new_unique();
         assert_eq!(fail(&mut q, &pk, "E", 0).unwrap().backoff_cycles, 2);
         assert_eq!(fail(&mut q, &pk, "E", 3).unwrap().backoff_cycles, 4);
+    }
+
+    #[test]
+    fn released_account_requarantines_on_first_repeat() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let pk = Pubkey::new_unique();
+        for c in 0..3 {
+            fail(&mut q, &pk, "E", c);
+        }
+        assert!(!q.is_blocked(&pk, 5), "window over");
+        let ev = fail(&mut q, &pk, "E", 5).expect("one failure is enough after a strike");
+        assert_eq!((ev.strike, ev.backoff_cycles), (2, 4));
+        // A different error still starts a fresh streak.
+        let pk2 = Pubkey::new_unique();
+        for c in 0..3 {
+            fail(&mut q, &pk2, "E", c);
+        }
+        assert!(fail(&mut q, &pk2, "F", 5).is_none());
     }
 
     #[test]

@@ -39,12 +39,12 @@ git -C "$REPO_ROOT/repo" fetch -q origin
 if [ ! -d "$PV/repo-prog" ]; then
   git -C "$REPO_ROOT/repo-prog" worktree add -q --detach "$PV/repo-prog" "$PREVIEW_PROG_REF"
 else
-  git -C "$PV/repo-prog" checkout -q --detach "$PREVIEW_PROG_REF"
+  git -C "$PV/repo-prog" checkout -q -f --detach "$PREVIEW_PROG_REF"
 fi
 if [ ! -d "$PV/repo" ]; then
   git -C "$REPO_ROOT/repo" worktree add -q --detach "$PV/repo" "$PREVIEW_ENGINE_REV"
 else
-  git -C "$PV/repo" checkout -q --detach "$PREVIEW_ENGINE_REV"
+  git -C "$PV/repo" checkout -q -f --detach "$PREVIEW_ENGINE_REV"
 fi
 PROG_SHA="$(git -C "$PV/repo-prog" rev-parse HEAD)"
 ENGINE_SHA="$(git -C "$PV/repo" rev-parse HEAD)"
@@ -63,10 +63,24 @@ EOF
 write_patch "$PV/repo-prog"
 ( cd "$PV/repo-prog" && cargo build-sbf --tools-version v1.52 )
 
-# Cranker copy whose `../repo-prog` path dep resolves to the preview wrapper.
-rsync -a --delete --exclude target "$REPO_ROOT/cranker/" "$PV/cranker/"
+# Cranker copy (committed HEAD, not the working tree) whose `../repo-prog`
+# path dep resolves to the preview wrapper.
+rm -rf "$PV/cranker.new"
+mkdir -p "$PV/cranker.new"
+git -C "$REPO_ROOT" archive HEAD cranker | tar -x -C "$PV/cranker.new" --strip-components=1
+if [ -d "$PV/cranker/target" ]; then mv "$PV/cranker/target" "$PV/cranker.new/target"; fi
+rm -rf "$PV/cranker" && mv "$PV/cranker.new" "$PV/cranker"
 write_patch "$PV/cranker"
-( cd "$PV/cranker" && cargo update -q -p percolator 2>/dev/null || true )
+( cd "$PV/cranker" && cargo update -q -p percolator )
+
+# Refuse to run if the patch did not take (cargo only warns on an unused patch).
+for d in "$PV/repo-prog" "$PV/cranker"; do
+  src="$(cd "$d" && cargo tree -q -i percolator --prefix none -e normal 2>/dev/null | head -1)"
+  case "$src" in
+    *"$PV/repo"*) echo "==> patch OK in ${d#$REPO_ROOT/}: $src" ;;
+    *) echo "!! engine patch NOT applied in $d (got: $src)" >&2; exit 1 ;;
+  esac
+done
 
 KP="$PV/repo-prog/target/deploy/percolator_prog-keypair.json"
 SO="$PV/repo-prog/target/deploy/percolator_prog.so"

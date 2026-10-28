@@ -33,21 +33,18 @@ pub fn resolved_bucket_deadline(group: &MarketGroupV16, expiry_slot: u64) -> u64
         .max(c.h_max)
         .max(c.max_bankrupt_close_lifetime_slots)
         .max(1);
-    let cap = group.resolved_slot.saturating_add(horizon);
-    if expiry_slot == 0 {
-        cap
-    } else {
-        expiry_slot.min(cap)
-    }
+    expiry_slot.min(group.resolved_slot.saturating_add(horizon))
 }
 
 /// The asset whose backing bucket is due to expire at `now_slot`, if any.
 ///
-/// Domains are `asset_index * 2 + side`. A bucket is a candidate while it
-/// still holds value the engine can move (`Fresh` or `Impaired`); `Empty`
-/// and `Expired` are terminal for this purpose. Among due buckets the
-/// earliest deadline wins, ties broken by lower asset index so the choice
-/// is deterministic.
+/// Domains are `asset_index * 2 + side`. Only `Fresh` buckets qualify: the
+/// engine's hint path (`first_lapsed_source_backing_for_asset_at_slot`) acts
+/// on lapsed Fresh buckets only. Expiry turns a liened Fresh bucket into
+/// `Impaired` and keeps its old `expiry_slot`, so counting Impaired here
+/// would pin the single hint on a bucket the engine has already handled and
+/// starve the one that is actually due. Among due buckets the earliest
+/// deadline wins, ties broken by lower asset index.
 pub fn resolved_backing_hint(group: &MarketGroupV16, now_slot: u64) -> Option<u16> {
     if group.mode != MarketModeV16::Resolved {
         return None;
@@ -58,12 +55,7 @@ pub fn resolved_backing_hint(group: &MarketGroupV16, now_slot: u64) -> Option<u1
         .iter()
         .enumerate()
         .filter(|(domain, _)| domain / 2 < slots)
-        .filter(|(_, b)| {
-            matches!(
-                b.status,
-                BackingBucketStatusV16::Fresh | BackingBucketStatusV16::Impaired
-            )
-        })
+        .filter(|(_, b)| b.status == BackingBucketStatusV16::Fresh)
         .map(|(domain, b)| (resolved_bucket_deadline(group, b.expiry_slot), domain / 2))
         .filter(|(deadline, _)| *deadline <= now_slot)
         .min()
@@ -119,7 +111,7 @@ mod tests {
         // asset 0 long (domain 0) not due yet.
         let g = group_with(&[
             (0, BackingBucketStatusV16::Fresh, 5_000_000),
-            (3, BackingBucketStatusV16::Impaired, 50),
+            (3, BackingBucketStatusV16::Fresh, 50),
             (4, BackingBucketStatusV16::Fresh, 40),
         ]);
         assert_eq!(resolved_backing_hint(&g, 60), Some(2));
@@ -134,6 +126,17 @@ mod tests {
             (2, BackingBucketStatusV16::Empty, 10),
         ]);
         assert_eq!(resolved_backing_hint(&g, 1_000_000), None);
+    }
+
+    /// Review finding: an Impaired bucket keeps its old (earliest) expiry.
+    /// It must not shadow a Fresh bucket that is actually due.
+    #[test]
+    fn impaired_bucket_does_not_shadow_due_fresh_bucket() {
+        let g = group_with(&[
+            (1, BackingBucketStatusV16::Impaired, 10),
+            (7, BackingBucketStatusV16::Fresh, 50),
+        ]);
+        assert_eq!(resolved_backing_hint(&g, 60), Some(3));
     }
 
     #[test]

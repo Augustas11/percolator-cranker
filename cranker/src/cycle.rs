@@ -14,7 +14,10 @@ use anyhow::{anyhow, Context, Result};
 use percolator::MarketModeV16;
 use percolator_prog::state::{read_market, read_portfolio, MarketGroupV16};
 use solana_client::rpc_client::RpcClient;
-use solana_sdk::{pubkey::Pubkey, signature::Keypair};
+use solana_sdk::{
+    pubkey::Pubkey,
+    signature::{Keypair, Signer},
+};
 
 use crate::binding::SOURCE_LIEN_DRAIN_MAX_STEPS;
 use crate::discovery;
@@ -22,7 +25,7 @@ use crate::observation::{self, FetchedObservation, PythFeedResolver};
 use crate::quarantine::Quarantine;
 use crate::resolved;
 use crate::scheduler::{self, Attempt, Candidate, CycleBudget, CycleSummary};
-use crate::submit::{self, CrankOutcome, OutcomeClass};
+use crate::submit::{self, CrankOutcome, CrankRoute, OutcomeClass};
 use crate::work::{self, Priority};
 
 /// Wrapper cap: `CRANK_OBSERVATION_DECODE_MAX = 16`.
@@ -122,23 +125,58 @@ fn plan_hints(
     Ok((hints, class))
 }
 
-fn attempt_from(outcomes: &[CrankOutcome]) -> Attempt {
-    let cu: u64 = outcomes.iter().filter_map(|o| o.program_cu()).sum();
-    let Some(last) = outcomes.last() else {
-        return Attempt::Idle { cu };
-    };
+/// CU charged for a crank whose CU could not be read (measurement off or
+/// `getTransaction` missed), so the cycle CU budget still binds.
+pub const UNKNOWN_CU_CHARGE: u64 = 200_000;
+
+fn outcome_cu(o: &CrankOutcome) -> u64 {
+    o.program_cu().unwrap_or(UNKNOWN_CU_CHARGE)
+}
+
+/// Fold one candidate's drain into a scheduler attempt. `rpc_error` is an
+/// RPC failure that ended the drain early; steps that already landed still
+/// count as progress.
+fn attempt_from(outcomes: &[CrankOutcome], rpc_error: Option<&str>) -> Attempt {
+    let cu: u64 = outcomes.iter().map(outcome_cu).sum();
     let progressed = outcomes.iter().filter(|o| o.class() == OutcomeClass::Progress).count();
-    match last.class() {
-        OutcomeClass::Failed if progressed == 0 => Attempt::Failed {
-            error: last.error_key().unwrap_or_else(|| "unknown".into()),
-            cu,
-        },
-        _ if progressed > 0 => Attempt::Progress {
+    if progressed > 0 {
+        if let Some(o) = outcomes.last().filter(|o| o.class() == OutcomeClass::Failed) {
+            println!(
+                "  note: progressed {progressed} step(s) then failed: {}",
+                o.error_key().unwrap_or_default()
+            );
+        }
+        return Attempt::Progress {
             cu,
             steps: progressed,
+        };
+    }
+    if let Some(e) = rpc_error {
+        return Attempt::Failed {
+            error: format!("Rpc: {e}"),
+            cu,
+        };
+    }
+    match outcomes.last() {
+        Some(o) if o.class() == OutcomeClass::Failed => Attempt::Failed {
+            error: o.error_key().unwrap_or_else(|| "unknown".into()),
+            cu,
         },
         _ => Attempt::Idle { cu },
     }
+}
+
+/// What the cycle decided to do with one candidate.
+enum Plan {
+    Submit {
+        route_owner: Option<Pubkey>,
+        hints: Vec<FetchedObservation>,
+    },
+    /// Resolved market inside `force_close_delay_slots`: the owner must sign,
+    /// so a third-party crank would revert `Unauthorized`. Idle, no tx.
+    OwnerWindow,
+    /// Could not build hints for this account. Failed, no tx.
+    HintError(String),
 }
 
 /// Run one full cycle against `ctx.market`.
@@ -161,8 +199,19 @@ pub fn run_one_cycle(
         .rpc
         .get_account_data(ctx.market)
         .context("read market slab")?;
-    let (_, group) = read_market(&market_data).map_err(|e| anyhow!("read_market: {e:?}"))?;
+    let (cfg, group) = read_market(&market_data).map_err(|e| anyhow!("read_market: {e:?}"))?;
     let now_slot = ctx.rpc.get_slot()?;
+
+    // Resolved-route accounts (payout to the owner's ATA).
+    let resolved = group.mode == MarketModeV16::Resolved;
+    let mint = Pubkey::new_from_array(cfg.collateral_mint);
+    let (vault_authority, _) =
+        Pubkey::find_program_address(&[b"vault", ctx.market.as_ref()], ctx.program_id);
+    let vault = spl_associated_token_account::get_associated_token_address(&vault_authority, &mint);
+    let owner_window = resolved
+        && cfg.force_close_delay_slots != 0
+        && now_slot.saturating_sub(group.resolved_slot) < cfg.force_close_delay_slots;
+    let payer = ctx.payer.pubkey();
 
     let mut plans = std::collections::HashMap::new();
     let mut candidates = Vec::with_capacity(ranked.len());
@@ -170,13 +219,24 @@ pub fn run_one_cycle(
         let priority = read_portfolio(&p.account.data)
             .map(|pf| work::assess(&pf, &group).priority)
             .unwrap_or(Priority::Pending);
-        let (hints, class) = plan_hints(&group, &market_data, &p.account.data, ctx.pyth, now_slot)?;
-        let plan_class = match (class, hints.first()) {
-            ("resolved:backing-hint", Some(h)) => format!("{class}({})", h.asset_index),
-            ("live" | "recovery", _) => format!("{class}:{}", priority.label()),
-            _ => class.to_string(),
-        };
-        plans.insert(p.pubkey, hints);
+        let owner = p.owner().unwrap_or_default();
+        let (plan, plan_class) =
+            match plan_hints(&group, &market_data, &p.account.data, ctx.pyth, now_slot) {
+                Err(e) => (Plan::HintError(format!("HintError: {e}")), "hint-error".to_string()),
+                Ok(_) if owner_window && owner != payer => {
+                    (Plan::OwnerWindow, "resolved:owner-window".to_string())
+                }
+                Ok((hints, class)) => {
+                    let plan_class = match (class, hints.first()) {
+                        ("resolved:backing-hint", Some(h)) => format!("{class}({})", h.asset_index),
+                        ("live" | "recovery", _) => format!("{class}:{}", priority.label()),
+                        _ => class.to_string(),
+                    };
+                    let route_owner = resolved.then_some(owner);
+                    (Plan::Submit { route_owner, hints }, plan_class)
+                }
+            };
+        plans.insert(p.pubkey, plan);
         candidates.push(Candidate {
             pubkey: p.pubkey,
             priority,
@@ -184,30 +244,68 @@ pub fn run_one_cycle(
         });
     }
 
-    let summary = scheduler::run_cycle(cycle, now_slot, candidates, budget, quarantine, |c| {
-        let hints = plans.get(&c.pubkey).map(Vec::as_slice).unwrap_or(&[]);
+    let summary = scheduler::run_cycle(cycle, now_slot, candidates, budget, quarantine, |c, allowance| {
+        let (route, hints) = match plans.get(&c.pubkey) {
+            Some(Plan::Submit { route_owner: None, hints }) => (
+                CrankRoute::Live {
+                    reward_portfolio: ctx.reward_portfolio,
+                },
+                hints.as_slice(),
+            ),
+            Some(Plan::Submit {
+                route_owner: Some(owner),
+                hints,
+            }) => (
+                CrankRoute::Resolved {
+                    owner: *owner,
+                    mint,
+                    vault,
+                    vault_authority,
+                },
+                hints.as_slice(),
+            ),
+            Some(Plan::OwnerWindow) | None => return Ok((Attempt::Idle { cu: 0 }, 0)),
+            Some(Plan::HintError(e)) => return Ok((Attempt::Failed { error: e.clone(), cu: 0 }, 0)),
+        };
         let mut outcomes = Vec::new();
+        let mut rpc_error = None;
         let mut slot = now_slot;
-        for _ in 0..SOURCE_LIEN_DRAIN_MAX_STEPS {
-            let o = submit::submit_crank(
+        for _ in 0..SOURCE_LIEN_DRAIN_MAX_STEPS.min(allowance.max(1)) {
+            let o = match submit::submit_crank_routed(
                 ctx.rpc,
                 ctx.program_id,
                 ctx.payer,
                 ctx.market,
                 &c.pubkey,
-                ctx.reward_portfolio,
+                &route,
                 hints,
                 slot,
-            )?;
+            ) {
+                Ok(o) => o,
+                Err(e) => {
+                    rpc_error = Some(e.to_string());
+                    break;
+                }
+            };
             cu.observe(&o);
-            let keep_draining = o.class() == OutcomeClass::Progress;
+            // Keep draining only while the TARGET moved (A6 one domain per
+            // call); a reward-portfolio byte diff alone is not drain progress.
+            let keep_draining =
+                matches!(&o, CrankOutcome::Ok { target_bytes_diff, .. } if *target_bytes_diff > 0);
             outcomes.push(o);
             if !keep_draining {
                 break;
             }
-            slot = ctx.rpc.get_slot()?;
+            match ctx.rpc.get_slot() {
+                Ok(s) => slot = s,
+                Err(e) => {
+                    rpc_error = Some(e.to_string());
+                    break;
+                }
+            }
         }
-        let attempt = attempt_from(&outcomes);
+        let attempt = attempt_from(&outcomes, rpc_error.as_deref());
+        let sent = outcomes.len().max(1);
         for o in outcomes {
             records.push(SubmissionRecord {
                 cycle,
@@ -216,7 +314,7 @@ pub fn run_one_cycle(
                 outcome: o,
             });
         }
-        Ok(attempt)
+        Ok((attempt, sent))
     });
     Ok(summary)
 }
@@ -249,24 +347,50 @@ mod tests {
 
     #[test]
     fn drain_then_idle_is_progress() {
-        let a = attempt_from(&[ok(true, 100), ok(true, 100), ok(false, 18)]);
+        let a = attempt_from(&[ok(true, 100), ok(true, 100), ok(false, 18)], None);
         assert_eq!(a, Attempt::Progress { cu: 218, steps: 2 });
     }
 
     #[test]
     fn non_progress_revert_alone_is_idle() {
-        assert_eq!(attempt_from(&[rej("EngineNonProgress")]), Attempt::Idle { cu: 10 });
+        assert_eq!(attempt_from(&[rej("EngineNonProgress")], None), Attempt::Idle { cu: 10 });
     }
 
     #[test]
     fn engine_error_alone_is_failed() {
         assert_eq!(
-            attempt_from(&[rej("EngineCounterUnderflow")]),
+            attempt_from(&[rej("EngineCounterUnderflow")], None),
             Attempt::Failed {
                 error: "EngineCounterUnderflow".into(),
                 cu: 10
             }
         );
+    }
+
+    /// Review finding: an RPC error after a landed step must not erase the
+    /// progress or strike the account.
+    #[test]
+    fn rpc_error_after_progress_is_still_progress() {
+        assert_eq!(
+            attempt_from(&[ok(true, 100)], Some("timeout")),
+            Attempt::Progress { cu: 100, steps: 1 }
+        );
+        assert_eq!(
+            attempt_from(&[], Some("timeout")),
+            Attempt::Failed {
+                error: "Rpc: timeout".into(),
+                cu: 0
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_cu_is_charged() {
+        let mut o = ok(false, 0);
+        if let CrankOutcome::Ok { program_cu, .. } = &mut o {
+            *program_cu = None;
+        }
+        assert_eq!(attempt_from(&[o], None), Attempt::Idle { cu: UNKNOWN_CU_CHARGE });
     }
 
     #[test]

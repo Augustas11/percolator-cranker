@@ -4,9 +4,12 @@
 //! * **Order.** Priority first (liquidatable → pending → quiet), then a
 //!   per-cycle rotation inside each priority class so the same account is
 //!   not always first or always cut off.
-//! * **Budget.** Wall-clock, compute units and submission count per cycle.
-//!   When a budget runs out the rest of the queue is *deferred*, and the
-//!   rotation puts it earlier next cycle.
+//! * **Budget.** Wall-clock, compute units and tx count per cycle. Every tx
+//!   counts, including A6 drain steps: the submit closure gets the remaining
+//!   tx allowance and reports how many it sent. When a budget runs out the
+//!   rest of the queue is *deferred*, and the rotation puts it earlier next
+//!   cycle. A quarter of the tx budget is reserved for quiet accounts so a
+//!   large liquidatable/pending backlog can't starve them forever.
 //! * **Isolation.** A failed submission (revert, engine error, RPC error) is
 //!   recorded and the loop moves on. Quarantined accounts are skipped
 //!   without spending budget.
@@ -51,6 +54,7 @@ impl Attempt {
 pub struct CycleBudget {
     pub max_wall: Duration,
     pub max_cu: u64,
+    /// Max txs per cycle (A6 drain steps included).
     pub max_submissions: usize,
     /// CU reserved before each attempt; an attempt is not started unless
     /// this much budget remains.
@@ -145,8 +149,29 @@ pub fn order_candidates(mut cands: Vec<Candidate>, cycle: u64) -> Vec<Candidate>
     out
 }
 
-/// Run one cycle. `submit` performs one candidate's crank(s) and must not
-/// panic; an `Err` from it is treated as a failure of that candidate only.
+/// If the high-priority classes alone would fill the tx budget, move the
+/// first `max_submissions / 4` (at least 1) quiet accounts ahead of the
+/// high-priority tail. Order within each class is kept.
+pub fn apply_quiet_reserve(ordered: Vec<Candidate>, max_submissions: usize) -> Vec<Candidate> {
+    let (high, quiet): (Vec<_>, Vec<_>) =
+        ordered.into_iter().partition(|c| c.priority != Priority::Quiet);
+    let reserve = (max_submissions / 4).max(1).min(quiet.len());
+    let head = max_submissions.saturating_sub(reserve);
+    if high.len() <= head {
+        return high.into_iter().chain(quiet).collect();
+    }
+    let mut high = high.into_iter();
+    let mut quiet = quiet.into_iter();
+    let mut out: Vec<Candidate> = high.by_ref().take(head).collect();
+    out.extend(quiet.by_ref().take(reserve));
+    out.extend(high);
+    out.extend(quiet);
+    out
+}
+
+/// Run one cycle. `submit` performs one candidate's crank(s) given the
+/// remaining tx allowance and returns the attempt plus the number of txs it
+/// sent. It must not panic; an `Err` is a failure of that candidate only.
 pub fn run_cycle<F>(
     cycle: u64,
     slot: u64,
@@ -156,32 +181,37 @@ pub fn run_cycle<F>(
     mut submit: F,
 ) -> CycleSummary
 where
-    F: FnMut(&Candidate) -> anyhow::Result<Attempt>,
+    F: FnMut(&Candidate, usize) -> anyhow::Result<(Attempt, usize)>,
 {
     let started = Instant::now();
     let mut s = CycleSummary {
         cycle,
         ..CycleSummary::default()
     };
-    let ordered = order_candidates(candidates, cycle);
-    let mut attempts = 0usize;
+    let ordered = apply_quiet_reserve(order_candidates(candidates, cycle), budget.max_submissions);
+    let mut txs = 0usize;
     for cand in &ordered {
         if quarantine.is_blocked(&cand.pubkey, cycle) {
             s.quarantined_skipped += 1;
             continue;
         }
-        let out_of_budget = attempts >= budget.max_submissions
+        let out_of_budget = txs >= budget.max_submissions
             || started.elapsed() >= budget.max_wall
             || s.cu_spent.saturating_add(budget.cu_per_attempt_reserve) > budget.max_cu;
         if out_of_budget {
             s.budget_deferred += 1;
             continue;
         }
-        attempts += 1;
-        let attempt = submit(cand).unwrap_or_else(|e| Attempt::Failed {
-            error: format!("Rpc: {e}"),
-            cu: 0,
+        let (attempt, sent) = submit(cand, budget.max_submissions - txs).unwrap_or_else(|e| {
+            (
+                Attempt::Failed {
+                    error: format!("Rpc: {e}"),
+                    cu: 0,
+                },
+                1,
+            )
         });
+        txs += sent;
         s.cu_spent = s.cu_spent.saturating_add(attempt.cu());
         s.max_attempt_cu = s.max_attempt_cu.max(attempt.cu());
         match attempt {
@@ -260,16 +290,19 @@ mod tests {
         for cycle in 0..cycles {
             let mut cands = vec![cand(stuck, Priority::Liquidatable)];
             cands.extend(healthy.iter().map(|pk| cand(*pk, Priority::Pending)));
-            let s = run_cycle(cycle, 1_000 + cycle, cands, &budget, &mut q, |c| {
+            let s = run_cycle(cycle, 1_000 + cycle, cands, &budget, &mut q, |c, _| {
                 if c.pubkey == stuck {
                     stuck_attempts += 1;
-                    Ok(Attempt::Failed {
-                        error: "EngineCounterUnderflow".into(),
-                        cu: 50_000,
-                    })
+                    Ok((
+                        Attempt::Failed {
+                            error: "EngineCounterUnderflow".into(),
+                            cu: 50_000,
+                        },
+                        1,
+                    ))
                 } else {
                     *progressed.entry(c.pubkey).or_default() += 1;
-                    Ok(Attempt::Progress { cu: 40_000, steps: 1 })
+                    Ok((Attempt::Progress { cu: 40_000, steps: 1 }, 1))
                 }
             });
             assert_eq!(s.progressed, healthy.len(), "cycle {cycle}: healthy accounts starved");
@@ -290,12 +323,15 @@ mod tests {
         let mut q = Quarantine::new(QuarantineConfig::default());
         let pks: Vec<Pubkey> = (0..3u8).map(|i| Pubkey::new_from_array([i; 32])).collect();
         let cands = pks.iter().map(|pk| cand(*pk, Priority::Quiet)).collect();
-        let s = run_cycle(0, 0, cands, &CycleBudget::default(), &mut q, |c| {
-            Ok(match c.pubkey.to_bytes()[0] {
-                0 => Attempt::Idle { cu: 18_000 },
-                1 => Attempt::Failed { error: "EngineStale".into(), cu: 0 },
-                _ => anyhow::bail!("connection reset"),
-            })
+        let s = run_cycle(0, 0, cands, &CycleBudget::default(), &mut q, |c, _| {
+            Ok((
+                match c.pubkey.to_bytes()[0] {
+                    0 => Attempt::Idle { cu: 18_000 },
+                    1 => Attempt::Failed { error: "EngineStale".into(), cu: 0 },
+                    _ => anyhow::bail!("connection reset"),
+                },
+                1,
+            ))
         });
         assert_eq!((s.progressed, s.idle, s.failed), (0, 1, 2));
         assert!(s.failures.iter().any(|(_, e)| e.starts_with("Rpc:")));
@@ -312,12 +348,53 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for cycle in 0..2 {
             let cands = pks.iter().map(|pk| cand(*pk, Priority::Quiet)).collect();
-            let s = run_cycle(cycle, 0, cands, &budget, &mut q, |c| {
+            let s = run_cycle(cycle, 0, cands, &budget, &mut q, |c, _| {
                 seen.insert(c.pubkey);
-                Ok(Attempt::Idle { cu: 1 })
+                Ok((Attempt::Idle { cu: 1 }, 1))
             });
             assert_eq!(s.budget_deferred, 2);
         }
         assert_eq!(seen.len(), 3, "rotation by one reaches a deferred account");
+    }
+
+    #[test]
+    fn drain_txs_count_against_the_budget() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let budget = CycleBudget {
+            max_submissions: 5,
+            ..CycleBudget::default()
+        };
+        let pks: Vec<Pubkey> = (0..4u8).map(|i| Pubkey::new_from_array([i; 32])).collect();
+        let cands = pks.iter().map(|pk| cand(*pk, Priority::Pending)).collect();
+        let mut allowances = Vec::new();
+        let s = run_cycle(0, 0, cands, &budget, &mut q, |_, allowance| {
+            allowances.push(allowance);
+            let sent = allowance.min(3);
+            Ok((Attempt::Progress { cu: 1, steps: sent }, sent))
+        });
+        assert_eq!(allowances, vec![5, 2]);
+        assert_eq!((s.progressed, s.budget_deferred), (2, 2));
+    }
+
+    /// Review finding: a pending backlog bigger than the budget must not
+    /// starve quiet accounts forever.
+    #[test]
+    fn quiet_accounts_get_reserved_slots() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let budget = CycleBudget {
+            max_submissions: 8,
+            ..CycleBudget::default()
+        };
+        let quiet = Pubkey::new_from_array([200; 32]);
+        let mut cands: Vec<Candidate> = (0..20u8)
+            .map(|i| cand(Pubkey::new_from_array([i; 32]), Priority::Pending))
+            .collect();
+        cands.push(cand(quiet, Priority::Quiet));
+        let mut hit = false;
+        run_cycle(0, 0, cands, &budget, &mut q, |c, _| {
+            hit |= c.pubkey == quiet;
+            Ok((Attempt::Idle { cu: 1 }, 1))
+        });
+        assert!(hit);
     }
 }

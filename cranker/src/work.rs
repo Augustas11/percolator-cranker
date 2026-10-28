@@ -11,6 +11,11 @@
 //! make the cranker loop on an account the engine considers done, so
 //! `leg_f_settled` is the only F test used here. There is no standalone
 //! funding apply/settle entry point upstream; funding settles inside refresh.
+//!
+//! Caveat: the sub-atom rule is engine #227, which is in `68859b94` (preview)
+//! but not in the default pin `4db11a8c`, where some close paths still need
+//! `f_snap == F_target` exactly. That only matters for ordering here: quiet
+//! accounts are still probed.
 
 use percolator::{PortfolioAccountV16Account, PortfolioLegV16Account, POS_SCALE};
 use percolator_prog::state::MarketGroupV16;
@@ -38,6 +43,9 @@ impl Priority {
 
 /// `true` when a leg's unpaid funding remainder is worth less than one atom.
 /// Overflow in the product means the gap is enormous → not settled.
+///
+/// Only a non-negative gap can floor to zero: the engine floors F deltas
+/// toward −∞, so any negative gap is at least a one-atom debit and is work.
 pub fn leg_f_settled(basis_pos_q: i128, a_basis: u128, f_snap: i128, f_target: i128) -> bool {
     if basis_pos_q == 0 || a_basis == 0 {
         return true;
@@ -45,8 +53,11 @@ pub fn leg_f_settled(basis_pos_q: i128, a_basis: u128, f_snap: i128, f_target: i
     let Some(gap) = f_target.checked_sub(f_snap) else {
         return false;
     };
-    if gap <= 0 {
+    if gap == 0 {
         return true;
+    }
+    if gap < 0 {
+        return false;
     }
     let Some(num) = basis_pos_q.unsigned_abs().checked_mul(gap as u128) else {
         return false;
@@ -125,9 +136,9 @@ mod tests {
     }
 
     #[test]
-    fn non_positive_gap_and_flat_legs_are_settled() {
+    fn zero_gap_and_flat_legs_are_settled_negative_gap_is_not() {
         assert!(leg_f_settled(5, 7, 10, 10));
-        assert!(leg_f_settled(5, 7, 10, 9));
+        assert!(!leg_f_settled(5, 7, 10, 9), "floor toward -inf: a debit");
         assert!(leg_f_settled(0, 7, 0, i128::MAX));
         assert!(leg_f_settled(5, 0, 0, i128::MAX));
     }

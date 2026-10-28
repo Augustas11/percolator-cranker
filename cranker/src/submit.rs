@@ -241,6 +241,56 @@ pub fn submit_crank(
     observations: &[FetchedObservation],
     now_slot: u64,
 ) -> Result<CrankOutcome> {
+    submit_crank_routed(
+        rpc,
+        program_id,
+        payer,
+        market,
+        target_portfolio,
+        &CrankRoute::Live { reward_portfolio },
+        observations,
+        now_slot,
+    )
+}
+
+/// Account layout for a tag-5 crank. The wire is the same; the wrapper
+/// reads the accounts differently once the market is Resolved.
+#[derive(Debug, Clone)]
+pub enum CrankRoute<'a> {
+    /// `[payer(signer), market, portfolio, oracle tail…, reward portfolio?]`.
+    Live { reward_portfolio: Option<&'a Pubkey> },
+    /// Resolved (`handle_close_resolved`):
+    /// `[owner, market, portfolio, owner_ata, vault, vault_authority, token_program]`.
+    /// Account 0 must be the portfolio **owner** key. It needs to sign only
+    /// while `slot - resolved_slot < force_close_delay_slots`; after that the
+    /// crank is permissionless and the cranker only pays the fee. Slots 3–6
+    /// carry the payout (to the owner's ATA, which the wrapper checks). An
+    /// idempotent ATA create runs first so a missing ATA can't block the
+    /// payout; the cranker pays that rent. No reward portfolio on this route.
+    Resolved {
+        owner: Pubkey,
+        mint: Pubkey,
+        vault: Pubkey,
+        vault_authority: Pubkey,
+    },
+}
+
+/// Like [`submit_crank`] with an explicit account route.
+#[allow(clippy::too_many_arguments)]
+pub fn submit_crank_routed(
+    rpc: &RpcClient,
+    program_id: &Pubkey,
+    payer: &Keypair,
+    market: &Pubkey,
+    target_portfolio: &Pubkey,
+    route: &CrankRoute<'_>,
+    observations: &[FetchedObservation],
+    now_slot: u64,
+) -> Result<CrankOutcome> {
+    let reward_portfolio = match route {
+        CrankRoute::Live { reward_portfolio } => *reward_portfolio,
+        CrankRoute::Resolved { .. } => None,
+    };
     // Sanity: hint counts must match the fetched oracle accounts, otherwise
     // the wrapper consumes the wrong number of tail accounts per hint.
     let hints: Vec<CrankObservationHint> = observations
@@ -251,21 +301,53 @@ pub fn submit_crank(
         })
         .collect();
 
-    // Build account meta list: payer, market, portfolio, then oracle
-    // accounts in hint order, then optional reward portfolio.
-    let mut accounts = vec![
-        AccountMeta::new(payer.pubkey(), true),
-        AccountMeta::new(*market, false),
-        AccountMeta::new(*target_portfolio, false),
-    ];
-    for obs in observations {
-        for oracle_ai in &obs.oracle_accounts {
-            accounts.push(AccountMeta::new_readonly(*oracle_ai, false));
+    let mut pre_ixs = vec![cu_ix(), heap_ix()];
+    let accounts = match route {
+        // Live: payer, market, portfolio, then oracle accounts in hint
+        // order, then optional reward portfolio.
+        CrankRoute::Live { reward_portfolio } => {
+            let mut accounts = vec![
+                AccountMeta::new(payer.pubkey(), true),
+                AccountMeta::new(*market, false),
+                AccountMeta::new(*target_portfolio, false),
+            ];
+            for obs in observations {
+                for oracle_ai in &obs.oracle_accounts {
+                    accounts.push(AccountMeta::new_readonly(*oracle_ai, false));
+                }
+            }
+            if let Some(reward) = reward_portfolio {
+                accounts.push(AccountMeta::new(**reward, false));
+            }
+            accounts
         }
-    }
-    if let Some(reward) = reward_portfolio {
-        accounts.push(AccountMeta::new(*reward, false));
-    }
+        CrankRoute::Resolved {
+            owner,
+            mint,
+            vault,
+            vault_authority,
+        } => {
+            let owner_ata =
+                spl_associated_token_account::get_associated_token_address(owner, mint);
+            pre_ixs.push(
+                spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                    &payer.pubkey(),
+                    owner,
+                    mint,
+                    &spl_token::ID,
+                ),
+            );
+            vec![
+                AccountMeta::new_readonly(*owner, *owner == payer.pubkey()),
+                AccountMeta::new(*market, false),
+                AccountMeta::new(*target_portfolio, false),
+                AccountMeta::new(owner_ata, false),
+                AccountMeta::new(*vault, false),
+                AccountMeta::new_readonly(*vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ]
+        }
+    };
 
     let ix = ProgInstruction::PermissionlessCrank {
         now_slot,
@@ -304,8 +386,10 @@ pub fn submit_crank(
         let (bh, _) = rpc
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
             .context("get_latest_blockhash")?;
+        let mut ixs = pre_ixs.clone();
+        ixs.push(instruction.clone());
         let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), heap_ix(), instruction.clone()],
+            &ixs,
             Some(&payer.pubkey()),
             &[payer],
             bh,
