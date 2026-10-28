@@ -24,7 +24,7 @@ Local prototype work against [aeyakovenko/percolator](https://github.com/aeyakov
 - **Pins (2026-10-28)**: wrapper `5cb331dd` (`origin/main`) + engine `4db11a8c` (the wrapper's Cargo pin). Upstream re-pin prog #456 is still a draft, so the engine launch-fix batch `68859b94` runs only as a **pre-merge preview** (`scripts/preview_launch_fixes.sh`, path-patched, never the default). Layout 18; `AutoCrankPlanV16` unchanged.
 - **M1**: end-to-end green on the new pin. A fresh no-op `PermissionlessCrank` consumes **18,565 program CU** (tx total 18,889); it was 17,975 on the old pin. Preview pin: 18,820 (19,144).
 - **M2**: loop green. It now covers the resolved-mode backing hint, `EngineNonProgress` counted as idle, per-account failure quarantine with capped backoff, and a per-cycle wall/CU/tx budget that puts liquidatable accounts first. See [`cranker/README.md`](cranker/README.md).
-- **Load test**: `CRANKER_SCENARIO=live_shaped` (see [`cranker/README.md`](cranker/README.md) and `prep.md`).
+- **Load test**: the `live_shaped` scenario lives on its own branch, `claude/live-shaped-scenario`, and is not part of this PR. Its earlier 200-cycle results stay in `prep.md` as historical findings.
 - **M3**: NO-GO. `declare_id!` is still `Perco1ator111…`, there's no release tag, and fee shares default to 0.
 
 ## Attribution

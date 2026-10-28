@@ -394,7 +394,7 @@ once-only fix-up in `scripts/m1_bringup.sh` if this persists.
       Upstream reference: prog #456 pins max-shape paths at ~566k
       (`v16_cu`, 566_314 after `febc3731`).
 
-      **Load test `live_shaped`** (`scripts/live_shaped.sh`, or
+      **Load test `live_shaped`** (HISTORICAL: moved out of PR #1 to branch `claude/live-shaped-scenario` on 2026-10-28; the results below are kept as findings, not as PR #1 acceptance) (`scripts/live_shaped.sh`, or
       `CRANKER_SCENARIO=live_shaped`). Seed `0x5eed1a7e20261028`, 40 traders
       plus 3 makers, 3 AuthMark assets, 200 cycles, all driven by the real
       `cycle::run_one_cycle`. Covered in the run: liquidations, lapsed
@@ -432,10 +432,14 @@ once-only fix-up in `scripts/m1_bringup.sh` if this persists.
       accounts. Quarantine kept every other account progressing; that part
       is what the cranker controls, and it held.
 
-      ### Found in load test (not filed upstream; owner decision)
+      ### Found in load test (F1 posted upstream as #243 by the owner; the rest private)
 
       Full write-ups, native replays and upstream cross-references are in
       [`cranker/scenario-findings.md`](cranker/scenario-findings.md).
+
+      **Posting upstream (owner decision, 2026-10-28): F1 only.** Posted as
+      [aeyakovenko/percolator#243](https://github.com/aeyakovenko/percolator/issues/243)
+      with a LiteSVM repro on both pins. F1b, F2 and the rest stay private.
 
       - **F1: a lapsed bucket that no account references wedges Live refresh
         and liquidation (`EngineStale` 0x13).**

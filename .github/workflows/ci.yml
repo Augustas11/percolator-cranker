@@ -55,7 +55,7 @@ jobs:
   # SBF build + local validator. Heavier, so it runs on pull requests and
   # manual dispatch only, not on pushes to main.
   e2e:
-    name: SBF build + bring-up + dry-run + live_shaped (50 cycles)
+    name: SBF build + bring-up + dry-run + validator tests
     needs: host
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
@@ -106,34 +106,28 @@ jobs:
         run: |
           mkdir -p ~/.config/solana
           solana-keygen new --no-bip39-passphrase --silent --force --outfile ~/.config/solana/id.json
+      # No FORCE_SBF_REBUILD: the wrapper's target dir is cached by pin, so a
+      # warm run reuses the .so and a cold run builds it. (Note: after the
+      # build, the 2.0.21 SDK's post-build strip.sh runs its legacy installer,
+      # which fetches its built-in default platform-tools v1.42 and Criterion
+      # into sdk/sbf/dependencies. Compilation itself uses v1.52:
+      # cargo-build-sbf links dependencies/platform-tools to
+      # ~/.cache/solana/v1.52 before building. The Solana cache keeps both.)
       - name: SBF build + local bring-up
-        run: FORCE_SBF_REBUILD=1 ./scripts/m1_bringup.sh
+        run: ./scripts/m1_bringup.sh
       - name: keeper dry-run (3 cycles)
         run: |
           export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
           CRANKER_CYCLES=3 cargo run --release --bin cranker --manifest-path "$CRANKER_MANIFEST"
-      - name: integration test against the validator
+      - name: validator integration tests (lifecycle, rollback, conservation)
         run: |
           export PERCOLATOR_TEST_RPC=http://127.0.0.1:8899
           export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
-          cargo test --release --manifest-path "$CRANKER_MANIFEST" --test lifecycle
-      # On the current pins the scenario's liveness assertion fails because of
-      # an engine-side issue (lapsed, unreferenced backing wedges Live
-      # refresh). The step runs and uploads its report, but it does not gate
-      # the job, and its name says so. A pass/fail summary is printed either way.
-      - name: live_shaped 50 cycles (non-gating, known engine-side issue)
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          CRANKER_CYCLES=50 ./scripts/live_shaped.sh 2>&1 | tee live-shaped-run.log
-      - name: live_shaped summary
-        if: always()
-        run: sed -n '/^assertions:/,$p' live-shaped-run.log || true
+          cargo test --release --manifest-path "$CRANKER_MANIFEST" \
+            --test lifecycle --test hard_reject --test invariants -- --include-ignored
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: live-shaped-report
-          path: |
-            live-shaped-run.log
-            /tmp/solana-test-validator.log
+          name: validator-log
+          path: /tmp/solana-test-validator.log
           if-no-files-found: ignore
