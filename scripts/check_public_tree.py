@@ -12,11 +12,11 @@ Fails (exit 1, every hit listed) on:
   * secret-looking file names (.env*, id.json*, *keypair*.json,
     wallet*.json, *.pem, *.key), 64-element byte arrays (decimal or hex,
     optional u8 suffix and trailing comma, across whitespace; both the raw
-    text and the text with (nested) comments removed are scanned),
+    text and string-aware code / comment-body views are scanned),
     and private-key / wallet-word-list markers, matched over the whole text;
   * absolute local paths (user home, root and volume directories, macOS
     private temp dirs, Windows user profiles on any drive, with / \ or
-    escaped separators), case-insensitive;
+    escaped separators, JSON-escaped \\/ too), any user name, case-insensitive;
   * email addresses (except --allow-email ADDR, only in SECURITY.md);
   * URLs whose parsed host/path is not on the allowlist (backslashes and
     dot segments, literal or percent-encoded, are rejected; Cargo.lock
@@ -61,7 +61,7 @@ KEY_MARKER = re.compile(
     re.I)
 _SEP = r"(/|\\\\|\\)"  # / or \ or \\ (source-escaped)
 ABS_PATH = re.compile(
-    "/" + "(us" + "ers|ho" + "me)/[A-Za-z0-9_.$@-]"
+    "/" + "(us" + "ers|ho" + "me)/[^\\s/]"
     + "|/" + "ro" + "ot/"
     + "|/" + "vol" + "umes/"
     + "|/" + "priv" + "ate/(var|tmp)/"
@@ -91,16 +91,53 @@ PLACEHOLDER = re.compile("@" + "[A-Z][A-Z_]+" + "@")
 DOT_SEGMENT = re.compile(r"(^|/)(\.|%2e){1,2}(/|$)", re.I)
 
 
-INNER_BLOCK = re.compile(r"/\*(?:(?!/\*|\*/).)*\*/", re.S)
+LINE_PREFIX = re.compile(r"(?m)^[ \t]*(?://+!?|#+|\*+(?!/)|--)")
 
 
-def strip_comments(text):
-    """Remove // and (nested) /* */ comments. Approximate: // inside a string
-    also cuts the line, which is why the raw text is scanned as well."""
-    prev = None
-    while prev != text:
-        prev, text = text, INNER_BLOCK.sub("", text)
-    return re.sub(r"//[^\n]*", "", text)
+def split_code_comments(text):
+    """Split C/Rust-style text into (code, comment bodies). String literals stay
+    in code, so a '//' inside a string does not start a comment; block comments
+    nest as in Rust. Comment bodies keep their newlines, so consecutive
+    commented lines read as one block."""
+    code, com = [], []
+    i, n, depth, in_str, in_line = 0, len(text), 0, False, False
+    while i < n:
+        c, two = text[i], text[i:i + 2]
+        if in_line:
+            if c == "\n":
+                in_line = False
+                code.append(c)
+            com.append(c)
+            i += 1
+        elif depth:
+            if two == "/*":
+                depth, i = depth + 1, i + 2
+            elif two == "*/":
+                depth, i = depth - 1, i + 2
+                com.append(" ")
+            else:
+                com.append(c)
+                i += 1
+        elif in_str:
+            code.append(text[i:i + 2] if c == "\\" else c)
+            in_str = c != '"'
+            i += 2 if c == "\\" else 1
+        elif two == "//":
+            in_line, i = True, i + 2
+        elif two == "/*":
+            depth, i = 1, i + 2
+        else:
+            in_str = c == '"'
+            code.append(c)
+            i += 1
+    return "".join(code), "".join(com)
+
+
+def key_views(text):
+    """Texts scanned for 64-byte arrays: raw, raw without line-comment
+    prefixes, code without comments, and comment bodies without prefixes."""
+    code, com = split_code_comments(text)
+    return (text, LINE_PREFIX.sub("", text), code, LINE_PREFIX.sub("", com))
 
 
 def norm_repo(r):
@@ -238,8 +275,7 @@ def main(argv):
         lines = text.splitlines()
         if SECRET_NAME.match(base):
             hit(f"secret-looking file: {rel}")
-        views = (text, strip_comments(text))  # raw view: commented-out arrays count too
-        if any(KEY_ARRAY.search(re.sub(r"\s+", "", v)) for v in views):
+        if any(KEY_ARRAY.search(re.sub(r"\s+", "", v)) for v in key_views(text)):
             hit(f"keypair-like 64-byte array: {rel}")
         for m in KEY_MARKER.finditer(text):
             n = text.count("\n", 0, m.start()) + 1
@@ -252,7 +288,7 @@ def main(argv):
         is_lock = base == "Cargo.lock"
         for n, line in enumerate(lines, 1):
             loc = f"{rel}:{n}"
-            if ABS_PATH.search(line):
+            if ABS_PATH.search(line) or ABS_PATH.search(line.replace("\\/", "/")):  # JSON \/
                 hit(f"absolute path: {loc}: {line.strip()}")
             fixture = fixture_ok(rel, line)
             for m in EMAIL.finditer(line):

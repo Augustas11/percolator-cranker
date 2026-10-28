@@ -54,6 +54,15 @@ class Gate(unittest.TestCase):
             self.assertIn(needle, out)
         return out
 
+    def each_fails(self, cases, needle=None):
+        """Each payload in its own fresh tree, so diagnostics cannot overlap."""
+        for rel, text in cases:
+            with self.subTest(payload=text):
+                self.tearDown()
+                self.setUp()
+                self.put(rel, text)
+                self.assertFails(needle)
+
     def test_clean_tree_passes(self):
         rc, out = run_gate(self.root)
         self.assertEqual(rc, 0, out)
@@ -282,14 +291,6 @@ class GateRound4(Gate):
     """Round-4 audit bypasses. Each payload runs in its own fresh tree, so one
     payload's diagnostics cannot satisfy another's assertion."""
 
-    def each_fails(self, cases, needle=None):
-        for rel, text in cases:
-            with self.subTest(payload=text):
-                self.tearDown()
-                self.setUp()
-                self.put(rel, text)
-                self.assertFails(needle)
-
     def test_key_array_comment_tricks(self):
         self.each_fails([
             ("a.rs", f"// backup: {KEY64}\n"),
@@ -337,6 +338,39 @@ class GateRound4(Gate):
             ("c.rs", 'const P: &str = "C:\\\\' + 'Users\\\\alice\\\\private.txt";\n'),
             ("d.md", "D:\\" + "Users\\bob\\x.txt\n"),
             ("e.md", "c:/" + "users/carol/x.txt\n"),
+        ], "absolute path")
+
+
+class GateRound5(Gate):
+    """Round-5 audit bypasses: commented keys over several lines, '//' inside
+    strings, non-ASCII and JSON-escaped home paths."""
+
+    def test_key_array_multiline_comments(self):
+        nums = [str(i) for i in range(64)]
+        self.each_fails([
+            ("a.rs", "// const BACKUP: [u8; 64] = [\n// " + ", ".join(nums) + "\n// ];\n"),
+            ("b.rs", "// [\n" + "".join(f"// {i},\n" for i in range(64)) + "// ]\n"),
+            ("c.rs", "/* backup\n * [\n" + "".join(f" * {i},\n" for i in range(64)) + " * ]\n */\n"),
+            ("d.py", "# [\n" + "".join(f"# {i},\n" for i in range(64)) + "# ]\n"),
+            ("e.rs", 'const RPC: &str = "http://localhost:8899"; const K: [u8; 64] = [0, /* first */ '
+                     + ", ".join(nums[1:]) + "];\n"),
+            ("f.rs", 'let u = "a // b"; /* x */ let k = [0, /* y */ ' + ", ".join(nums[1:]) + "];\n"),
+        ], "keypair-like")
+
+    def test_ordinary_code_with_strings_and_comments_passes(self):
+        self.put("ok.rs", 'let url = "http://127.0.0.1:8899"; // local rpc\n'
+                          '/* a /* nested */ block */ let v = [1, 2, 3];\n'
+                          'let s = "escaped \\" quote // not a comment";\n')
+        rc, out = run_gate(self.root)
+        self.assertEqual(rc, 0, out)
+
+    def test_unicode_and_json_escaped_home_paths(self):
+        u, h = "/Us" + "ers/", "/ho" + "me/"
+        self.each_fails([
+            ("a.md", u + "Élodie/Documents/notes.txt\n"),
+            ("b.md", h + "张伟/notes.txt\n"),
+            ("c.json", '{"path":"\\/Us' + 'ers\\/alice\\/config.json"}\n'),
+            ("d.json", '{"path":"\\/ho' + 'me\\/bob\\/x"}\n'),
         ], "absolute path")
 
 
