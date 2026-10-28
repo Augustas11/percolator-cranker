@@ -155,7 +155,7 @@ impl Phases {
 /// Keypair for `label`, a pure function of (seed, run, label).
 fn derive_keypair(seed: u64, run: u64, label: &str) -> Keypair {
     let h = hashv(&[
-        b"percolator-cranker/live_shaped/key/v1",
+        b"reference-keeper/live_shaped/key/v1",
         &seed.to_le_bytes(),
         &run.to_le_bytes(),
         label.as_bytes(),
@@ -365,7 +365,7 @@ impl ActionPlan {
             h.hash(&v.to_le_bytes());
         }
         let mut h = Hasher::default();
-        h.hash(b"percolator-cranker/live_shaped/plan/v1");
+        h.hash(b"reference-keeper/live_shaped/plan/v1");
         for v in [cfg.seed, cfg.run, cfg.traders as u64, cfg.assets as u64, cfg.cycles] {
             u(&mut h, v);
         }
