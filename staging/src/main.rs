@@ -37,7 +37,7 @@ use drip::{
     quarantine::{Quarantine, QuarantineConfig},
     scheduler::CycleBudget,
     setup,
-    submit::{self, CrankRoute},
+    submit::{self, CrankRoute, OutcomeClass},
 };
 use percolator::{BackingBucketStatusV16 as Bucket, MarketModeV16, BOUND_SCALE, AssetStateV16, PortfolioLegV16Account, MIN_A_SIDE, ADL_ONE};
 use percolator_prog::{
@@ -74,6 +74,28 @@ enum Phase {
     Recovery,
     /// Market resolved; waiting for the keeper to close both portfolios.
     Resolved,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RejectKind {
+    Program,
+    Transport,
+}
+
+/// How a keeper crank outcome counts toward the abnormal exit. Only
+/// Failed-class rejects count: e.g. EngineNonProgress is a HardReject the
+/// keeper classes Idle (nothing to do). The keeper records a HardReject only
+/// for a definitive outcome (preflight rejected, or executed and failed), so
+/// it is a program failure by structure, not by error text, except
+/// "Blockhash not found", a cluster/RPC condition that also arrives as a
+/// rejected preflight.
+fn reject_kind(o: &submit::CrankOutcome) -> Option<RejectKind> {
+    match o {
+        submit::CrankOutcome::HardReject { error, .. } if o.class() == OutcomeClass::Failed => {
+            Some(if error.contains("Blockhash not found") { RejectKind::Transport } else { RejectKind::Program })
+        }
+        _ => None,
+    }
 }
 
 fn env_or<T: FromStr>(key: &str, default: T) -> T {
@@ -916,17 +938,11 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
             // one is a program failure, decided by its structure, not by its
             // error text. The one exception is "Blockhash not found": a
             // cluster/RPC condition that also arrives as a rejected preflight.
-            let blockhash = |e: &str| e.contains("Blockhash not found");
-            let program_failures = records.iter().filter(|r| match &r.outcome {
-                submit::CrankOutcome::HardReject { error, .. } => !blockhash(error),
-                _ => false,
-            }).count();
-            let rejected_transport = records.iter().filter(|r| match &r.outcome {
-                submit::CrankOutcome::HardReject { error, .. } if blockhash(error) => {
-                    eprintln!("keeper transport: {}", launch::scrub(error));
-                    true
-                }
-                _ => false,
+            let program_failures = records.iter().filter(|r| reject_kind(&r.outcome) == Some(RejectKind::Program)).count();
+            let rejected_transport = records.iter().filter(|r| {
+                let t = reject_kind(&r.outcome) == Some(RejectKind::Transport);
+                if t { if let submit::CrankOutcome::HardReject { error, .. } = &r.outcome { eprintln!("keeper transport: {}", launch::scrub(error)); } }
+                t
             }).count();
             let mut transport_errors = rejected_transport;
             let result = match result {
@@ -1100,5 +1116,34 @@ mod fill_tests {
         assert_eq!(fill_allowed(-1, 100_000_000, 100_000_000, 1_000_000_000, &cfg()), Err("max_lp_inventory"));
         assert_eq!(fill_allowed(1, 100_000_000, 100_000_000, 2_000_000_000, &cfg()), Ok(()));
         assert_eq!(fill_allowed(-1, 100_000_000, 100_000_000, -2_000_000_000, &cfg()), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod reject_kind_tests {
+    use super::*;
+
+    fn hr(error: &str, name: Option<&'static str>) -> submit::CrankOutcome {
+        submit::CrankOutcome::HardReject { error: error.into(), error_name: name.map(Into::into), program_cu: None, tx_cu: None }
+    }
+
+    #[test]
+    fn idle_rejects_do_not_count() {
+        // EngineNonProgress is the keeper's normal idle answer, not a failure.
+        let o = hr("custom program error: 0x16", Some("EngineNonProgress"));
+        assert_eq!(o.class(), OutcomeClass::Idle);
+        assert_eq!(reject_kind(&o), None);
+    }
+
+    #[test]
+    fn definitive_rejects_are_program_failures_without_marker_text() {
+        // A structured preflight failure whose text has no program-error marker.
+        assert_eq!(reject_kind(&hr("RPC response error -32002: Transaction simulation failed", None)), Some(RejectKind::Program));
+        assert_eq!(reject_kind(&hr("custom program error: 0x13", Some("EngineStale"))), Some(RejectKind::Program));
+    }
+
+    #[test]
+    fn blockhash_not_found_is_transport() {
+        assert_eq!(reject_kind(&hr("RPC response error -32002: Transaction simulation failed: Blockhash not found", None)), Some(RejectKind::Transport));
     }
 }
