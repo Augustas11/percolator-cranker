@@ -7,9 +7,11 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "roundtrip": "vite build --ssr scripts/devnet-roundtrip.ts --outDir .roundtrip --emptyOutDir && node .roundtrip/devnet-roundtrip.js"
   },
   "dependencies": {
+    "@solana/web3.js": "1.98.4",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
