@@ -16,6 +16,13 @@ pub struct KeeperLog {
     pub signature: Option<String>,
     pub last_success_slot: Option<u64>,
     pub first_seen_slot: Option<u64>,
+    /// Pusher: source price timestamp to push landing, ms (staging `mark_lag` event).
+    mark_lag_ms: Option<u64>,
+    /// Unix ms when that push landed: a stopped pusher shows as a growing age.
+    mark_lag_at_ms: Option<u64>,
+    /// Unix ms when this log was first read: before any push lands, the push
+    /// age counts from here, so a pusher that never succeeds still alerts.
+    watch_start_ms: Option<u64>,
     last_cycle: u64,
     summary: BTreeMap<String, u64>,
     attempts: [u64; 3],
@@ -37,6 +44,9 @@ pub fn cu_stats(values: &VecDeque<u64>) -> (u64, u64) {
 
 impl KeeperLog {
     pub fn line(&mut self, line: &str) {
+        self.watch_start_ms.get_or_insert_with(|| {
+            SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+        });
         if let Some((left, right)) = line.split_once('=') {
             if left.starts_with("market") && left.trim_end() == "market" && left.len() > 6 {
                 if let Ok(pk) = right.trim().parse::<solana_sdk::pubkey::Pubkey>() {
@@ -91,6 +101,10 @@ impl KeeperLog {
                             self.quarantine.insert(account.into(),json!({"account":account,"first_strike_slot":first,
                                 "error":v["error"],"strike":v["strike"],"until_cycle":v["until_cycle"],"last_event_slot":slot}));
                         }
+                    }
+                    Some("mark_lag") => {
+                        self.mark_lag_ms = v["ms"].as_u64();
+                        self.mark_lag_at_ms = v["at_ms"].as_u64();
                     }
                     Some("unconfirmed" | "idle_with_pending_work") => {
                         self.events.insert(v["event"].as_str().unwrap().into(), v);
@@ -191,7 +205,11 @@ impl KeeperLog {
             "quarantined_accounts":rows,"last_success_signature":self.signature,"last_success_slot":self.last_success_slot,
             // Before any known success, count from the first slot this log was watched,
             // so a keeper failing from its start still trips the no-success alert.
-            "slots_since_last_success":self.last_success_slot.or(self.first_seen_slot).map(|s|slot.saturating_sub(s)),"last_events":self.events})
+            "slots_since_last_success":self.last_success_slot.or(self.first_seen_slot).map(|s|slot.saturating_sub(s)),"last_events":self.events,"mark_lag_ms":self.mark_lag_ms,
+            "mark_push_age_seconds":self.mark_lag_at_ms.or(self.watch_start_ms).map(|at| {
+                let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                now.saturating_sub(at) / 1000
+            })})
     }
 }
 
@@ -230,6 +248,12 @@ mod tests {
                 .replace("failed=1", "failed=0"),
         );
         assert_eq!(k.cycles, [1, 1, 1]);
+        // The staging pusher's lag event (Day-0 launch, docs/LAUNCH.md).
+        k.line(r#"{"event":"mark_lag","ms":512,"target_ms":400,"at_ms":1000}"#);
+        let s = k.snapshot(120, true, None, None);
+        assert_eq!(s["mark_lag_ms"], 512);
+        // A push long ago: the age grows, so a stopped pusher alerts.
+        assert!(s["mark_push_age_seconds"].as_u64().unwrap() > 1_000_000);
     }
     #[test]
     fn non_progress_reject_clears_other_rejects_update_error_and_no_success_baseline() {

@@ -7,9 +7,12 @@
 #   STAGING_HOURS=0.17 ./scripts/staging_local.sh # ~10 minute smoke run
 #
 # Everything lands in a run dir (default .staging-runs/<timestamp>, gitignored):
-# payer.json (generated, local only), ledger/, validator.log, staging.log.
+# payer.json (generated, local only), ledger/ (deleted at exit unless
+# KEEP_LEDGER=1), validator.log, staging.log.
 # The exit code is the staging binary's: 0 = normal, 1 = abnormal failures.
-# Other STAGING_* knobs (tick, seed, backing tenor, ...) pass through; see
+# Market, amounts, matcher and oracle params come from launch/sol-perp.toml
+# (STAGING_CONFIG overrides), the same file as the Day-0 launch. Other
+# STAGING_* knobs (tick, seed, backing tenor, ...) pass through; see
 # docs/STAGING.md.
 
 set -euo pipefail
@@ -44,14 +47,22 @@ export STAGING_PAYER="$RUN_DIR/payer.json"
 
 echo "==> validator on $STAGING_RPC_URL (run dir $RUN_DIR)"
 solana-test-validator --reset --quiet \
-  --ledger "$RUN_DIR/ledger" --limit-ledger-size 50000000 \
+  --ledger "$RUN_DIR/ledger" --limit-ledger-size 10000 \
   --bind-address 127.0.0.1 --rpc-port "$PORT" --faucet-port $((PORT + 1000)) \
   --gossip-port $((PORT + 1010)) --dynamic-port-range "$((PORT + 1020))-$((PORT + 1120))" \
   --mint "$(solana-keygen pubkey "$STAGING_PAYER")" \
   --bpf-program "$PERCOLATOR_PROGRAM_ID" "$PROG_SO" \
   > "$RUN_DIR/validator.log" 2>&1 &
 VALIDATOR_PID=$!
-trap 'kill "$VALIDATOR_PID" 2>/dev/null || true' EXIT
+# Stop the validator; drop its ledger (KEEP_LEDGER=1 keeps it). Logs stay.
+cleanup() {
+  local rc=$?
+  kill "$VALIDATOR_PID" 2>/dev/null || true
+  wait "$VALIDATOR_PID" 2>/dev/null || true
+  [ "${KEEP_LEDGER:-0}" = 1 ] || rm -rf "$RUN_DIR/ledger"
+  exit "$rc"
+}
+trap cleanup EXIT
 for _ in $(seq 1 60); do
   solana cluster-version --url "$STAGING_RPC_URL" >/dev/null 2>&1 && break
   sleep 1

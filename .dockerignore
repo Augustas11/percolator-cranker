@@ -1,0 +1,14 @@
+# deploy/Dockerfile context: never ship keys, run dirs or build output.
+launch-runs/
+.staging-runs/
+.preview/
+**/target/
+*.log
+public/
+frontend/
+# Secrets: the filled-in hosting env and any key files never enter the build context.
+**/.env
+**/.env.*
+!**/*.env.example
+**/keys/
+*.pem

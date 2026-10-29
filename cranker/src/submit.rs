@@ -831,3 +831,54 @@ mod tests {
         }
     }
 }
+
+/// Error text with every http(s) URL replaced by its host: RPC transport
+/// errors quote the request URL, and paid endpoints carry a key in it. A URL
+/// runs to the next whitespace or double quote (commas, quotes and
+/// parentheses are legal inside one, so they don't end it).
+pub fn scrub_urls(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let mut rest = msg;
+    while let Some(i) = rest.find("http") {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let Some(after) = tail.strip_prefix("https://").or_else(|| tail.strip_prefix("http://")) else {
+            out.push_str("http");
+            rest = &tail[4..];
+            continue;
+        };
+        let end = tail.find(|c: char| c.is_whitespace() || c == '"').unwrap_or(tail.len());
+        let authority = after[..end - (tail.len() - after.len())].split(['/', '?', '#']).next().unwrap_or("");
+        let host = authority.rsplit('@').next().unwrap_or("");
+        out.push_str(&tail[..tail.len() - after.len()]);
+        out.push_str(host);
+        out.push_str("/[redacted]");
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    use super::scrub_urls;
+
+    #[test]
+    fn urls_keep_only_their_host() {
+        for (input, secret) in [
+            ("error sending request for url (https://rpc.example.com/SECRETKEY?api-key=X): timed out", "SECRET"),
+            ("https://rpc.example.com/?api-key=abc,DEMO_SECRET failed", "DEMO_SECRET"),
+            ("https://user,PASSWORD@rpc.example.com/path x", "PASSWORD"),
+            ("'https://rpc.example.com/a'b(SECRET)' y", "SECRET"),
+        ] {
+            let m = scrub_urls(input);
+            assert!(!m.contains(secret), "{input} -> {m}");
+            assert!(m.contains("rpc.example.com/[redacted]"), "{input} -> {m}");
+        }
+        assert_eq!(scrub_urls("no url here; http only"), "no url here; http only");
+        // Scrubbed before serializing, an error with a quoted URL stays valid JSON.
+        let line = serde_json::json!({ "error": scrub_urls(r#"send "https://rpc.example.com/KEY" failed"#) }).to_string();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(!v["error"].as_str().unwrap().contains("KEY"));
+    }
+}

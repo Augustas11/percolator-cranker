@@ -78,6 +78,7 @@ pins. Counters are identified below; other families are gauges.
 | `keeper_quarantined_accounts` | Accounts struck without subsequent observed Progress |
 | `keeper_account_quarantined_slots{account,error,strike}` | Current chain slot minus first quarantine event slot |
 | `keeper_last_success_slot` | Slot of the latest landed crank signature (`getSignatureStatuses` with history), absent until known |
+| `keeper_mark_lag_ms` | Day-0 bots log only: the pusher's last `mark_lag` event, source price time to push landed (docs/LAUNCH.md); alert `PusherMarkLagHigh` > 400 ms |
 | `keeper_slots_since_last_success` | Chain slot minus that slot, saturating at zero. Any landed crank (`Ok(mut)`, `Ok(no-mut)`, `Ok(unreconciled)`) counts as successful |
 
 Bucket JSON lists every non-empty bucket, with expiry, signed slots to expiry

@@ -6,10 +6,12 @@
 #   ./scripts/staging_usdc_faucet.sh <tester-wallet> <amount-usdc>         # print only
 #   ./scripts/staging_usdc_faucet.sh <tester-wallet> <amount-usdc> --yes   # mint
 #
-# Environment:
-#   STAGING_RPC_URL        devnet RPC URL (default https://api.devnet.solana.com)
-#   USDC_MINT              the test USDC mint (scripts/staging_devnet_deploy.sh step 4)
-#   MINT_AUTHORITY_KEYPAIR its mint authority (the staging payer), a path, 0600
+# Reads the devnet launch (scripts/launch_market.sh <config> devnet): the RPC
+# from the config, the mint from the run's state.json, its authority (the
+# run's payer) from the run's keys. Environment overrides:
+#   LAUNCH_CONFIG          config (default launch/sol-perp.toml)
+#   LAUNCH_RUN_DIR         run dir (default launch-runs/devnet)
+#   STAGING_RPC_URL, USDC_MINT, MINT_AUTHORITY_KEYPAIR   explicit values
 #   FAUCET_MAX_USDC        per-call cap (default 100000)
 
 set -euo pipefail
@@ -22,7 +24,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/env.sh"
 
-RPC="${STAGING_RPC_URL:-https://api.devnet.solana.com}"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONFIG="${LAUNCH_CONFIG:-$REPO_ROOT/launch/sol-perp.toml}"
+RUN_DIR="${LAUNCH_RUN_DIR:-$REPO_ROOT/launch-runs/devnet}"
+RPC="${STAGING_RPC_URL:-$(python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["cluster"]["devnet"]["rpc"])' "$CONFIG")}"
+USDC_MINT="${USDC_MINT:-$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["mint"])' "$RUN_DIR/state.json" 2>/dev/null || true)}"
+MINT_AUTHORITY_KEYPAIR="${MINT_AUTHORITY_KEYPAIR:-$RUN_DIR/keys/payer.json}"
 case "$(printf '%s' "$RPC" | tr '[:upper:]' '[:lower:]')" in
   *mainnet*|m) die "refusing mainnet ($RPC)" ;;
 esac
@@ -31,7 +38,7 @@ if genesis="$(solana genesis-hash -u "$RPC" 2>/dev/null)"; then
 elif [ "$YES" = 1 ]; then
   die "cannot reach $RPC to verify the cluster"
 fi
-: "${USDC_MINT:?USDC_MINT must be set}"
+: "${USDC_MINT:?no mint: run launch_market.sh <config> devnet first, or set USDC_MINT}"
 [ -f "${MINT_AUTHORITY_KEYPAIR:-}" ] || die "MINT_AUTHORITY_KEYPAIR must name a keypair file"
 [[ "$AMOUNT" =~ ^[0-9]+$ ]] && [ "$AMOUNT" -gt 0 ] || die "amount must be a whole number of USDC"
 [ "$AMOUNT" -le "${FAUCET_MAX_USDC:-100000}" ] || die "amount above FAUCET_MAX_USDC"

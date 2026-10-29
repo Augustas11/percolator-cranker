@@ -23,6 +23,11 @@
 //! One log line per tick, a JSON summary every `STAGING_SUMMARY_EVERY` ticks
 //! and at the end. Exit 1 when a role fails `STAGING_MAX_CONSEC_FAIL` times
 //! in a row, or more than 5% of its attempts over the run.
+//!
+//! Params come from `launch/sol-perp.toml` (`STAGING_CONFIG`). Day-0 launch
+//! modes (`launch.rs`, `scripts/launch_market.sh`): `staging step <name>
+//! <config> <cluster> <run dir>` runs one resumable setup step, and `staging
+//! bots <config> <cluster> <run dir>` runs roles 1-5 on that existing market.
 
 use anyhow::{anyhow, bail, Context, Result};
 use drip::{
@@ -34,14 +39,14 @@ use drip::{
     setup,
     submit::{self, CrankRoute, OutcomeClass},
 };
-use percolator::{BackingBucketStatusV16 as Bucket, MarketModeV16, BOUND_SCALE, MAX_VAULT_TVL};
+use percolator::{BackingBucketStatusV16 as Bucket, MarketModeV16, BOUND_SCALE};
 use percolator_prog::{
     ix::Instruction as P,
     processor::ASSET_ACTION_SHUTDOWN,
     state::{self, read_asset_control_sequences, read_asset_oracle_profile, read_market, read_portfolio},
     state::{AssetControlSequencesV16, MarketGroupV16},
 };
-use solana_client::rpc_client::RpcClient;
+use solana_client::{rpc_client::RpcClient, rpc_config::RpcSendTransactionConfig};
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     compute_budget::ComputeBudgetInstruction,
@@ -53,20 +58,13 @@ use solana_sdk::{
 };
 use std::{env, str::FromStr, time::Duration, time::Instant};
 
-/// Amounts are test-USDC atoms (6 decimals): 1_000_000 = $1. Prices are e6
-/// USD per SOL; sizes are 1e-6 SOL (POS_SCALE), so notional = q * price / 1e6.
-const PRICE0: u64 = 150_000_000; // $150
-const DEPOSIT: u64 = 30_000_000_000; // $30k per portfolio
-/// 10 SOL, about $1.5k notional: 5% of a deposit, 1/4 of the 5x limit.
-const TRADE_Q: i128 = 10_000_000;
-const SPREAD_BPS: u64 = 10;
-const BACKING_AMOUNT: u128 = 10_000_000_000; // $10k per domain
-const INSURANCE_AMOUNT: u128 = 10_000_000; // $10
-/// Slots before a shut-down asset can be force-closed and before a resolved
-/// account may be closed without its owner (the keeper's resolved route).
-const FORCE_CLOSE_DELAY_SLOTS: u64 = 20;
-/// Slots without a mark before anyone may resolve the market (~1 h).
-const STALE_SLOTS: u64 = 9_000;
+mod launch;
+use launch::Config;
+
+/// Params (market, amounts, matcher, oracle): `launch/sol-perp.toml`.
+/// Amounts are collateral atoms (6 decimals); prices are e6 USD per SOL;
+/// sizes are 1e-6 SOL (POS_SCALE), so notional = q * price / 1e6.
+const DEFAULT_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../launch/sol-perp.toml");
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
@@ -81,9 +79,10 @@ fn env_or<T: FromStr>(key: &str, default: T) -> T {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// Wrapper error name when known, else the first 120 chars of the error.
+/// Wrapper error name when known, else the first 120 chars of the error,
+/// with any URL cut to its host (RPC errors can carry a paid endpoint key).
 fn short(e: &anyhow::Error) -> String {
-    let msg = format!("{e:#}");
+    let msg = launch::scrub(&format!("{e:#}"));
     submit::wrapper_error_name(&msg)
         .map(str::to_string)
         .unwrap_or_else(|| msg.chars().take(120).collect())
@@ -128,11 +127,26 @@ impl Role {
 }
 
 struct Staging {
+    cfg: Config,
     rpc: RpcClient,
     program_id: Pubkey,
     payer: Keypair,
+    /// marketauth at InitMarket, holding every asset-0 role until the
+    /// launch `handover` (launch.rs). Mainnet: the fresh launch key.
     admin: Keypair,
+    /// Role signers for the bots: the admin until the handover, then the
+    /// holders' keys. `None`: that role's key is not on this host (skipped).
+    oracle_kp: Keypair,
+    backing_kp: Option<Keypair>,
+    insurance_kp: Option<Keypair>,
+    /// Price source: this Pyth feed (SOL/USD) when set, else the seeded mock.
+    pyth_feed: Option<[u8; 32]>,
+    /// Bots mode: also print drip-format crank lines and `mark_lag` events,
+    /// which the monitor reads from this log.
+    keeper_log: bool,
     mint: Pubkey,
+    /// The payer is the mint authority (test mint): deposits mint first.
+    own_mint: bool,
     market: Pubkey,
     vault: Pubkey,
     vault_auth: Pubkey,
@@ -193,18 +207,40 @@ impl Staging {
         matches!(self.rpc.simulate_transaction(&tx), Ok(r) if r.value.err.is_none())
     }
 
+    /// Create and InitPortfolio `kp` for `owner` in one tx (same account
+    /// layout as `drip::setup::create_portfolio`).
+    fn create_portfolio(&self, owner: &Keypair, kp: &Keypair) -> Result<()> {
+        let len = state::portfolio_account_len_for_market_slots(1).map_err(|e| anyhow!("{e:?}"))?;
+        let rent = self.rpc.get_minimum_balance_for_rent_exemption(len)?;
+        let create = system_instruction::create_account(&self.payer.pubkey(), &kp.pubkey(), rent, len as u64, &self.program_id);
+        let init = self.prog_ix(
+            P::InitPortfolio,
+            vec![AccountMeta::new(owner.pubkey(), true), AccountMeta::new(self.market, false), AccountMeta::new(kp.pubkey(), false)],
+        );
+        self.send(&[create, init], &[kp, owner]).context("create portfolio")
+    }
+
     fn prog_ix(&self, ix: P, accounts: Vec<AccountMeta>) -> Instruction {
         Instruction { program_id: self.program_id, accounts, data: ix.encode() }
     }
 
-    fn admin_metas(&self) -> Vec<AccountMeta> {
-        vec![AccountMeta::new(self.admin.pubkey(), true), AccountMeta::new(self.market, false)]
+    fn role_metas(&self, k: &Keypair) -> Vec<AccountMeta> {
+        vec![AccountMeta::new(k.pubkey(), true), AccountMeta::new(self.market, false)]
     }
 
-    /// admin, market, admin ATA, vault, token program: the top-up shape.
-    fn funding_metas(&self) -> Vec<AccountMeta> {
-        let mut m = self.admin_metas();
-        m.push(AccountMeta::new(self.admin_ata, false));
+    fn admin_metas(&self) -> Vec<AccountMeta> {
+        self.role_metas(&self.admin)
+    }
+
+    /// An authority transaction, signed by the admin (launch) key.
+    fn send_admin(&self, label: &str, ixs: &[Instruction]) -> Result<()> {
+        self.send(ixs, &[&self.admin]).context(label.to_string())
+    }
+
+    /// role key, market, its token account, vault, token program: the top-up shape.
+    fn funding_metas(&self, k: &Keypair) -> Vec<AccountMeta> {
+        let mut m = self.role_metas(k);
+        m.push(AccountMeta::new(spl_associated_token_account::get_associated_token_address(&k.pubkey(), &self.mint), false));
         m.push(AccountMeta::new(self.vault, false));
         m.push(AccountMeta::new_readonly(spl_token::ID, false));
         m
@@ -242,12 +278,20 @@ impl Staging {
 
     // ------------------------------------------------------------ setup
 
-    fn deposit(&self, owner: &Keypair, portfolio: &Pubkey) -> Result<()> {
+    fn exists(&self, pk: &Pubkey) -> Result<bool> {
+        Ok(self.rpc.get_account_with_commitment(pk, CommitmentConfig::confirmed())?.value.is_some())
+    }
+
+    /// Deposit `amount` from the owner's token account, minting it first
+    /// when we own the test mint.
+    fn deposit(&self, owner: &Keypair, portfolio: &Pubkey, amount: u64) -> Result<()> {
         let ata = spl_associated_token_account::get_associated_token_address(&owner.pubkey(), &self.mint);
-        setup::mint_to(&self.rpc, &self.payer, &self.mint, &ata, &self.payer, DEPOSIT)?;
+        if self.own_mint {
+            setup::mint_to(&self.rpc, &self.payer, &self.mint, &ata, &self.payer, amount)?;
+        }
         let b = binding::portfolio_binding(&self.rpc.get_account_data(portfolio)?)?;
         let ix = self.prog_ix(
-            P::Deposit { portfolio_id: b.portfolio_id, expected_sequence: b.sequence, amount: DEPOSIT as u128 },
+            P::Deposit { portfolio_id: b.portfolio_id, expected_sequence: b.sequence, amount: amount as u128 },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -260,7 +304,50 @@ impl Staging {
         self.send(&[ix], &[owner]).context("Deposit")
     }
 
-    fn setup(rpc: RpcClient, program_id: Pubkey, payer: Keypair) -> Result<Staging> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(cfg: Config, rpc: RpcClient, program_id: Pubkey, payer: Keypair, admin: Keypair, lp: Keypair, trader: Keypair, mint: Pubkey, own_mint: bool) -> Staging {
+        let o = cfg.oracle.clone();
+        let admin_ata = spl_associated_token_account::get_associated_token_address(&admin.pubkey(), &mint);
+        Staging {
+            rpc,
+            program_id,
+            payer,
+            oracle_kp: admin.insecure_clone(),
+            backing_kp: Some(admin.insecure_clone()),
+            insurance_kp: Some(admin.insecure_clone()),
+            admin,
+            pyth_feed: None,
+            keeper_log: false,
+            mint,
+            own_mint,
+            market: Pubkey::default(),
+            vault: Pubkey::default(),
+            vault_auth: Pubkey::default(),
+            admin_ata,
+            lp_pf: Pubkey::default(),
+            lp,
+            trader_pf: Pubkey::default(),
+            trader,
+            pyth: observation::empty_pyth_resolver(),
+            rng: env_or("STAGING_SEED", 42u64),
+            feed: cfg.market.initial_price,
+            mark: cfg.market.initial_price,
+            last_push_slot: 0,
+            push_heartbeat_slots: env_or("STAGING_PUSH_HEARTBEAT_SLOTS", o.push_heartbeat_slots),
+            push_deviation_bps: env_or("STAGING_PUSH_DEVIATION_BPS", o.push_deviation_bps),
+            open: None,
+            rolling: false,
+            tenor: env_or("STAGING_BACKING_TENOR_SLOTS", cfg.amounts.backing_tenor_slots),
+            fee_bps: env_or("STAGING_TRADE_FEE_BPS", cfg.matcher.fee_bps),
+            phase: Phase::Live,
+            resolved_ticks: 0,
+            relisted: false,
+            cfg,
+        }
+    }
+
+    /// R2: fresh role keys and test mint, then a market (`open_market`).
+    fn setup(cfg: Config, rpc: RpcClient, program_id: Pubkey, payer: Keypair) -> Result<Staging> {
         let (admin, lp, trader) = (Keypair::new(), Keypair::new(), Keypair::new());
         let fund: Vec<Instruction> = [&admin, &lp, &trader]
             .iter()
@@ -271,7 +358,7 @@ impl Staging {
         rpc.send_and_confirm_transaction(&tx).context("fund role keys")?;
 
         // Test USDC: an existing mint whose authority is the payer
-        // (STAGING_USDC_MINT, as on devnet), or a fresh one.
+        // (STAGING_USDC_MINT), or a fresh one.
         let mint = match env::var("STAGING_USDC_MINT") {
             Ok(m) => Pubkey::from_str(&m).context("STAGING_USDC_MINT")?,
             Err(_) => {
@@ -283,39 +370,8 @@ impl Staging {
         for owner in [&admin, &lp, &trader] {
             setup::create_ata(&rpc, &payer, &owner.pubkey(), &mint)?;
         }
-        let admin_ata = spl_associated_token_account::get_associated_token_address(&admin.pubkey(), &mint);
-        // Backing and insurance for well over a 6 h run: $10M.
-        setup::mint_to(&rpc, &payer, &mint, &admin_ata, &payer, 10_000_000_000_000)?;
-
-        let mut st = Staging {
-            rpc,
-            program_id,
-            payer,
-            admin,
-            mint,
-            market: Pubkey::default(),
-            vault: Pubkey::default(),
-            vault_auth: Pubkey::default(),
-            admin_ata,
-            lp_pf: Pubkey::default(),
-            lp,
-            trader_pf: Pubkey::default(),
-            trader,
-            pyth: observation::empty_pyth_resolver(),
-            rng: env_or("STAGING_SEED", 42u64),
-            feed: PRICE0,
-            mark: PRICE0,
-            last_push_slot: 0,
-            push_heartbeat_slots: env_or("STAGING_PUSH_HEARTBEAT_SLOTS", 25u64),
-            push_deviation_bps: env_or("STAGING_PUSH_DEVIATION_BPS", 10u64),
-            open: None,
-            rolling: false,
-            tenor: env_or("STAGING_BACKING_TENOR_SLOTS", 9_000u64),
-            fee_bps: env_or("STAGING_TRADE_FEE_BPS", 0u64),
-            phase: Phase::Live,
-            resolved_ticks: 0,
-            relisted: false,
-        };
+        let mut st = Staging::new(cfg, rpc, program_id, payer, admin, lp, trader, mint, true);
+        setup::mint_to(&st.rpc, &st.payer, &mint, &st.admin_ata, &st.payer, st.cfg.amounts.authority_test_mint)?;
         st.open_market()?;
         Ok(st)
     }
@@ -323,89 +379,104 @@ impl Staging {
     /// A fresh SOL-PERP market at the current mark, with new LP and trader
     /// portfolios and deposits. Used at setup and to relist SOL.
     fn open_market(&mut self) -> Result<()> {
-        let market = Keypair::new();
-        let len = state::market_account_len_for_capacity(1).map_err(|e| anyhow!("{e:?}"))?;
-        setup::create_program_owned_account(&self.rpc, &self.payer, &market, len, &self.program_id)?;
-        self.market = market.pubkey();
+        self.create_market(&Keypair::new())?;
+        self.configure_oracle()?;
+        self.lp_pf = setup::create_portfolio(&self.rpc, &self.payer, &self.lp, &self.market, self.program_id)?;
+        self.trader_pf = setup::create_portfolio(&self.rpc, &self.payer, &self.trader, &self.market, self.program_id)?;
+        self.deposit(&self.lp, &self.lp_pf, self.cfg.amounts.lp_deposit)?;
+        self.deposit(&self.trader, &self.trader_pf, self.cfg.amounts.trader_deposit)?;
+        (self.open, self.rolling, self.phase, self.resolved_ticks) = (None, false, Phase::Live, 0);
+        Ok(())
+    }
+
+    /// The market account and `InitMarket` (`[market]` in the config) in
+    /// ONE tx (payer, market key, admin), so no one can initialize our
+    /// account in between; then the collateral vault. An existing market is
+    /// accepted only with our admin as marketauth and our mint.
+    fn create_market(&mut self, market: &Keypair) -> Result<()> {
+        self.set_market(market.pubkey());
+        if !self.exists(&self.market)? {
+            let len = state::market_account_len_for_capacity(1).map_err(|e| anyhow!("{e:?}"))?;
+            let rent = self.rpc.get_minimum_balance_for_rent_exemption(len)?;
+            let create = system_instruction::create_account(&self.payer.pubkey(), &self.market, rent, len as u64, &self.program_id);
+            let mut metas = self.admin_metas();
+            metas.push(AccountMeta::new_readonly(self.mint, false));
+            let init = self.prog_ix(self.cfg.market.init_ix(self.mark)?, metas);
+            self.send(&[create, init], &[market, &self.admin]).context("create market + InitMarket")?;
+        } else {
+            let data = self.rpc.get_account_data(&self.market)?;
+            let ours = read_market(&data).is_ok_and(|(c, _)| {
+                c.marketauth == self.admin.pubkey().to_bytes() && c.collateral_mint == self.mint.to_bytes()
+            });
+            if !ours {
+                bail!("market {} exists without our marketauth {} and mint {}: market taken; use a fresh run dir", self.market, self.admin.pubkey(), self.mint);
+            }
+        }
+        if !self.exists(&self.vault)? {
+            setup::create_ata(&self.rpc, &self.payer, &self.vault_auth, &self.mint)?;
+        }
+        Ok(())
+    }
+
+    fn set_market(&mut self, market: Pubkey) {
+        self.market = market;
         self.vault_auth = Pubkey::find_program_address(&[b"vault", self.market.as_ref()], &self.program_id).0;
         self.vault = spl_associated_token_account::get_associated_token_address(&self.vault_auth, &self.mint);
-        setup::create_ata(&self.rpc, &self.payer, &self.vault_auth, &self.mint)?;
+    }
 
-        // Values and reasoning: docs/OPERATOR_PLAYBOOK.md section 2. Every
-        // fee path is off.
-        let init = P::InitMarket {
-            max_portfolio_assets: 1,
-            h_min: 0,
-            h_max: 150,
-            initial_price: self.mark,
-            min_nonzero_mm_req: 1_000,
-            min_nonzero_im_req: 2_000,
-            maintenance_margin_bps: 1_000,
-            initial_margin_bps: 2_000,
-            max_trading_fee_bps: 100,
-            trade_fee_base_bps: 0,
-            liquidation_fee_bps: 50,
-            liquidation_fee_cap: 10_000_000_000,
-            min_liquidation_abs: 0,
-            max_price_move_bps_per_slot: 5,
-            max_accrual_dt_slots: 64,
-            max_abs_funding_e9_per_slot: 10_000,
-            min_funding_lifetime_slots: 64,
-            max_account_b_settlement_chunks: 4,
-            max_bankrupt_close_chunks: 4,
-            max_bankrupt_close_lifetime_slots: 1_500,
-            public_b_chunk_atoms: MAX_VAULT_TVL,
-            maintenance_fee_per_slot: 0,
-        };
-        let mut metas = self.admin_metas();
-        metas.push(AccountMeta::new_readonly(self.mint, false));
-        self.send(&[self.prog_ix(init, metas)], &[&self.admin]).context("InitMarket")?;
-
-        // SHUTDOWN needs a force-close delay; this also arms stale resolve.
+    /// Permissionless-resolve policy and AuthMark, each unless already set
+    /// (their control sequences start at 0), in one authority tx.
+    fn configure_oracle(&mut self) -> Result<()> {
         let (_, g, s) = self.read()?;
-        let ix = P::ConfigurePermissionlessResolve {
-            asset_generation_frontier: g.next_market_id,
-            stale_slots: STALE_SLOTS,
-            force_close_delay_slots: FORCE_CLOSE_DELAY_SLOTS,
-            policy_sequence: s.permissionless_resolve + 1,
-            authority_epoch: s.authority_epoch,
-        };
-        self.send(&[self.prog_ix(ix, self.admin_metas())], &[&self.admin]).context("ConfigurePermissionlessResolve")?;
-
+        let now = self.rpc.get_slot()?;
+        let mut ixs = Vec::new();
+        // SHUTDOWN needs a force-close delay; this also arms stale resolve.
+        if s.permissionless_resolve == 0 {
+            let ix = P::ConfigurePermissionlessResolve {
+                asset_generation_frontier: g.next_market_id,
+                stale_slots: self.cfg.resolve.stale_slots,
+                force_close_delay_slots: self.cfg.resolve.force_close_delay_slots,
+                policy_sequence: s.permissionless_resolve + 1,
+                authority_epoch: s.authority_epoch,
+            };
+            ixs.push(self.prog_ix(ix, self.admin_metas()));
+        }
         // AUTH_MARK must be configured while the market is flat. Mirrors
         // v16_svm.rs `configure_auth_mark`; same order as the upstream CLI
         // devnet smoke T10 (InitMarket, ConfigureAuthMark, PushAuthMark).
-        let (_, g, s) = self.read()?;
-        let now = self.rpc.get_slot()?;
-        let ix = P::ConfigureAuthMark {
-            asset_index: 0,
-            market_id: g.assets[0].market_id,
-            now_slot: now,
-            initial_mark_e6: self.mark,
-            observation_sequence: s.oracle_observation + 1,
-            authority_epoch: s.authority_epoch,
-        };
-        self.send(&[self.prog_ix(ix, self.admin_metas())], &[&self.admin]).context("ConfigureAuthMark")?;
-        self.last_push_slot = now;
-
-        self.lp_pf = setup::create_portfolio(&self.rpc, &self.payer, &self.lp, &self.market, self.program_id)?;
-        self.trader_pf = setup::create_portfolio(&self.rpc, &self.payer, &self.trader, &self.market, self.program_id)?;
-        self.deposit(&self.lp, &self.lp_pf)?;
-        self.deposit(&self.trader, &self.trader_pf)?;
-        (self.open, self.rolling, self.phase, self.resolved_ticks) = (None, false, Phase::Live, 0);
+        if s.oracle_observation == 0 {
+            let ix = P::ConfigureAuthMark {
+                asset_index: 0,
+                market_id: g.assets[0].market_id,
+                now_slot: now,
+                initial_mark_e6: self.mark,
+                observation_sequence: s.oracle_observation + 1,
+                authority_epoch: s.authority_epoch,
+            };
+            ixs.push(self.prog_ix(ix, self.admin_metas()));
+        }
+        if !ixs.is_empty() {
+            self.send_admin("ConfigureOracle", &ixs)?;
+            self.last_push_slot = now;
+        }
         Ok(())
     }
 
     // ------------------------------------------------------------ roles
 
-    /// The pusher's price source: SOL/USD, e6. Locally a seeded mock path,
-    /// one step of at most `max_bps`, kept within +-5% of $150. On devnet
-    /// this is the one function to swap for a Pyth SOL/USD read (not built).
-    fn mock_sol_usd(&mut self, max_bps: u64) -> u64 {
+    /// The pusher's price source: SOL/USD e6 and its timestamp (unix ms).
+    /// Pyth (on-chain price account, `launch::pyth_sol_usd`) when configured;
+    /// else a seeded mock path, one step of at most `max_bps`, kept within
+    /// +-5% of the configured initial price, timestamped when generated.
+    fn source_price(&mut self, max_bps: u64) -> Result<(u64, u64)> {
+        if let Some(feed) = &self.pyth_feed {
+            return launch::pyth_sol_usd(&self.rpc, feed, &self.cfg.oracle);
+        }
+        let p0 = self.cfg.market.initial_price;
         let step = (self.next_rand() % (2 * max_bps + 1)) as i128 - max_bps as i128;
         let next = self.feed as i128 * (10_000 + step) / 10_000;
-        self.feed = (next as u64).clamp(PRICE0 * 95 / 100, PRICE0 * 105 / 100);
-        self.feed
+        self.feed = (next as u64).clamp(p0 * 95 / 100, p0 * 105 / 100);
+        Ok((self.feed, launch::now_ms()))
     }
 
     /// `force`: the matcher opens this tick; a risk-increasing fill is
@@ -414,9 +485,9 @@ impl Staging {
         let (_, g, s) = self.read()?;
         let now = self.rpc.get_slot()?;
         // The effective price walks at most max_price_move_bps_per_slot
-        // toward the mark; keep each step inside what it can follow.
+        // toward the mark; the mock keeps each step inside what it can follow.
         let max_bps = (g.config.max_price_move_bps_per_slot * now.saturating_sub(self.last_push_slot).max(1)).min(50);
-        let mark = self.mock_sol_usd(max_bps);
+        let (mark, source_ms) = self.source_price(max_bps)?;
         // Push rule of Pyth's price_pusher (pattern only): push when the
         // heartbeat has elapsed or the price moved past the deviation.
         let moved_bps = mark.abs_diff(self.mark) * 10_000 / self.mark;
@@ -432,13 +503,46 @@ impl Staging {
             observation_sequence: s.oracle_observation + 1,
             authority_epoch: s.authority_epoch,
         };
-        self.send(&[self.prog_ix(ix, self.admin_metas())], &[&self.admin])?;
+        // Mark lag: source price time to the push landing (processed, polled
+        // every 50 ms); then wait for confirmed as the other roles do.
+        // No preflight: one RPC round trip less on the latency path; a
+        // failed push still surfaces through its status below.
+        let tx = self.tx(&[self.prog_ix(ix, self.role_metas(&self.oracle_kp))], &[&self.oracle_kp])?;
+        let no_preflight = RpcSendTransactionConfig { skip_preflight: true, ..Default::default() };
+        let sig = self.rpc.send_transaction_with_config(&tx, no_preflight)?;
+        let mut lag = None;
+        let t0 = Instant::now();
+        loop {
+            let st = self.rpc.get_signature_status_with_commitment(&sig, CommitmentConfig::processed())?;
+            if let Some(r) = st {
+                r?;
+                lag.get_or_insert(launch::now_ms().saturating_sub(source_ms));
+                if self.rpc.confirm_transaction(&sig)? {
+                    break;
+                }
+            }
+            if t0.elapsed() > Duration::from_secs(30) {
+                bail!("PushAuthMark {sig} not confirmed in 30 s");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let lag = lag.unwrap_or_default();
+        if self.keeper_log {
+            println!(
+                "{{\"event\":\"mark_lag\",\"ms\":{lag},\"target_ms\":{},\"at_ms\":{}}}",
+                self.cfg.oracle.lag_target_ms,
+                launch::now_ms()
+            );
+        }
         self.mark = mark;
         self.last_push_slot = now;
-        Ok(Some("ok".into()))
+        Ok(Some(format!("ok({lag}ms)")))
     }
 
     fn match_trade(&mut self) -> Result<Option<String>> {
+        if self.trader_pf == Pubkey::default() {
+            return Ok(None); // no test trader (mainnet)
+        }
         let (data, g, _) = self.read()?;
         if self.rolling && self.open.is_none() {
             return Ok(None);
@@ -453,11 +557,11 @@ impl Staging {
         let coin = self.next_rand() % 2 == 0;
         let q = match self.open {
             Some(q) => -q,
-            None if coin => TRADE_Q,
-            None => -TRADE_Q,
+            None if coin => self.cfg.matcher.size_q as i128,
+            None => -(self.cfg.matcher.size_q as i128),
         };
         let mark = g.assets[0].effective_price;
-        let half = mark * SPREAD_BPS / 10_000;
+        let half = mark * self.cfg.matcher.spread_bps / 10_000;
         let price = if q > 0 { mark + half } else { mark - half };
         let tb = binding::portfolio_binding(&self.rpc.get_account_data(&self.trader_pf)?)?;
         let lb = binding::portfolio_binding(&self.rpc.get_account_data(&self.lp_pf)?)?;
@@ -485,10 +589,13 @@ impl Staging {
         ));
         self.send(&ixs, &[&self.trader, &self.lp])?;
         self.open = if self.open.is_some() { None } else { Some(q) };
-        Ok(Some(format!("{}{}", if q > 0 { "+" } else { "-" }, TRADE_Q)))
+        Ok(Some(format!("{}{}", if q > 0 { "+" } else { "-" }, q.unsigned_abs())))
     }
 
     fn manage_backing(&mut self) -> Result<Option<String>> {
+        if self.backing_kp.is_none() {
+            return Ok(None);
+        }
         let (data, g, _) = self.read()?;
         if g.mode != MarketModeV16::Live {
             return Ok(None);
@@ -502,7 +609,7 @@ impl Staging {
             let unliened = b.fresh_unliened_backing_num / BOUND_SCALE;
             match b.status {
                 Bucket::Empty | Bucket::Expired => {
-                    self.top_up_backing(d, now + self.tenor)?;
+                    self.top_up_backing(&[d], now + self.tenor)?;
                     did.push(format!("d{d}:topup"));
                 }
                 // Past expiry with principal left. If positive PnL is still
@@ -534,34 +641,41 @@ impl Staging {
         Ok((!did.is_empty()).then(|| did.join(",")))
     }
 
-    fn top_up_backing(&self, d: usize, expiry_slot: u64) -> Result<()> {
+    /// Top up the `domains` (0 long, 1 short) in one authority tx.
+    fn top_up_backing(&self, domains: &[usize], expiry_slot: u64) -> Result<()> {
+        let k = self.backing_kp.as_ref().context("no backing key on this host")?;
         let (data, g, s) = self.read()?;
         let p = read_asset_oracle_profile(&data, 0).map_err(|e| anyhow!("oracle profile: {e:?}"))?;
-        let (fee, share) = if d == 0 {
-            (p.backing_trade_fee_bps_long, p.backing_trade_fee_insurance_share_bps_long)
-        } else {
-            (p.backing_trade_fee_bps_short, p.backing_trade_fee_insurance_share_bps_short)
-        };
-        // Mirrors v16_svm.rs `top_up_backing_bucket_without_ledger`.
-        let ix = P::TopUpBackingBucket {
-            domain: d as u16,
-            market_id: g.assets[0].market_id,
-            intent_id: s.backing_top_up + 1,
-            authority_epoch: s.authority_epoch,
-            backing_fee_bps: fee,
-            insurance_share_bps: share,
-            amount: BACKING_AMOUNT,
-            expiry_slot,
-        };
-        self.send(&[self.prog_ix(ix, self.funding_metas())], &[&self.admin]).context("TopUpBackingBucket")
+        let mut ixs = Vec::new();
+        for (i, &d) in domains.iter().enumerate() {
+            let (fee, share) = if d == 0 {
+                (p.backing_trade_fee_bps_long, p.backing_trade_fee_insurance_share_bps_long)
+            } else {
+                (p.backing_trade_fee_bps_short, p.backing_trade_fee_insurance_share_bps_short)
+            };
+            // Mirrors v16_svm.rs `top_up_backing_bucket_without_ledger`.
+            let ix = P::TopUpBackingBucket {
+                domain: d as u16,
+                market_id: g.assets[0].market_id,
+                intent_id: s.backing_top_up + 1 + i as u64,
+                authority_epoch: s.authority_epoch,
+                backing_fee_bps: fee,
+                insurance_share_bps: share,
+                amount: self.cfg.amounts.backing_per_domain as u128,
+                expiry_slot,
+            };
+            ixs.push(self.prog_ix(ix, self.funding_metas(k)));
+        }
+        self.send(&ixs, &[k]).context("TopUpBackingBucket")
     }
 
     fn withdraw_backing(&self, data: &[u8], d: usize, amount: u128) -> Result<()> {
         let (_, g, s) = self.read()?;
+        let k = self.backing_kp.as_ref().context("no backing key on this host")?;
         let mut ixs = self.fresh_cranks(data, &[self.trader_pf, self.lp_pf])?;
-        let mut metas = self.admin_metas();
+        let mut metas = self.role_metas(k);
         metas.extend([
-            AccountMeta::new(self.admin_ata, false),
+            AccountMeta::new(spl_associated_token_account::get_associated_token_address(&k.pubkey(), &self.mint), false),
             AccountMeta::new(self.vault, false),
             AccountMeta::new_readonly(self.vault_auth, false),
             AccountMeta::new_readonly(spl_token::ID, false),
@@ -574,20 +688,21 @@ impl Staging {
             amount,
         };
         ixs.push(self.prog_ix(ix, metas));
-        self.send(&ixs, &[&self.admin]).context("WithdrawBackingBucket")
+        self.send(&ixs, &[k]).context("WithdrawBackingBucket")
     }
 
-    fn top_up_insurance(&self) -> Result<Option<String>> {
+    fn top_up_insurance(&self, amount: u64) -> Result<Option<String>> {
+        let Some(k) = &self.insurance_kp else { return Ok(None) };
         let (_, g, s) = self.read()?;
         // Mirrors v16_svm.rs `top_up_insurance`.
         let ix = P::TopUpInsurance {
             market_id: g.assets[0].market_id,
             intent_id: s.insurance_top_up + 1,
             authority_epoch: s.authority_epoch,
-            amount: INSURANCE_AMOUNT,
+            amount: amount as u128,
         };
-        self.send(&[self.prog_ix(ix, self.funding_metas())], &[&self.admin]).context("TopUpInsurance")?;
-        Ok(Some(format!("+{INSURANCE_AMOUNT}")))
+        self.send(&[self.prog_ix(ix, self.funding_metas(k))], &[k]).context("TopUpInsurance")?;
+        Ok(Some(format!("+{amount}")))
     }
 }
 
@@ -687,28 +802,60 @@ fn summary(tick: u64, started: Instant, st: &Staging, roles: &[(&str, &Role)], k
     )
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = real_main() {
+        eprintln!("Error: {}", launch::scrub(&format!("{e:#}")));
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> Result<()> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None => run(r2_setup()?, false),
+        Some("step") => launch::step_main(&args[1..]),
+        Some("bots") => run(launch::bots(&args[1..])?, true),
+        Some("roles") => launch::roles_main(&args[1..]),
+        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles] <config> <cluster> <run dir>"),
+    }
+}
+
+/// R2: a fresh market from env (`STAGING_*`) plus the config's params.
+fn r2_setup() -> Result<Staging> {
     let url = env::var("STAGING_RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:8799".into());
     if url.to_lowercase().contains("mainnet") {
-        bail!("refusing a mainnet RPC: {url}");
+        bail!("refusing a mainnet RPC: {}", launch::redact(&url));
     }
+    let cfg = launch::load(&env::var("STAGING_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.into()))?;
     let program_id = Pubkey::from_str(&env::var("PERCOLATOR_PROGRAM_ID").context("PERCOLATOR_PROGRAM_ID must be set")?)?;
     let payer_path = env::var("STAGING_PAYER")
         .unwrap_or_else(|_| format!("{}/.config/solana/id.json", env::var("HOME").unwrap_or_default()));
     let payer = read_keypair_file(&payer_path).map_err(|e| anyhow!("read payer {payer_path}: {e}"))?;
-    let hours: f64 = env_or("STAGING_HOURS", 6.0);
-    let tick_ms: u64 = env_or("STAGING_TICK_MS", 3_000);
-    let summary_every: u64 = env_or("STAGING_SUMMARY_EVERY", 100);
-    let insurance_every: u64 = env_or("STAGING_INSURANCE_EVERY", 30);
-    let max_consec: u64 = env_or("STAGING_MAX_CONSEC_FAIL", 10);
-
     let rpc = RpcClient::new_with_commitment(url.clone(), CommitmentConfig::confirmed());
-    rpc.get_version().with_context(|| format!("connect to {url}"))?;
-    let mut st = Staging::setup(rpc, program_id, payer)?;
+    rpc.get_version().with_context(|| format!("connect to {}", launch::redact(&url)))?;
+    // The R2 rehearsal is local/test only: the chain decides, not the URL.
+    if launch::is_mainnet(&rpc)? {
+        bail!("R2 staging refuses mainnet ({})", launch::redact(&url));
+    }
+    Staging::setup(cfg, rpc, program_id, payer)
+}
+
+/// The bots loop. `bots`: an existing launch market, run until stopped
+/// (no lifecycle); else the R2 run of `STAGING_HOURS` with its lifecycle.
+fn run(mut st: Staging, bots: bool) -> Result<()> {
+    let hours: f64 = env_or("STAGING_HOURS", if bots { 24.0 * 365.0 } else { 6.0 });
+    let tick_ms: u64 = env_or("STAGING_TICK_MS", st.cfg.oracle.push_interval_ms);
+    let summary_every: u64 = env_or("STAGING_SUMMARY_EVERY", 100);
+    let insurance_every: u64 = env_or("STAGING_INSURANCE_EVERY", st.cfg.amounts.insurance_every);
+    let max_consec: u64 = env_or("STAGING_MAX_CONSEC_FAIL", 10);
     println!(
-        "staging SOL-PERP: rpc={url} program={program_id} usdc_mint={} market={} lp={} trader={} hours={hours} tick_ms={tick_ms} backing_tenor_slots={}",
-        st.mint, st.market, st.lp_pf, st.trader_pf, st.tenor
+        "staging SOL-PERP: rpc={} program={} usdc_mint={} market={} lp={} trader={} hours={hours} tick_ms={tick_ms} backing_tenor_slots={}",
+        launch::redact(&st.rpc.url()), st.program_id, st.mint, st.market, st.lp_pf, st.trader_pf, st.tenor
     );
+    if st.keeper_log {
+        // drip's boot line: the monitor discovers the market from it.
+        println!("market            = {}", st.market);
+    }
 
     let budget = CycleBudget::from_env();
     let mut quarantine = Quarantine::new(QuarantineConfig::from_env());
@@ -716,7 +863,7 @@ fn main() -> Result<()> {
     let (mut push, mut trade, mut backing, mut insurance) = (Role::default(), Role::default(), Role::default(), Role::default());
     let mut lifecycle = Role::default();
     // Default: halfway through the run. 0 turns the lifecycle off.
-    let lifecycle_tick: u64 = env_or("STAGING_LIFECYCLE_TICK", (hours * 1_800_000.0 / tick_ms as f64) as u64);
+    let lifecycle_tick: u64 = if bots { 0 } else { env_or("STAGING_LIFECYCLE_TICK", (hours * 1_800_000.0 / tick_ms as f64) as u64) };
     let mut keeper = Keeper::default();
     let started = Instant::now();
     let deadline = started + Duration::from_secs_f64(hours * 3600.0);
@@ -736,7 +883,7 @@ fn main() -> Result<()> {
         let p = if live { push.record(st.push_price(st.open.is_none() && !st.rolling)) } else { "-".into() };
         let t = if live { trade.record(st.match_trade()) } else { "-".into() };
         let b = if live { backing.record(st.manage_backing()) } else { "-".into() };
-        let i = if live && tick % insurance_every == 0 { insurance.record(st.top_up_insurance()) } else { "-".into() };
+        let i = if live && tick % insurance_every == 0 { insurance.record(st.top_up_insurance(st.cfg.amounts.insurance_topup)) } else { "-".into() };
 
         let ctx = CrankCtx {
             rpc: &st.rpc,
@@ -756,6 +903,9 @@ fn main() -> Result<()> {
                 keeper.progressed += s.progressed as u64;
                 keeper.idle += s.idle as u64;
                 keeper.failed += s.failed as u64;
+                if st.keeper_log {
+                    launch::print_keeper_lines(&records, &s.line());
+                }
                 // A failed crank tx or an RPC error inside an attempt that
                 // also progressed is classed Progress by the keeper; staging
                 // still counts it as a keeper failure.

@@ -384,7 +384,7 @@ pub fn run_one_cycle(
         }
         let attempt = attempt_from(&outcomes, rpc_error.as_deref(), interrupt.as_ref());
         if let (Some(e), Attempt::Progress { .. }) = (&rpc_error, &attempt) {
-            drain_rpc_errors.push((c.pubkey, e.clone()));
+            drain_rpc_errors.push((c.pubkey, crate::submit::scrub_urls(e)));
         }
         for o in outcomes {
             records.push(SubmissionRecord {

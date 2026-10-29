@@ -505,17 +505,20 @@ fn record(
         Attempt::Unconfirmed { .. } => {}
         Attempt::Failed { error, .. } => {
             s.failed += 1;
-            if let Some(ev) = quarantine.record_failure(FailureReport {
+            if let Some(mut ev) = quarantine.record_failure(FailureReport {
                 account: &cand.pubkey,
                 error: &error,
                 cycle,
                 slot,
                 plan_class: &cand.plan_class,
             }) {
+                // Quarantine compares the raw error; only what is printed or
+                // reported is scrubbed of RPC credentials.
+                ev.error = crate::submit::scrub_urls(&ev.error); // before serializing: JSON stays valid
                 println!("{}", ev.to_json_line());
                 s.newly_quarantined += 1;
             }
-            s.failures.push((cand.pubkey, error));
+            s.failures.push((cand.pubkey, crate::submit::scrub_urls(&error)));
         }
     }
 }

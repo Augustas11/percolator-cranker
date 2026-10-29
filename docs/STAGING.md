@@ -14,7 +14,9 @@ Private: `staging/` and these scripts are never exported to the public repo.
 pinned wrapper `.so` loaded at genesis, then runs the `staging` binary
 (`staging/src/main.rs`).
 
-Setup, once: a test USDC mint (6 decimals, the run's payer is mint
+Params (market, amounts, matcher, pusher) come from `launch/sol-perp.toml`
+(`STAGING_CONFIG` overrides), shared with the Day-0 launch; the trade fee is
+12 bps there. Setup, once: a test USDC mint (6 decimals, the run's payer is mint
 authority), `InitMarket` with one asset (values and reasoning in
 `docs/OPERATOR_PLAYBOOK.md` section 2), `ConfigurePermissionlessResolve`,
 `ConfigureAuthMark` at $150, and an LP and a trader portfolio with $30k each.
@@ -64,7 +66,8 @@ walk around $150, each step at most `max_price_move_bps_per_slot` times the
 slots since the last push (capped at 50 bps), kept within ±5%. It is the one
 function to swap. On devnet the pusher would
 read Pyth SOL/USD (feed id is a parameter of the devnet script) and push that
-price; **the Pyth read is not built**.
+price; that read is built for the Day-0 launch (`price_source = "pyth"`,
+`docs/LAUNCH.md`); this R2 run keeps the mock.
 
 A direct Pyth profile (`ConfigureHybridOracle`, the wrapper reading the Pyth
 account in each crank) is a later option, not built. It removes the pusher
@@ -81,7 +84,8 @@ flat, so the choice is made per market.
 STAGING_HOURS=0.17 ./scripts/staging_local.sh   # ~10 minute smoke run
 ```
 
-Ctrl-C stops it; the validator is killed on exit. Each run writes
+Ctrl-C stops it; the validator is killed on exit and its `ledger/` deleted
+(`KEEP_LEDGER=1` keeps it). Each run writes
 `.staging-runs/<timestamp>/` (gitignored): `staging.log`, `validator.log`,
 `ledger/`, `payer.json`.
 
@@ -89,7 +93,7 @@ Knobs (environment): `STAGING_HOURS`, `STAGING_TICK_MS`, `STAGING_SEED`,
 `STAGING_BACKING_TENOR_SLOTS`, `STAGING_INSURANCE_EVERY`,
 `STAGING_LIFECYCLE_TICK`, `STAGING_PUSH_HEARTBEAT_SLOTS`,
 `STAGING_PUSH_DEVIATION_BPS`, `STAGING_SUMMARY_EVERY` (100),
-`STAGING_MAX_CONSEC_FAIL` (10), `STAGING_TRADE_FEE_BPS` (0),
+`STAGING_MAX_CONSEC_FAIL` (10), `STAGING_TRADE_FEE_BPS` (config `matcher.fee_bps`, 12),
 `STAGING_USDC_MINT` (use an existing mint whose authority is the payer),
 `STAGING_RPC_PORT`, `STAGING_RUN_DIR`. The keeper's own `CRANKER_*` budget and
 quarantine knobs apply too.
@@ -99,7 +103,7 @@ quarantine knobs apply too.
 One line per tick:
 
 ```
-t42 SOL=150231000 push=ok trade=+10000000 backing=- insurance=- keeper=p2/i0
+t42 SOL=150231000 push=ok(480ms) trade=+10000000 backing=- insurance=- keeper=p2/i0
 ```
 
 `SOL` is the mark in USD e6. `-` means the role had nothing to do.
@@ -181,13 +185,11 @@ Notes:
 
 ## Devnet
 
-Neither script has been run. No devnet market exists.
+Superseded by the Day-0 launch kit (`docs/LAUNCH.md`): `scripts/launch_market.sh
+launch/sol-perp.toml devnet` replaces `staging_devnet_deploy.sh`, and the
+devnet pusher reads the on-chain Pyth SOL/USD account. Not run yet; owner-run.
 
-- `scripts/staging_devnet_deploy.sh`: prints the SOL-PERP devnet steps
-  (wrapper build and deploy, a test USDC mint we control, the staging bots
-  with `STAGING_USDC_MINT`); `--yes` acts. Takes the Pyth SOL/USD feed id as
-  `PYTH_SOL_USD_FEED_ID` for the future price source. Refuses mainnet by URL
-  and by genesis hash.
 - `scripts/staging_usdc_faucet.sh <wallet> <usdc>`: mints test USDC to a
-  tester's wallet (creating their token account); `--yes` acts; per-call cap
-  `FAUCET_MAX_USDC`. Refuses mainnet the same way.
+  tester's wallet (creating their token account); reads the config and the
+  devnet launch run dir; `--yes` acts; per-call cap `FAUCET_MAX_USDC`.
+  Refuses mainnet by URL and by genesis hash.

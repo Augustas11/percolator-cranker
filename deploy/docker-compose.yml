@@ -1,0 +1,56 @@
+# Day-0 hosting on one server: the bots (pusher, matcher, backing, insurance,
+# keeper), the monitor, Prometheus with monitor/alerts.yml, Alertmanager to
+# Telegram. Reference / dry-run only; not a paid live service; M3 NO-GO.
+# Nothing here creates accounts or deploys programs. docs/LAUNCH.md, "Hosting".
+#
+#   cp deploy/launch.env.example deploy/.env   # fill it in; never commit it
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# LAUNCH_RUN_DIR is the launch's run dir (state.json + keys/, 0600), made by
+# scripts/launch_market.sh; the bots read it and append bots.log there.
+services:
+  bots:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    image: percolator-launch:local
+    restart: on-failure
+    # Run as the owner of the run dir, so its 0600 keys stay 0600 and readable.
+    user: "${LAUNCH_UID:?set LAUNCH_UID (id -u of the run dir owner)}:${LAUNCH_GID:?set LAUNCH_GID}"
+    environment:
+      LAUNCH_CLUSTER: ${LAUNCH_CLUSTER}
+      LAUNCH_RPC_URL: ${LAUNCH_RPC_URL}
+      PERCOLATOR_PROGRAM_ID: ${PERCOLATOR_PROGRAM_ID}
+      # Mainnet bots need the explicit opt-in (default off); genesis and the
+      # on-chain role table are still checked before anything runs.
+      LAUNCH_MAINNET_I_UNDERSTAND: ${LAUNCH_MAINNET_I_UNDERSTAND:-0}
+    volumes: ["${LAUNCH_RUN_DIR:?set LAUNCH_RUN_DIR}:/run-dir"]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ['exec staging bots /etc/percolator/sol-perp.toml "$$LAUNCH_CLUSTER" /run-dir >> /run-dir/bots.log 2>&1']
+
+  monitor:
+    image: percolator-launch:local
+    depends_on: [bots]
+    restart: on-failure   # exits until bots.log names the market
+    user: "${LAUNCH_UID:?set LAUNCH_UID}:${LAUNCH_GID:?set LAUNCH_GID}"
+    environment: [LAUNCH_RPC_URL, PERCOLATOR_PROGRAM_ID]
+    volumes: ["${LAUNCH_RUN_DIR:?set LAUNCH_RUN_DIR}:/run-dir:ro"]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ['exec monitor --rpc "$$LAUNCH_RPC_URL" --keeper-log /run-dir/bots.log --listen 0.0.0.0:9184']
+    ports: ["127.0.0.1:9184:9184"]
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitor/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["127.0.0.1:9090:9090"]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    environment: [TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]
+    volumes: ["./alertmanager.yml:/etc/alertmanager/alertmanager.yml.tmpl:ro"]
+    # Alertmanager does not expand env vars: fill the chat id in, and hand
+    # the token over as a file.
+    entrypoint: ["/bin/sh", "-c"]
+    command: ['sed "s/TELEGRAM_CHAT_ID/$$TELEGRAM_CHAT_ID/" /etc/alertmanager/alertmanager.yml.tmpl > /tmp/am.yml && printf %s "$$TELEGRAM_BOT_TOKEN" > /tmp/tg_token && exec /bin/alertmanager --config.file=/tmp/am.yml --storage.path=/alertmanager']

@@ -1,13 +1,14 @@
 # Money model: SOL-PERP on the official Percolator program
 
-**Bottom line (default assumptions):**
+**Bottom line (default assumptions; maintenance fee 0 at launch for Meta
+compatibility):**
 
 | | We are the only LP | Outside LP + rebate |
 |---|---:|---:|
-| Break-even | **$437k/day** | **$306k/day** |
-| Net per month at $100k/day | −$2.4k | −$1.9k |
-| Net per month at $1M/day | +$3.9k | +$6.4k |
-| Net per month at $10M/day | +$67k | +$90k |
+| Break-even | **$536k/day** | **$356k/day** |
+| Net per month at $100k/day | −$2.5k | −$2.0k |
+| Net per month at $1M/day | +$2.6k | +$5.1k |
+| Net per month at $10M/day | +$54k | +$77k |
 
 These are **accrual P&L, assuming bad debt stays at 0.5 bps of volume**.
 A larger loss, or a long stretch with the withdrawal gate shut, changes the
@@ -80,7 +81,7 @@ Most mechanisms are also mapped in `docs/OPERATOR_PLAYBOOK.md` on branch
 | Trade fee, taker side | fact 2 above | insurance budget, asset 0 | only through the gate (fact 4) | 5 bps × volume |
 | Trade fee, LP side | same; our own money | insurance budget | same | not income (a transfer) |
 | Liquidation fee | `clamp(ceil(notional·bps/1e4), min_abs, cap)` (playbook: `E 20852-20884`). The keeper share is `liquidation_cranker_fee_share_bps` of the retained fee, credited as **capital** to the cranker's portfolio, only when the fee is reclaimable and the crank passes a cranker portfolio (`P 14280-14284`). The rest goes to budgets (`P 14275-14320`). The default share is 0 (`P 7713`) | keeper portfolio + insurance | **keeper share: yes**, via normal `Withdraw` (`P 7896`), which needs the keeper portfolio flat (`E 18954-18955`). Keep it flat. The rest: gated | 1% of volume liquidated × 50 bps × 50% actually collected (*to verify*). The fee is skipped for negative-PnL payers and capped at capital (`E 18198-18202`); the wrapper credits only the fee actually retained (`P 14275-14279`) |
-| Maintenance fee | `maintenance_fee_per_slot` per portfolio per slot; Live only (`P 6816-6830`). Cranker share via `maintenance_cranker_fee_share_bps` (`P 11630-11690`; default 0 at `P 7714`) | asset 0 budget + keeper | keeper share yes; rest gated | 1 atom/slot ≈ $0.22/day per portfolio; 20 portfolios per $100k/day *to verify* |
+| Maintenance fee | `maintenance_fee_per_slot` per portfolio per slot; Live only (`P 6816-6830`). Cranker share via `maintenance_cranker_fee_share_bps` (`P 11630-11690`; default 0 at `P 7714`) | asset 0 budget + keeper | keeper share yes; rest gated | **0 at launch** (owner decision 2026-10-29): `percolator-meta` reward epochs reject a nonzero maintenance fee (`residual-distributor/src/lib.rs:2100-2113`), and donating the market needs listing closed. Was 1 atom/slot ≈ $0.22/day per portfolio. `--maint-atoms-per-slot 1` shows the old case |
 | Backing fee | Charged to an account whose counterparty-backed lien grows (`P 14987-15037`). The amount is `fee_bps` of the lien delta, split `insurance_share_bps` to insurance and the rest to provider earnings (`E 47-74`, `E 10165-10232`). The payer must have PnL ≥ 0 (`E 10183`). Both trade accounts are checked, **our LP included**, and an LP-paid fee is an internal transfer, like its trade fee. The utilization-rent part of backing is fixed at zero by `public_user_fund` (`E 4434-4437`) | provider earnings + insurance | provider earnings: `WithdrawBackingBucketEarnings`, under the same health gate (playbook: `P 10761-10790`) | 5% of volume becomes new backed lien **paid by outside accounts** *to verify* × 10 bps |
 | Funding | A premium of the pushed mark over the lagged effective price, capped by `max_abs_funding_e9_per_slot` (`P 5714-5732`, `P 15502-15537`). It is **not** OI-imbalance funding | LP vs takers, zero-sum | n/a | 0 (≈0 in steady state) *to verify* |
 | Listing fee (permissionless asset create) | `marketauth` sets it with `UpdateMarketInitFeePolicy` (tag 59). Fee 0 means only the authority may list (`P 12447-12458`). It doubles every 32 slots of asset index (`P 5543-5557`). The whole fee is deposited to asset 0 insurance (`P 12588`, `P 12610`; wrapper README "Assets 1..N") | asset 0 insurance budget | only through the gate (fact 4), and the gate is **market-wide**, so the listed asset's traders can hold it shut | 0: listing is closed on Day 0. Example: 2 listings/month at $1k each is ≈ $66/day |
@@ -125,16 +126,16 @@ Budgets go to `insurance_authority` only once every portfolio is closed and
 | Trade fees (taker side) | 50 | 500 | 5,000 |
 | Liquidation fees (collected) | 2 | 25 | 250 |
 | Backing fees (outside payers) | 5 | 50 | 500 |
-| Maintenance fees | 4 | 43 | 432 |
+| Maintenance fees (0 at launch) | 0 | 0 | 0 |
 | LP adverse selection + hedge | −34 | −335 | −3,350 |
 | Bad debt (insurance spent) | −5 | −50 | −500 |
 | Fixed (SOL, RPC, servers, $100k capital) | −102 | −102 | −102 |
-| **Net per day** | **−79** | **131** | **2,230** |
-| **Net per 30 days** | **−2,356** | **3,941** | **66,905** |
+| **Net per day** | **−83** | **88** | **1,798** |
+| **Net per 30 days** | **−2,485** | **2,645** | **53,945** |
 | Into insurance (both fee sides) | 100 | 1,000 | 10,000 |
 
 - Net variable margin: **1.90 bps** of volume.
-- Break-even: **$437k/day**.
+- Break-even: **$536k/day** ($437k with the old 1 atom/slot maintenance fee).
 - **Capital is held fixed at $100k in every column.** That capital only
   carries $100k of LP inventory. At $10M/day the limits and capital would
   likely grow several times (say $360k). The extra opportunity cost is
@@ -157,14 +158,14 @@ of LP and hedge capital.
 | USD per day | $100k/d | $1M/d | $10M/d |
 |---|---:|---:|---:|
 | Trade fees (both sides, outside money) | 100 | 1,000 | 10,000 |
-| Liquidation + backing + maintenance | 12 | 118 | 1,182 |
+| Liquidation + backing (maintenance 0) | 7 | 75 | 750 |
 | Rebate to outside LP | −76 | −760 | −7,600 |
 | Bad debt (insurance spent) | −5 | −50 | −500 |
 | Fixed (SOL, RPC, servers, $45k capital) | −94 | −94 | −94 |
-| **Net per day** | **−63** | **214** | **2,988** |
-| **Net per 30 days** | **−1,905** | **6,417** | **89,631** |
+| **Net per day** | **−68** | **171** | **2,556** |
+| **Net per 30 days** | **−2,034** | **5,121** | **76,671** |
 
-- Break-even: **$306k/day**.
+- Break-even: **$356k/day** ($306k with the old maintenance fee).
 - **The cash-flow catch.** The rebate is paid in cash, but the fee income
   sits in insurance behind the Live gate. Hold a cash float to cover the
   rebates between withdrawal windows, or settle rebates only at withdrawal.

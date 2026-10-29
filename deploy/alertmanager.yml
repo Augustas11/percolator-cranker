@@ -1,0 +1,12 @@
+# Alertmanager -> Telegram. TELEGRAM_CHAT_ID is substituted at start; the bot
+# token is read from a file written from TELEGRAM_BOT_TOKEN (docker-compose.yml).
+route:
+  receiver: telegram
+  group_by: [alertname, market]
+  repeat_interval: 1h
+receivers:
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: /tmp/tg_token
+        chat_id: TELEGRAM_CHAT_ID
+        send_resolved: true
