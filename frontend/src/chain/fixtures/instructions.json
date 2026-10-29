@@ -1,0 +1,10 @@
+{
+  "InitPortfolio": {"args": {}, "hex": "01"},
+  "Deposit": {"args": {"portfolioId":"7","expectedSequence":"258","amount":"340282366920938463463374607431768211455"}, "hex": "0307000000000000000201000000000000ffffffffffffffffffffffffffffffff"},
+  "Withdraw": {"args": {"portfolioId":"18446744073709551615","expectedSequence":"1","amount":"30000000000"}, "hex": "04ffffffffffffffff010000000000000000ac23fc060000000000000000000000"},
+  "PermissionlessCrank": {"args": {"nowSlot":"516276483","observations":[{"assetIndex":0,"oracleAccounts":0}]}, "hex": "0503c1c51e0000000001000000"},
+  "TradeNoCpi": {"args": {"accountAPortfolioId":"3","accountAPositionEpoch":"5","accountBPortfolioId":"2","accountBPositionEpoch":"9","assetIndex":0,"marketId":"1","sizeQ":"-10000000","execPrice":"149850000","feeBps":"12","backingFeeCapBps":0}, "hex": "06030000000000000005000000000000000200000000000000090000000000000000000100000000000000806967ffffffffffffffffffffffffff9087ee08000000000c000000000000000000"},
+  "TradeCpi": {"args": {"accountAPortfolioId":"3","accountAPositionEpoch":"5","accountBPortfolioId":"2","accountBPositionEpoch":"9","accountBMatcherSequence":"11","assetIndex":0,"marketId":"1","sizeQ":"250000","feeBps":"12","limitPrice":"150150000","backingFeeCapBps":7}, "hex": "0a03000000000000000500000000000000020000000000000009000000000000000b000000000000000000010000000000000090d003000000000000000000000000000c00000000000000701bf308000000000700"},
+  "ClosePortfolio": {"args": {"portfolioId":"3","expectedSequence":"4","positionEpoch":"6"}, "hex": "08030000000000000004000000000000000600000000000000"},
+  "CloseResolved": {"args": {"feeRatePerSlot":"0"}, "hex": "1e00000000000000000000000000000000"}
+}

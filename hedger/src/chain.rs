@@ -1,5 +1,5 @@
-//! Our LP's net SOL position, read from the Percolator market and the LP
-//! portfolio with the wrapper's own decoders (as monitor/src/chain.rs).
+//! Our LP portfolios' summed net SOL position, read from the Percolator market
+//! with the wrapper's own decoders (as monitor/src/chain.rs).
 
 use crate::net::rpc_err;
 use anyhow::{anyhow, bail, Context, Result};
@@ -13,29 +13,40 @@ pub struct LpRead {
     pub slot: u64,
     /// Signed effective SOL (long > 0).
     pub net_sol: f64,
+    pub per_lp_sol: Vec<f64>,
     /// Our market's effective (mark) price, USD per SOL.
     pub mark_px: f64,
     pub live: bool,
 }
 
-/// Both accounts in one call so they come from the same slot.
-pub fn read_lp(rpc: &RpcClient, market: &Pubkey, lp: &Pubkey, asset: usize) -> Result<LpRead> {
+/// All accounts in one call so they come from the same slot.
+pub fn read_lp(rpc: &RpcClient, market: &Pubkey, lps: &[Pubkey], asset: usize) -> Result<LpRead> {
+    let mut keys = vec![*market];
+    keys.extend_from_slice(lps);
     let res = rpc
-        .get_multiple_accounts_with_commitment(&[*market, *lp], rpc.commitment())
+        .get_multiple_accounts_with_commitment(&keys, rpc.commitment())
         .map_err(rpc_err).context("getMultipleAccounts")?;
-    let [m, p] = res.value.as_slice() else { bail!("short getMultipleAccounts reply") };
+    if res.value.len() != keys.len() { bail!("short getMultipleAccounts reply"); }
+    let (m, portfolios) = res.value.split_first().context("short getMultipleAccounts reply")?;
     let m = m.as_ref().context("market account not found")?;
-    let p = p.as_ref().context("LP portfolio not found")?;
     let (_, group) = read_market(&m.data).map_err(|e| anyhow!("read_market: {e:?}"))?;
-    let pf = read_portfolio(&p.data).map_err(|e| anyhow!("read_portfolio: {e:?}"))?;
-    if pf.provenance_header.market_group_id != market.to_bytes() {
-        bail!("LP portfolio belongs to another market");
-    }
     let a = group.assets.get(asset).context("asset index out of range")?;
-    let q = net_q(&pf.legs, asset, a)?;
+    let mut q = 0i128;
+    let mut per_lp_sol = Vec::with_capacity(lps.len());
+    for p in portfolios {
+        let p = p.as_ref().context("LP portfolio not found")?;
+        let pf = read_portfolio(&p.data).map_err(|e| anyhow!("read_portfolio: {e:?}"))?;
+        if pf.provenance_header.market_group_id != market.to_bytes() {
+            bail!("LP portfolio belongs to another market");
+        }
+        let lp_q = net_q(&pf.legs, asset, a)?;
+        q = q.checked_add(lp_q).context("LP net quantity overflow")?;
+        per_lp_sol.push(lp_q as f64 / POS_SCALE as f64);
+    }
     Ok(LpRead {
         slot: res.context.slot,
         net_sol: q as f64 / POS_SCALE as f64,
+        per_lp_sol,
         mark_px: a.effective_price as f64 / 1e6,
         live: group.mode == MarketModeV16::Live,
     })

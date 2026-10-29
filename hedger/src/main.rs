@@ -1,4 +1,4 @@
-//! SOL-PERP LP hedger. Reads our LP's net SOL on the Percolator market and
+//! SOL-PERP LP hedger. Reads our LP portfolios' summed net SOL on the market and
 //! offsets it on Hyperliquid with the replay's tight policy. Dry-run by
 //! default: it logs the orders it would place, priced off the venue's public
 //! book. README.md has the go-live steps.
@@ -46,6 +46,18 @@ fn check_rpc_scheme(rpc: &str, network: &str) -> Result<()> {
     Ok(())
 }
 
+fn check_lp_portfolios(lps: &[String]) -> Result<()> {
+    if lps.is_empty() {
+        bail!("chain.lp_portfolios must not be empty");
+    }
+    for (i, lp) in lps.iter().enumerate() {
+        if lps[..i].contains(lp) {
+            bail!("chain.lp_portfolios contains duplicate {lp}");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct Config {
     chain: ChainCfg,
@@ -58,7 +70,7 @@ struct Config {
 struct ChainCfg {
     rpc: String,
     market: String,
-    lp_portfolio: String,
+    lp_portfolios: Vec<String>,
     asset: usize,
 }
 #[derive(Deserialize)]
@@ -114,6 +126,7 @@ fn real_main() -> Result<()> {
         }
     }
     let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?)?;
+    check_lp_portfolios(&cfg.chain.lp_portfolios)?;
     if cfg.run.tick_ms == 0 {
         bail!("run.tick_ms must be positive");
     }
@@ -201,12 +214,13 @@ struct Stats {
 
 fn run(cfg: Config, rpc: RpcClient, genesis: &str, hl: Hyperliquid, live: bool, minutes: Option<u64>) -> Result<()> {
     let market: Pubkey = cfg.chain.market.parse().context("chain.market")?;
-    let lp: Pubkey = cfg.chain.lp_portfolio.parse().context("chain.lp_portfolio")?;
+    let lps: Vec<Pubkey> = cfg.chain.lp_portfolios.iter()
+        .map(|lp| lp.parse().context("chain.lp_portfolios")).collect::<Result<_>>()?;
     let metrics = Arc::new(RwLock::new(String::new()));
     serve(&cfg.run.metrics_listen, metrics.clone())?;
     log("start", json!({"mode": if live {"live"} else {"dry_run"}, "venue": hl.name(),
         "network": cfg.venue.network, "genesis": genesis, "agent": hl.agent_address(), "market": market.to_string(),
-        "lp_portfolio": lp.to_string(), "policy": format!("{:?}", cfg.policy),
+        "lp_portfolios": cfg.chain.lp_portfolios, "policy": format!("{:?}", cfg.policy),
         "max_loss_usd": cfg.safety.max_loss_usd, "kill_file": cfg.safety.kill_file}));
     let (started, mut guard, mut s) = (Instant::now(), Guard::default(), Stats::default());
     let (mut last_order, mut last_funding) = (None::<Instant>, None::<Instant>);
@@ -218,7 +232,7 @@ fn run(cfg: Config, rpc: RpcClient, genesis: &str, hl: Hyperliquid, live: bool, 
         }
         let tick = Instant::now();
         s.killed = cfg.safety.kill_file.exists();
-        match step(&cfg, &rpc, &market, &lp, &hl, live, &mut sim_hedge, &mut guard, &mut s, &mut last_order, &mut last_funding) {
+        match step(&cfg, &rpc, &market, &lps, &hl, live, &mut sim_hedge, &mut guard, &mut s, &mut last_order, &mut last_funding) {
             Ok(()) => {}
             Err(e) => {
                 s.errors += 1;
@@ -249,7 +263,7 @@ fn step(
     cfg: &Config,
     rpc: &RpcClient,
     market: &Pubkey,
-    lp: &Pubkey,
+    lps: &[Pubkey],
     hl: &Hyperliquid,
     live: bool,
     sim_hedge: &mut f64,
@@ -259,7 +273,7 @@ fn step(
     last_funding: &mut Option<Instant>,
 ) -> Result<()> {
     s.chain_ok = false;
-    let c = chain::read_lp(rpc, market, lp, cfg.chain.asset)?;
+    let c = chain::read_lp(rpc, market, lps, cfg.chain.asset)?;
     s.chain_ok = true;
     let mut book = hl.book(false)?;
     if last_funding.is_none_or(|t| t.elapsed() >= Duration::from_millis(cfg.run.funding_every_ms)) {
@@ -288,6 +302,7 @@ fn step(
         };
     }
     let tick = json!({"slot": c.slot, "lp_sol": c.net_sol, "hedge_sol": hedge, "residual_sol": residual,
+        "lp_sol_by_portfolio": c.per_lp_sol,
         "residual_usd": residual * book.mid, "mid": book.mid, "mark": c.mark_px, "mark_gap_bps": gap_bps,
         "funding_hourly_bps": s.funding_bps, "guard_pnl_usd": guard.pnl_usd});
     let Decision::Order(sol) = d else {
@@ -397,6 +412,14 @@ fn serve(addr: &str, body: Arc<RwLock<String>>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lp_portfolios_must_be_nonempty_and_unique() {
+        assert!(check_lp_portfolios(&[]).is_err());
+        assert!(check_lp_portfolios(&["a".into(), "b".into(), "a".into()]).is_err());
+        assert!(check_lp_portfolios(&["a".into()]).is_ok());
+        assert!(check_lp_portfolios(&["a".into(), "b".into()]).is_ok());
+    }
 
     #[test]
     fn pairing_rule() {

@@ -10,7 +10,7 @@ export interface Health {
   maintenanceMargin: number;
   freeCollateral: number;
   ratio: number; // equity / maintenanceMargin, Infinity if flat
-  status: "healthy" | "warning" | "liquidatable";
+  status: "healthy" | "warning" | "liquidatable" | "unknown";
 }
 export interface Portfolio {
   owner: string | null;
@@ -28,6 +28,7 @@ export interface MarketSnapshot {
   fills: Fill[]; // newest first, max 20
 }
 export interface MarketClient {
+  readonly tradingReady?: boolean;
   getSnapshot(): MarketSnapshot;
   subscribe(listener: (s: MarketSnapshot) => void): () => void;
   connect(): Promise<string>;
