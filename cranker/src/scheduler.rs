@@ -504,8 +504,6 @@ fn record(
         // here only the account-health effect matters: none.
         Attempt::Unconfirmed { .. } => {}
         Attempt::Failed { error, .. } => {
-            // Errors reach logs and quarantine events: no RPC credentials.
-            let error = crate::submit::scrub_urls(&error);
             s.failed += 1;
             if let Some(ev) = quarantine.record_failure(FailureReport {
                 account: &cand.pubkey,
@@ -514,10 +512,12 @@ fn record(
                 slot,
                 plan_class: &cand.plan_class,
             }) {
-                println!("{}", ev.to_json_line());
+                // Quarantine compares the raw error; only what is printed or
+                // reported is scrubbed of RPC credentials.
+                println!("{}", crate::submit::scrub_urls(&ev.to_json_line()));
                 s.newly_quarantined += 1;
             }
-            s.failures.push((cand.pubkey, error));
+            s.failures.push((cand.pubkey, crate::submit::scrub_urls(&error)));
         }
     }
 }

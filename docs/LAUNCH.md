@@ -243,8 +243,10 @@ One server; `deploy/`:
   `deploy/alertmanager.yml` needs the token file and chat id that the
   Compose service prepares, and Prometheus scrapes `monitor:9184` on the
   Compose network. With the bots under systemd, run the whole monitoring
-  stack from Compose: `docker compose -f deploy/docker-compose.yml up -d
-  --no-deps monitor prometheus alertmanager` (the monitor reads the same
+  stack from Compose: build the image once (`docker compose -f
+  deploy/docker-compose.yml build bots`), then `docker compose -f
+  deploy/docker-compose.yml up -d --no-deps monitor prometheus
+  alertmanager` (the monitor reads the same
   run dir's `bots.log`), and leave `percolator-monitor.service` off.
   `percolator-staging@.service` stays for R2.
 - Env: `LAUNCH_CLUSTER`, `LAUNCH_RPC_URL` (the paid RPC),
