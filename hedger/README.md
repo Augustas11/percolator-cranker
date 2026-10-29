@@ -2,7 +2,7 @@
 
 Our LP takes the other side of every taker trade on our SOL-PERP market, so it
 builds SOL inventory. The replay (`research/replay/REPORT.md`) only makes money
-**hedged**. This bot reads the LP's net SOL from the chain and offsets it on
+**hedged**. This bot reads the summed net SOL of the configured LP portfolios from the chain and offsets it on
 Hyperliquid's SOL perp.
 
 - **Policy:** the replay's tight setting. When |LP + hedge| × price passes
@@ -90,7 +90,7 @@ and always reads mainnet's public book, regardless of `venue.network`.
 4. **Check the fee.** If your tier's taker fee is not 4.5 bps, set
    `venue.taker_fee_bps`.
 5. **Point at mainnet.** In `hedger.toml`, set `venue.network = "mainnet"` together
-   with `chain.rpc`, `chain.market` and `chain.lp_portfolio` for the mainnet-beta
+   with `chain.rpc`, `chain.market` and `chain.lp_portfolios` for the mainnet-beta
    market and LP. The bot refuses otherwise. Size `policy.threshold_usd`
    to 1% of real daily volume. Leave the caps as they are until it has run for a
    week.
