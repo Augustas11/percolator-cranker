@@ -359,7 +359,13 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
         // Watch the context itself: public devnet reports signature statuses later
         // than max_ref_age_slots, while the account read is current.
         let t0 = std::time::Instant::now();
+        // A refresh in the same slot as the previous one leaves ref_slot unchanged;
+        // the (slower) signature status covers that case.
         while ref_slot(&fast)? == before {
+            if let Some(status) = fast.get_signature_status(&sig)? {
+                status?;
+                break;
+            }
             if t0.elapsed() > std::time::Duration::from_secs(30) {
                 bail!("reference refresh {sig} not processed in 30 s");
             }
