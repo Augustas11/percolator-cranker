@@ -3,6 +3,7 @@
 //! Python SDK (hyperliquid-python-sdk, MIT, utils/signing.py `sign_l1_action`)
 //! and is pinned to a vector that SDK produced (tests below).
 
+use crate::net::http_err;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -58,7 +59,7 @@ impl Hyperliquid {
             n => bail!("venue.network must be mainnet or testnet, not {n:?}"),
         };
         // Use system roots, not the bundled webpki-roots 0.25.
-        let http = reqwest::blocking::Client::builder().use_native_tls().timeout(Duration::from_secs(5)).build()?;
+        let http = reqwest::blocking::Client::builder().use_native_tls().timeout(Duration::from_secs(5)).build().map_err(http_err)?;
         let mut v = Self {
             http,
             url: url.into(),
@@ -105,9 +106,9 @@ impl Hyperliquid {
     }
 
     fn info(&self, body: Value) -> Result<Value> {
-        let r = self.http.post(format!("{}/info", self.url)).json(&body).send()?;
+        let r = self.http.post(format!("{}/info", self.url)).json(&body).send().map_err(http_err)?;
         let status = r.status();
-        let v: Value = r.json().context("info reply is not JSON")?;
+        let v: Value = r.json().map_err(http_err).context("info reply is not JSON")?;
         if !status.is_success() {
             bail!("info {status}: {v}");
         }
@@ -178,7 +179,7 @@ impl Venue for Hyperliquid {
         let (r, s, v) = sign_l1(sk, &action, nonce, self.mainnet)?;
         let body = json!({"action": action, "nonce": nonce,
             "signature": {"r": r, "s": s, "v": v}, "vaultAddress": null, "expiresAfter": null});
-        let reply: Value = self.http.post(format!("{}/exchange", self.url)).json(&body).send()?.json()?;
+        let reply: Value = self.http.post(format!("{}/exchange", self.url)).json(&body).send().map_err(http_err)?.json().map_err(http_err)?;
         if reply["status"] != "ok" {
             bail!("exchange: {reply}");
         }

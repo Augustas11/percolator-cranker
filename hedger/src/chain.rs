@@ -1,6 +1,7 @@
 //! Our LP's net SOL position, read from the Percolator market and the LP
 //! portfolio with the wrapper's own decoders (as monitor/src/chain.rs).
 
+use crate::net::rpc_err;
 use anyhow::{anyhow, bail, Context, Result};
 use percolator::{AssetStateV16, MarketModeV16, PortfolioLegV16Account, MIN_A_SIDE, ADL_ONE, POS_SCALE};
 use percolator_prog::state::{read_market, read_portfolio};
@@ -21,7 +22,7 @@ pub struct LpRead {
 pub fn read_lp(rpc: &RpcClient, market: &Pubkey, lp: &Pubkey, asset: usize) -> Result<LpRead> {
     let res = rpc
         .get_multiple_accounts_with_commitment(&[*market, *lp], rpc.commitment())
-        .context("getMultipleAccounts")?;
+        .map_err(rpc_err).context("getMultipleAccounts")?;
     let [m, p] = res.value.as_slice() else { bail!("short getMultipleAccounts reply") };
     let m = m.as_ref().context("market account not found")?;
     let p = p.as_ref().context("LP portfolio not found")?;

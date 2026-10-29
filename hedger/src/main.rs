@@ -7,10 +7,12 @@
 //! hedger cost-check [--config hedger.toml]
 
 mod chain;
+mod net;
 mod policy;
 mod venue;
 
 use anyhow::{bail, Context, Result};
+use net::{http_err, rpc_err};
 use policy::{Decision, Guard, Policy};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -42,10 +44,6 @@ fn check_rpc_scheme(rpc: &str, network: &str) -> Result<()> {
         bail!("mainnet requires an https:// chain.rpc");
     }
     Ok(())
-}
-
-fn redact(msg: String, rpc: &str) -> String {
-    msg.replace(rpc, "<rpc>")
 }
 
 #[derive(Deserialize)]
@@ -126,11 +124,10 @@ fn real_main() -> Result<()> {
     }
     check_rpc_scheme(&cfg.chain.rpc, &cfg.venue.network)?;
     // Use system roots, not the bundled webpki-roots 0.25.
-    let client = reqwest::Client::builder().use_native_tls().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(30)).build()?;
+    let client = reqwest::Client::builder().use_native_tls().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(30)).build().map_err(http_err)?;
     let sender = HttpSender::new_with_client(&cfg.chain.rpc, client);
     let rpc = RpcClient::new_sender(sender, RpcClientConfig::with_commitment(CommitmentConfig::confirmed()));
-    let genesis = rpc.get_genesis_hash().context("read chain genesis hash")
-        .map_err(|e| anyhow::anyhow!(redact(format!("{e:#}"), &cfg.chain.rpc)))?.to_string();
+    let genesis = rpc.get_genesis_hash().map_err(rpc_err).context("read chain genesis hash")?.to_string();
     check_pairing(&genesis, &cfg.venue.network)?;
     let mut hl = Hyperliquid::connect(&cfg.venue.network, &cfg.venue.coin)?;
     if live {
@@ -225,7 +222,7 @@ fn run(cfg: Config, rpc: RpcClient, genesis: &str, hl: Hyperliquid, live: bool, 
             Ok(()) => {}
             Err(e) => {
                 s.errors += 1;
-                log("error", json!({"error": redact(format!("{e:#}"), &cfg.chain.rpc)}));
+                log("error", json!({"error": format!("{e:#}")}));
             }
         }
         *metrics.write().unwrap() = render(&s, &guard, &market.to_string(), live);
@@ -414,7 +411,5 @@ mod tests {
         assert!(check_rpc_scheme("http://localhost:8899", "mainnet").is_err());
         assert!(check_rpc_scheme("https://example.com", "mainnet").is_ok());
         assert!(check_rpc_scheme("http://localhost:8899", "testnet").is_ok());
-        let rpc = "https://example.com/api-key";
-        assert_eq!(redact(format!("request to {rpc} failed: {rpc}"), rpc), "request to <rpc> failed: <rpc>");
     }
 }
