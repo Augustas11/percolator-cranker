@@ -32,8 +32,8 @@ rpc = "https://api.devnet.solana.com"
 program_id = "Bu1J8eQQN2mNnUgisSEd5StBG6zDaRb7fwDjN34VzgLG"
 collateral_mint = "create"
 price_source = "exchanges"
-# Matcher owns LP 3WiggjhmtYdL53CBjTG4PPMghNPDb4Y9GVPEaMk9XWFj; bots never trade on that LP.
-matcher_ctxs = ["8WhyZi5UFUiiUyHxJ2aWhkGGWTkX2eXfZztBiUiuiv1"]
+# Matcher owns LP 6wH2d4CARhEWeGC2deBDb9pVT1a7Tgd48VUiFmkTNAHY; bots never trade on that LP.
+matcher_ctxs = ["GMXktcTjqh8z3h2oCgUnodcLbh6hH4W6YUfL4hZMaXe7"]
 
 [cluster.mainnet]
 rpc = ""                # the paid RPC endpoint

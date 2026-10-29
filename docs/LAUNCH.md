@@ -309,3 +309,23 @@ and pushes it on devnet. It's real Pyth, but about 5–10 s behind (Pyth's
 sponsored update cadence), so it only keeps a devnet market live; it says
 nothing about the 400 ms target. That's what the devnet market ran on
 after the 2026-10-29 relist.
+
+## Key layout (owner decision, 2026-10-29)
+
+One key, one job. Every key lives in the run dir's `keys/` (mode 0600), and no other
+process signs with them.
+
+| Key | Holds | Signs |
+|---|---|---|
+| payer | SOL for fees and rent; test-USDC mint authority on local and devnet | fees, rent, the faucet |
+| launch key (`launch_authority` on mainnet, `admin` on local and devnet) | `marketauth` from create and init until the handover | setup steps 1-5, then the handover |
+| multisig (Squads vault; `multisig.json` stand-in on local and devnet) | `marketauth` after the handover | resolve, policies, close |
+| oracle (`oracle_authority`) | asset 0 oracle role; the matcher's price authority | ONLY the pusher: `PushAuthMark` plus `UpdateRef` in the same tx |
+| bots' LP owner (`lp`) | the bots' LP portfolio (no matcher binding) | the bots' co-signed `TradeNoCpi` fills |
+| matcher LP owner (`matcher_lp_owner`) | the matcher's own LP portfolio, bound to the matcher ctx | `SetMatcherConfig` on that portfolio only |
+| trader (`trader`, local and devnet only) | the bots' test taker | test fills |
+| insurance and backing role keys, asset admin | their asset 0 roles after the handover | their bots, or the owner |
+
+The bots never trade or co-sign on the matcher's LP. A `TradeNoCpi` on it would
+bump its position epoch and revoke the matcher's capability. The hedger nets
+both LPs.
