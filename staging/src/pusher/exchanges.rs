@@ -4,10 +4,9 @@ use std::net::{TcpStream, ToSocketAddrs};
 use tungstenite::{client::IntoClientRequest, Message};
 
 const VENUES: [&str; 3] = ["coinbase", "kraken", "binance"];
-const URLS: [&str; 3] = [
+const URLS: [&str; 2] = [
     "wss://ws-feed.exchange.coinbase.com",
     "wss://ws.kraken.com/v2",
-    "wss://stream.binance.com:9443/ws/solusdt@trade",
 ];
 const SUBSCRIPTIONS: [&str; 3] = [
     r#"{"type":"subscribe","product_ids":["SOL-USD"],"channels":["ticker"]}"#,
@@ -117,17 +116,19 @@ fn parse(venue: usize, text: &str) -> Option<Quote> {
 impl Exchanges {
     pub fn new(cfg: &launch::OracleCfg) -> Result<Self> {
         if !(1..=3).contains(&cfg.exchange_min_venues) { bail!("exchange_min_venues must be 1..=3"); }
+        if !cfg.exchange_binance_url.starts_with("wss://") { bail!("exchange_binance_url must start with wss://"); }
         let quotes: Arc<Mutex<Quotes>> = Arc::new(Mutex::new([None; 3]));
         for i in 0..3 {
             // Weak ownership lets readers stop after the last source is dropped.
             let shared = Arc::downgrade(&quotes);
             let skew_ms = cfg.exchange_clock_skew_ms;
+            let url = if i == 2 { cfg.exchange_binance_url.clone() } else { URLS[i].to_string() };
             std::thread::spawn(move || {
                 let mut backoff = 1;
                 let mut last_error = String::new();
                 while shared.strong_count() != 0 {
                     let result = (|| -> Result<()> {
-                        let req = URLS[i].into_client_request()?;
+                        let req = url.as_str().into_client_request()?;
                         let host = req.uri().host().context("websocket host")?;
                         let port = req.uri().port_u16().unwrap_or(443);
                         let mut tcp = None;
@@ -199,7 +200,15 @@ mod tests {
         let old = text.lines().filter(|line| !line.starts_with("exchange_")).collect::<Vec<_>>().join("\n");
         let cfg: launch::Config = toml::from_str(&old).unwrap();
         assert_eq!(cfg.oracle.exchange_clock_skew_ms, 500);
+        assert_eq!(cfg.oracle.exchange_binance_url, "wss://stream.binance.com:9443/ws/solusdt@trade");
         assert_eq!((cfg.oracle.exchange_max_age_ms, cfg.oracle.exchange_max_dev_bps, cfg.oracle.exchange_min_venues), (2000, 50, 2));
+    }
+    #[test]
+    fn non_wss_binance_url_rejected() {
+        let mut cfg = cfg();
+        cfg.exchange_binance_url = "ws://stream.binance.us:9443/ws/solusdt@trade".into();
+        let error = Exchanges::new(&cfg).err().expect("non-wss Binance URL rejected");
+        assert_eq!(error.to_string(), "exchange_binance_url must start with wss://");
     }
     #[test]
     fn future_quote_recovers() {

@@ -70,6 +70,8 @@ exchange_clock_skew_ms = 500
 exchange_max_age_ms = 2000
 exchange_max_dev_bps = 50
 exchange_min_venues = 2
+# Binance.US hosts (binance.com geo-blocks the US with 451) use wss://stream.binance.us:9443/ws/solusdt@trade; same trade message format.
+exchange_binance_url = "wss://stream.binance.com:9443/ws/solusdt@trade"
 # Pyth SOL/USD. price_source = "pyth" reads its PriceUpdateV2 account (the
 # sponsored push-oracle account, shard 0, same address on devnet and
 # mainnet) with the wrapper's own parser; a reading older than
