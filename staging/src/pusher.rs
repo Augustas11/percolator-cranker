@@ -32,18 +32,20 @@ impl PriceSource {
 
 pub struct Shared {
     pub market: Pubkey,
+    pub portfolio: Pubkey,
     pub live: bool,
     pub stop: bool,
     pub mark: u64,
     pub landed_ms: Option<u64>,
     pub published_ms: Option<u64>,
     pub role: Role,
+    pub accrual: Role,
 }
 
 pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::JoinHandle<()>)> {
     let shared = Arc::new(Mutex::new(Shared {
-        market: st.market, live: true, stop: false, mark: st.mark,
-        landed_ms: None, published_ms: None, role: Role::default(),
+        market: st.market, portfolio: st.lp_pf, live: true, stop: false, mark: st.mark,
+        landed_ms: None, published_ms: None, role: Role::default(), accrual: Role::default(),
     }));
     let state = Arc::clone(&shared);
     let lifecycle = Arc::new(Mutex::new(()));
@@ -63,6 +65,7 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
         },
     }};
     let cfg = st.cfg.oracle.clone();
+    let pyth = st.pyth.clone();
     let heartbeat = st.push_heartbeat_slots;
     let payer = st.payer.insecure_clone();
     let oracle = st.oracle_kp.insecure_clone();
@@ -88,16 +91,19 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                     s.landed_ms = None;
                     s.published_ms = None;
                 }
+                let portfolio = s.portfolio;
                 let last_mark = s.mark;
                 let has_landed = s.landed_ms.is_some();
                 drop(s);
                 let mut send_attempted = false;
+                let mut accrual_snapshot = None;
                 let result = (|| -> Result<Option<String>> {
                     let data = rpc.get_account_data(&market)?;
                     let (_, g) = read_market(&data).map_err(|e| anyhow!("{e:?}"))?;
                     if g.mode != MarketModeV16::Live { return Ok(None); }
                     let seq = read_asset_control_sequences(&data, 0).map_err(|e| anyhow!("{e:?}"))?;
                     let slot = rpc.get_slot()?;
+                    accrual_snapshot = Some((data.clone(), slot, g.assets[0].slot_last));
                     if let PriceSource::Mock { max_bps, .. } = &mut source {
                         *max_bps = (g.config.max_price_move_bps_per_slot * slot.saturating_sub(last_slot).max(1)).min(50);
                     }
@@ -158,6 +164,30 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                 };
                 let outcome = state.lock().unwrap().role.record(result);
                 if outcome != "-" { println!("push={outcome}"); }
+                // Separate transaction: a failed crank must never revert a mark.
+                // The lifecycle lock still covers this send and confirmation.
+                let accrual = (|| -> Result<Option<String>> {
+                    let Some((data, slot, slot_last)) = accrual_snapshot else { return Ok(None); };
+                    let cranks = accrual_crank_count(slot.saturating_sub(slot_last), cfg.accrual_lag_slots, cfg.accrual_max_cranks_per_tx);
+                    if cranks == 0 || portfolio == Pubkey::default() { return Ok(None); }
+                    let obs = observation::fetch_observation_for_asset(&data, 0, &pyth)?;
+                    let route = CrankRoute::Live { reward_portfolio: None };
+                    let (mut built, index) = submit::build_crank_instructions(
+                        &program_id, &payer.pubkey(), &market, &portfolio, &route, &[obs], slot,
+                    );
+                    let crank = built.swap_remove(index);
+                    let mut ixs = vec![
+                        ComputeBudgetInstruction::set_compute_unit_limit(cranks.saturating_mul(125_000).min(1_400_000) as u32),
+                        ComputeBudgetInstruction::request_heap_frame(128 * 1024),
+                    ];
+                    for _ in 0..cranks { ixs.push(crank.clone()); }
+                    let tx = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &[&payer], rpc.get_latest_blockhash()?);
+                    rpc.send_and_confirm_transaction(&tx)?;
+                    Ok(Some(format!("ok({cranks} cranks)")))
+                })();
+                let outcome = state.lock().unwrap().accrual.record(accrual);
+                if outcome != "-" { println!("accrual={outcome}"); }
+
             } else {
                 drop(s);
             }
@@ -167,6 +197,12 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
         }
     });
     Ok((shared, lifecycle, handle))
+}
+
+/// The engine advances at most 32 slots per Live crank.
+fn accrual_crank_count(gap: u64, lag_slots: u64, max_cranks: u64) -> u64 {
+    if gap <= lag_slots { return 0; }
+    (gap / 32 + u64::from(gap % 32 != 0)).min(max_cranks)
 }
 
 /// Public prices only: no RPC, keys, market setup or transaction submission.
@@ -210,6 +246,21 @@ fn update_ref(program_id: Pubkey, authority: Pubkey, ctx: Pubkey, mark_e6: u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn accrual_threshold_and_crank_count() {
+        let cfg = launch::load(DEFAULT_CONFIG).unwrap();
+        assert_eq!(cfg.oracle.accrual_lag_slots, 32);
+        assert_eq!(cfg.oracle.accrual_max_cranks_per_tx, 10);
+        for gap in [0, 1, 31, 32] { assert_eq!(accrual_crank_count(gap, 32, 10), 0); }
+        for (gap, expected) in [(33, 2), (64, 2), (65, 3), (320, 10), (321, 10), (u64::MAX, 10)] {
+            assert_eq!(accrual_crank_count(gap, 32, 10), expected);
+        }
+        assert_eq!(accrual_crank_count(64, 64, 10), 0);
+        assert_eq!(accrual_crank_count(65, 64, 10), 3);
+        assert_eq!(accrual_crank_count(65, 32, 1), 1);
+        assert_eq!(accrual_crank_count(65, 32, 0), 0);
+    }
+
     #[test]
     fn matcher_update_ref_wire_and_transaction_size() {
         let payer = Keypair::new();

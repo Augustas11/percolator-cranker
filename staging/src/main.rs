@@ -507,6 +507,9 @@ impl Staging {
         // A bucket just past expiry refuses fills (EngineStale) until the
         // keeper's crank of a claim holder expires it: skip this tick.
         let now = self.rpc.get_slot()?;
+        if now.saturating_sub(g.assets[0].slot_last) > 32 {
+            return Ok(Some("refused(accrual_behind)".into()));
+        }
         if g.source_backing_buckets[..2].iter().any(|b| b.status == Bucket::Fresh && b.expiry_slot <= now) {
             return Ok(None);
         }
@@ -841,6 +844,7 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
     let mut quarantine = Quarantine::new(QuarantineConfig::from_env());
     let mut cu = CuStats::default();
     let mut push;
+    let mut accrual;
     let (mut trade, mut backing, mut insurance) = (Role::default(), Role::default(), Role::default());
     let mut lifecycle = Role::default();
     // Default: halfway through the run. 0 turns the lifecycle off.
@@ -867,6 +871,7 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         });
         let live = st.phase == Phase::Live;
         push_state.live = live;
+        push_state.portfolio = st.lp_pf;
         if push_state.market != st.market {
             push_state.market = st.market;
             push_state.mark = st.mark;
@@ -874,6 +879,7 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
             push_state.published_ms = None;
         }
         push = push_state.role.clone();
+        accrual = push_state.accrual.clone();
         drop(push_state);
         drop(in_flight);
         let p = "thread";
@@ -919,10 +925,10 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
             }),
         ) };
         let l = if l == "-" { String::new() } else { format!(" lifecycle={l}") };
-        println!("t{tick} SOL={} push={p} trade={t} backing={b} insurance={i} keeper={k}{l}", st.mark);
+        println!("t{tick} SOL={} push={p} accrual={} trade={t} backing={b} insurance={i} keeper={k}{l}", st.mark, accrual.json());
 
-        let roles = [("push", &push), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
-        abnormal = roles.iter().any(|(_, r)| r.abnormal(max_consec)) || keeper.role.abnormal(max_consec);
+        let roles = [("push", &push), ("accrual", &accrual), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
+        abnormal = roles.iter().any(|(name, r)| *name != "accrual" && r.abnormal(max_consec)) || keeper.role.abnormal(max_consec);
         if tick % summary_every == 0 {
             println!("{}", summary(tick, started, &st, &roles, &keeper, false));
         }
@@ -933,8 +939,9 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
     pushed.lock().unwrap().stop = true;
     pusher_thread.join().map_err(|_| anyhow!("pusher thread panicked"))?;
     push = pushed.lock().unwrap().role.clone();
+    accrual = pushed.lock().unwrap().accrual.clone();
     abnormal |= push.abnormal(max_consec);
-    let roles = [("push", &push), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
+    let roles = [("push", &push), ("accrual", &accrual), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
     println!("{}", summary(tick, started, &st, &roles, &keeper, true));
     if abnormal {
         eprintln!("staging: ABNORMAL failure rate, see the summary");

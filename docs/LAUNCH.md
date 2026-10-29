@@ -152,6 +152,14 @@ Pushes alone use `priority_fee_micro_lamports` (10,000) and `push_cu_limit`
 (14,000, about 2× the measured 6,596 CU local landed push); other roles
 retain their existing compute budget.
 
+The pusher also checks asset-0 accrual each poll. Devnet bot ticks can take
+40–50 seconds, while the engine advances at most 32 slots per crank and
+`PushAuthMark` never accrues. When the gap exceeds `oracle.accrual_lag_slots`
+(default 32), a separate transaction sends up to `oracle.accrual_max_cranks_per_tx`
+(default 10) Live cranks. Crank failures cannot revert a push; the `accrual`
+role logs and counts them without triggering an abnormal exit. Trades refuse
+the tick with `accrual_behind` while the snapshot is over 32 slots behind.
+
 - **Measured lag** = source price time → push landed (processed, polled
   every 50 ms; the push skips preflight). Mock: the time the price was
   generated, so it is our pipeline only (local p50 ~510 ms with 400 ms

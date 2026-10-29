@@ -100,6 +100,10 @@ pub struct OracleCfg {
     pub push_heartbeat_slots: u64,
     #[serde(default = "default_push_poll_ms")]
     pub push_poll_ms: u64,
+    #[serde(default = "default_accrual_lag_slots")]
+    pub accrual_lag_slots: u64,
+    #[serde(default = "default_accrual_max_cranks")]
+    pub accrual_max_cranks_per_tx: u64,
     #[serde(default = "default_push_min_move_bps")]
     pub push_min_move_bps: u64,
     #[serde(default = "default_priority_fee")]
@@ -114,6 +118,8 @@ fn default_exchange_clock_skew() -> u64 { 500 }
 fn default_exchange_max_age() -> u64 { 2000 }
 fn default_exchange_max_dev() -> u64 { 50 }
 fn default_exchange_min_venues() -> usize { 2 }
+fn default_accrual_lag_slots() -> u64 { 32 }
+fn default_accrual_max_cranks() -> u64 { 10 }
 fn default_push_poll_ms() -> u64 { 400 }
 fn default_push_min_move_bps() -> u64 { 1 }
 fn default_priority_fee() -> u64 { 10_000 }
