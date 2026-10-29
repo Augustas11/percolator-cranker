@@ -23,7 +23,7 @@ monitor/target/release/monitor --program "$PERCOLATOR_PROGRAM_ID" \
 ### Devnet
 
 One command, from the checkout whose `launch-runs/devnet/` holds the launch
-(`state.json` and `bots.log` from `scripts/launch_market.sh devnet`). Read-only:
+(`state.json` and `bots.log` from `scripts/launch_market.sh <config> devnet`). Read-only:
 no keys.
 
 ```bash
@@ -37,19 +37,22 @@ Open `http://127.0.0.1:9184/` for the static dashboard (it reads
 log, drop `--keeper-log` and only chain metrics remain. Pick a free port if
 `launch_market.sh` already runs its own monitor on 9184.
 
-- **Rate limits.** One poll is four requests: `getSlot`, `getAccountInfo`
-  market, `getProgramAccounts` (full data, about 9.5 KB per portfolio), and
-  `getSignatureStatuses`. 10 s keeps that far below the public endpoint's
-  per-IP limits. A 429 or timeout is a nonfatal `chain_error`, and
-  MonitorChainReadFailing waits 5 min.
+- **Rate limits.** One poll makes three chain reads: `getSlot`,
+  `getAccountInfo` on the market, and `getProgramAccounts` (full data, about
+  9.5 KB per portfolio). A `getSignatureStatuses` lookup is added only until
+  a new crank signature resolves. 10 s keeps that far below the public
+  endpoint's per-IP limits. A 429 or timeout on a chain read is a nonfatal
+  `chain_error`, and MonitorChainReadFailing waits 5 min. A failed signature
+  lookup is just retried on the next poll.
 - **Slot time.** Devnet measured ~240 ms/slot (`getRecentPerformanceSamples`,
   2026-10-29), not 400. The slot thresholds fire sooner in wall time:
   750 slots ≈ 3 min, 1500 ≈ 6 min. That is the safe direction, so they
   stay. `--expiry-warn-slots 15000` keeps the bucket warning at about an hour.
-- **Paging.** `getProgramAccounts` on our program id returns the market plus
-  its portfolios in one unpaged response, so no paging is needed on devnet.
-  On upstream's shared devnet program id the response would include other
-  markets' accounts.
+- **Paging.** The market is read on its own. `getProgramAccounts` (filtered
+  to portfolio accounts, then to this market locally) returns all of our
+  program's portfolios in one unpaged response, so no paging is needed on
+  devnet. On upstream's shared devnet program id it would also return other
+  markets' portfolios.
 
 `--program` defaults to `PERCOLATOR_PROGRAM_ID`. Supply `--market` or a
 `--keeper-log` containing a boot line `market            = <pubkey>`; the last
@@ -337,7 +340,7 @@ the pinned engine types. The two decodes matched:
 
 | Metric | Value | On-chain source |
 |---|---|---|
-| accounts total / discovered | 2 / 2, then 4 / 4 after another session opened two portfolios | header `materialized_portfolio_count`; program accounts minus market |
+| accounts total / discovered | 2 / 2, then 4 / 4 after another session opened two portfolios | header `materialized_portfolio_count`; unfiltered `getProgramAccounts`, minus the market |
 | out of date (stale cert / b_stale / kf_stale) | 0 / 0 / 0 | header counters; asset-0 long/short stale counts |
 | asset mode | Live, asset 0 Active | header `mode` = 0; slot lifecycle = 2 |
 | backing buckets | 2 Fresh, expiry 516282841, no liens; stored Fresh after expiry (no crank) | asset-0 `backing_long/short` |
