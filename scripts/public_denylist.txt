@@ -62,3 +62,6 @@ LEGAL_QUESTIONS
 # research (research/): private by owner decision
 research/replay
 REPLAY_DATA
+# hedger (hedger/): private by owner decision
+percolator-hedger
+percolator_hedger
