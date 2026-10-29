@@ -101,8 +101,18 @@ pub fn now() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
+fn redact_rpc(text: &str, rpc_url: &str) -> String {
+    if rpc_url.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(rpc_url, "<rpc>")
+    }
+}
 fn main() -> Result<()> {
     let (command, cfg) = Config::parse(std::env::args().skip(1))?;
+    run(&command, &cfg).map_err(|e| anyhow::anyhow!(redact_rpc(&format!("{e:#}"), &cfg.rpc_url)))
+}
+fn run(command: &str, cfg: &Config) -> Result<()> {
     let mut conn = db::open(&cfg.db)?;
     // Refuse mixing programs/markets; an RPC provider may change on the same network.
     for (key, value) in [
@@ -118,23 +128,39 @@ fn main() -> Result<()> {
             db::set_meta(&conn, key, &value)?;
         }
     }
-    match command.as_str() {
-        "serve" => api::serve(cfg),
+    match command {
+        "serve" => api::serve(cfg.clone()),
         "backfill" => {
-            ingest::pass(&mut conn, &cfg)?;
-            println!("{}", db::cached_stats(&conn, &cfg)?);
+            ingest::pass(&mut conn, cfg)?;
+            println!("{}", db::cached_stats(&conn, cfg)?);
             Ok(())
         }
         _ => {
-            let server = api::server(&cfg)?;
+            let server = api::server(cfg)?;
             let http_cfg = cfg.clone();
             std::thread::spawn(move || api::requests(server, &http_cfg));
             loop {
-                if let Err(e) = ingest::pass(&mut conn, &cfg) {
-                    eprintln!("ingest: {e:#}");
+                if let Err(e) = ingest::pass(&mut conn, cfg) {
+                    eprintln!("ingest: {}", redact_rpc(&format!("{e:#}"), &cfg.rpc_url));
                 }
                 std::thread::sleep(Duration::from_secs(cfg.poll_secs));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rpc_redaction_covers_error_chains_and_repeated_urls() {
+        let url = "https://rpc.invalid/private-key";
+        let err = anyhow::anyhow!("request to {url} failed").context(format!("RPC {url}"));
+        assert_eq!(
+            redact_rpc(&format!("{err:#}"), url),
+            "RPC <rpc>: request to <rpc> failed"
+        );
+        assert_eq!(redact_rpc("unrelated error", url), "unrelated error");
+        assert_eq!(redact_rpc("error", ""), "error");
     }
 }

@@ -118,6 +118,7 @@ pub struct Mark {
     pub ix_index: usize,
     pub asset_index: u16,
     pub price: u64,
+    pub observation_sequence: u64,
 }
 #[derive(Debug)]
 pub struct Transfer {
@@ -152,7 +153,7 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
         err_json: (!err.is_null()).then(|| err.to_string()),
         failed_ix_index,
         error_code,
-        error_name: error_code.and_then(error_name).map(str::to_owned),
+        error_name: None,
         instructions: vec![],
         cranks: vec![],
         fills: vec![],
@@ -173,6 +174,9 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
         };
         if key(&raw["programIdIndex"]) != Some(program) {
             continue;
+        }
+        if failed_ix_index == Some(i as u64) {
+            out.error_name = error_code.and_then(error_name).map(str::to_owned);
         }
         let accounts = raw["accounts"]
             .as_array()
@@ -283,6 +287,7 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
         if let Instruction::PushAuthMark {
             asset_index,
             mark_e6,
+            observation_sequence,
             ..
         } = &ix
         {
@@ -290,6 +295,7 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
                 ix_index: i,
                 asset_index: *asset_index,
                 price: *mark_e6,
+                observation_sequence: *observation_sequence,
             });
         }
         let mut fill = |leg,
@@ -444,6 +450,25 @@ pub(crate) mod tests {
         json!({"slot":100,"blockTime":500,"meta":{"err":null},"transaction":{"message":{
             "accountKeys":["11111111111111111111111111111111",B,MARKET,A,B,PROGRAM],
             "instructions":[{"programIdIndex":5,"accounts":accounts,"data":bs58::encode(ix.encode()).into_string()}]}}})
+    }
+    #[test]
+    fn foreign_program_custom_errors_have_no_percolator_name() {
+        let mut tx = synthetic(&Instruction::PermissionlessCrank {
+            now_slot: 100,
+            observations: vec![],
+        });
+        let mut foreign = tx["transaction"]["message"]["instructions"][0].clone();
+        foreign["programIdIndex"] = json!(0);
+        tx["transaction"]["message"]["instructions"]
+            .as_array_mut()
+            .unwrap()
+            .push(foreign);
+        tx["meta"]["err"] = json!({"InstructionError":[1,{"Custom":19}]});
+        let out = decode("foreign", &tx, PROGRAM, MARKET).unwrap();
+        assert_eq!(out.error_name, None);
+        assert_eq!(out.error_code, Some(19));
+        assert_eq!(out.err_json, Some(tx["meta"]["err"].to_string()));
+        assert_eq!(out.cranks[0].outcome, "reverted");
     }
     #[test]
     fn pins_error_enum_order() {
@@ -684,6 +709,7 @@ pub(crate) mod tests {
         let d = decode("mark", &tx, PROGRAM, MARKET).unwrap();
         assert_eq!(d.marks[0].price, u64::MAX);
         assert_eq!(d.marks[0].asset_index, 2);
+        assert_eq!(d.marks[0].observation_sequence, 1);
         tx["meta"]["err"] = json!({"InstructionError":[0,{"Custom":19}]});
         assert!(decode("failed", &tx, PROGRAM, MARKET)
             .unwrap()

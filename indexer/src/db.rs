@@ -8,7 +8,9 @@ pub fn open(path: &Path) -> Result<Connection> {
     let c = Connection::open(path)?;
     c.busy_timeout(Duration::from_secs(5))?;
     let legacy: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fills') WHERE name='exec_price')",
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fills') WHERE name='exec_price')
+         OR (EXISTS(SELECT 1 FROM pragma_table_info('marks'))
+             AND NOT EXISTS(SELECT 1 FROM pragma_table_info('marks') WHERE name='observation_sequence'))",
         [],
         |r| r.get(0),
     )?;
@@ -22,7 +24,7 @@ CREATE TABLE IF NOT EXISTS txs(signature TEXT PRIMARY KEY,slot INTEGER,block_tim
 CREATE TABLE IF NOT EXISTS instructions(signature TEXT,ix_index INTEGER,tag INTEGER,name TEXT,decode_error TEXT,portfolio TEXT,PRIMARY KEY(signature,ix_index));
 CREATE TABLE IF NOT EXISTS cranks(signature TEXT,ix_index INTEGER,slot INTEGER,block_time INTEGER,signer TEXT,target_portfolio TEXT,outcome TEXT,error_code INTEGER,PRIMARY KEY(signature,ix_index));
 CREATE TABLE IF NOT EXISTS fills(signature TEXT,ix_index INTEGER,leg INTEGER,slot INTEGER,block_time INTEGER,taker_portfolio TEXT,taker_portfolio_id TEXT,maker_portfolio TEXT,maker_portfolio_id TEXT,asset_index INTEGER,market_id TEXT,size_q TEXT,reported_price TEXT,limit_price TEXT,requested_fee_bps TEXT,status TEXT,PRIMARY KEY(signature,ix_index,leg));
-CREATE TABLE IF NOT EXISTS marks(signature TEXT,ix_index INTEGER,slot INTEGER,asset_index INTEGER,price TEXT,PRIMARY KEY(signature,ix_index));
+CREATE TABLE IF NOT EXISTS marks(signature TEXT,ix_index INTEGER,slot INTEGER,asset_index INTEGER,price TEXT,observation_sequence TEXT,PRIMARY KEY(signature,ix_index));
 CREATE INDEX IF NOT EXISTS marks_asset_slot ON marks(asset_index,slot DESC);
 CREATE TABLE IF NOT EXISTS current_portfolios(portfolio TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS transfers(signature TEXT,ix_index INTEGER,slot INTEGER,block_time INTEGER,kind TEXT CHECK(kind IN ('deposit','withdraw')),portfolio TEXT,portfolio_id TEXT,signer TEXT,amount TEXT,ok INTEGER,PRIMARY KEY(signature,ix_index));
@@ -103,13 +105,14 @@ pub fn insert(c: &Connection, t: &Decoded) -> Result<()> {
     }
     for r in &t.marks {
         c.execute(
-            "INSERT OR IGNORE INTO marks VALUES(?1,?2,?3,?4,?5)",
+            "INSERT OR IGNORE INTO marks VALUES(?1,?2,?3,?4,?5,?6)",
             params![
                 t.signature,
                 r.ix_index,
                 t.slot,
                 r.asset_index,
-                r.price.to_string()
+                r.price.to_string(),
+                r.observation_sequence.to_string()
             ],
         )?;
     }
@@ -286,7 +289,7 @@ pub fn fills(c: &Connection, portfolio: &str, limit: u64, before: Option<&str>) 
         "SELECT f.*,
         (SELECT m.price FROM marks m WHERE m.asset_index=f.asset_index
          AND (m.slot<f.slot OR (m.signature=f.signature AND m.ix_index<f.ix_index))
-         ORDER BY m.slot DESC,m.signature DESC,m.ix_index DESC LIMIT 1)
+         ORDER BY m.slot DESC,length(m.observation_sequence) DESC,m.observation_sequence DESC,m.signature DESC,m.ix_index DESC LIMIT 1)
         FROM fills f WHERE (taker_portfolio=?1 OR maker_portfolio=?1)
         AND (?2 IS NULL OR (f.slot,f.signature,f.ix_index,f.leg)<(?3,?4,?5,?6))
         ORDER BY f.slot DESC,f.signature DESC,f.ix_index DESC,f.leg DESC LIMIT ?7",
@@ -341,8 +344,8 @@ pub fn positions(c: &Connection, owner: &str) -> Result<Value> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let slot = rows.iter().map(|r| r.1).max();
-    let portfolios=rows.into_iter().map(|(p,_,capital,pnl,positions)|Ok(json!({"portfolio":p,"capital":capital,"pnl":pnl,"positions":serde_json::from_str::<Value>(&positions)?}))).collect::<Result<Vec<_>>>()?;
+    let slot = meta(c, "last_ingest_slot")?.and_then(|s| s.parse::<u64>().ok());
+    let portfolios=rows.into_iter().map(|(p,last_changed_slot,capital,pnl,positions)|Ok(json!({"portfolio":p,"last_changed_slot":last_changed_slot,"capital":capital,"pnl":pnl,"positions":serde_json::from_str::<Value>(&positions)?}))).collect::<Result<Vec<_>>>()?;
     Ok(json!({"owner":owner,"as_of_slot":slot,"portfolios":portfolios}))
 }
 
@@ -439,9 +442,16 @@ mod tests {
         );
         c.execute("INSERT INTO current_portfolios VALUES(?1)", [A])
             .unwrap();
+        set_meta(&c, "last_ingest_slot", &(slot + 10).to_string()).unwrap();
+        // An unchanged portfolio has an older snapshot than ingest freshness.
+        snapshot(&c, &snap(slot + 10, 50)).unwrap();
         let out = positions(&c, PROGRAM).unwrap();
         assert_eq!(out["portfolios"][0]["positions"][0]["basis_pos_q"], "50");
-        assert_eq!(out["as_of_slot"], slot + 1);
+        assert_eq!(out["as_of_slot"], slot + 10);
+        assert_eq!(out["portfolios"][0]["last_changed_slot"], slot + 1);
+        let empty = positions(&c, MARKET).unwrap();
+        assert_eq!(empty["as_of_slot"], slot + 10);
+        assert_eq!(empty["portfolios"], json!([]));
     }
     #[test]
     fn successful_trade_withdraw_and_closes_exclude_liquidations() {
@@ -533,7 +543,7 @@ mod tests {
         assert!(fills(&c, A, 1, None).unwrap()["fills"][0]["mark_price"].is_null());
         let add = |signature: &str, ix: usize, slot: u64, asset: u16, price: &str| {
             c.execute(
-                "INSERT INTO marks VALUES(?1,?2,?3,?4,?5)",
+                "INSERT INTO marks VALUES(?1,?2,?3,?4,?5,'1')",
                 params![signature, ix, slot, asset, price],
             )
             .unwrap();
@@ -555,6 +565,46 @@ mod tests {
             fills(&c, A, 1, None).unwrap()["fills"][0]["mark_price"],
             u64::MAX
         );
+    }
+    #[test]
+    fn same_slot_marks_order_by_full_width_observation_sequence() {
+        let c = memory();
+        let trade = fixture("crank_trade");
+        let f = &trade.fills[0];
+        insert(&c, &trade).unwrap();
+        for (signature, sequence, price) in [
+            ("z", "9", "11"),
+            ("a", "10", "22"),
+            ("b", "18446744073709551615", "33"),
+        ] {
+            c.execute(
+                "INSERT INTO marks VALUES(?1,0,?2,?3,?4,?5)",
+                params![signature, f.slot - 1, f.asset_index, price, sequence],
+            )
+            .unwrap();
+            assert_eq!(
+                fills(&c, A, 1, None).unwrap()["fills"][0]["mark_price"],
+                price.parse::<u64>().unwrap()
+            );
+        }
+    }
+    #[test]
+    fn old_mark_schema_requires_rebuild() {
+        let c = memory();
+        c.execute_batch("DROP TABLE marks; CREATE TABLE marks(signature TEXT,ix_index INTEGER,slot INTEGER,asset_index INTEGER,price TEXT);").unwrap();
+        // Exercise open() without leaving a database file behind.
+        let path = std::env::temp_dir().join(format!(
+            "indexer-legacy-marks-{}.sqlite",
+            std::process::id()
+        ));
+        c.execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+            .unwrap();
+        let result = open(&path);
+        std::fs::remove_file(path).unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("legacy indexer schema"));
     }
     #[test]
     fn owner_changes_and_closed_portfolios_preserve_history() {

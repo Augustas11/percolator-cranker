@@ -12,7 +12,7 @@ use solana_client::{
     client_error::ClientErrorKind, rpc_client::RpcClient, rpc_request::RpcRequest,
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 fn retryable(e: &solana_client::client_error::ClientError) -> bool {
     match e.kind() {
@@ -23,7 +23,7 @@ fn retryable(e: &solana_client::client_error::ClientError) -> bool {
         _ => e.to_string().contains("429") || e.to_string().contains("Too Many Requests"),
     }
 }
-fn retry<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
+fn retry<T>(rpc_url: &str, mut f: impl FnMut() -> Result<T>) -> Result<T> {
     let mut delay = Duration::from_millis(500);
     loop {
         match f() {
@@ -32,11 +32,15 @@ fn retry<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
                 if e.downcast_ref::<solana_client::client_error::ClientError>()
                     .is_some_and(retryable) =>
             {
-                eprintln!("RPC retry in {:.1}s: {e}", delay.as_secs_f64());
+                eprintln!(
+                    "RPC retry in {:.1}s: {}",
+                    delay.as_secs_f64(),
+                    crate::redact_rpc(&format!("{e:#}"), rpc_url)
+                );
                 std::thread::sleep(delay);
                 delay = (delay * 2).min(Duration::from_secs(30));
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(anyhow!(crate::redact_rpc(&format!("{e:#}"), rpc_url))),
         }
     }
 }
@@ -47,7 +51,7 @@ fn signatures(
     until: Option<&str>,
     min_context_slot: Option<u64>,
 ) -> Result<Vec<String>> {
-    let result: Value = retry(|| {
+    let result: Value = retry(&cfg.rpc_url, || {
         rpc.send(
             RpcRequest::GetSignaturesForAddress,
             json!([cfg.program.to_string(),{
@@ -78,7 +82,7 @@ fn fetch(
         if db::contains(c, signature)? {
             continue;
         }
-        let tx: Value = retry(|| {
+        let tx: Value = retry(&cfg.rpc_url, || {
             let result = rpc.send(
                 RpcRequest::GetTransaction,
                 json!([signature,{
@@ -163,8 +167,20 @@ fn catch_up(rpc: &RpcClient, c: &mut Connection, cfg: &Config, slot: u64) -> Res
     Ok(())
 }
 
-fn state(rpc: &RpcClient, cfg: &Config) -> Result<(u64, Value, Vec<db::Snapshot>)> {
-    let response = retry(|| {
+fn portfolio_keys(
+    discovered: impl IntoIterator<Item = Pubkey>,
+    current: impl IntoIterator<Item = Pubkey>,
+) -> Vec<Pubkey> {
+    discovered
+        .into_iter()
+        .chain(current)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn state(rpc: &RpcClient, c: &Connection, cfg: &Config) -> Result<(u64, Value, Vec<db::Snapshot>)> {
+    let response = retry(&cfg.rpc_url, || {
         rpc.get_account_with_commitment(&cfg.market, CommitmentConfig::finalized())
             .map_err(Into::into)
     })?;
@@ -202,20 +218,25 @@ fn state(rpc: &RpcClient, cfg: &Config) -> Result<(u64, Value, Vec<db::Snapshot>
     let summary = json!({"mode":mode,"open_interest":oi,"materialized_portfolio_count":group.materialized_portfolio_count,
         "insurance":header.insurance.get().to_string(),"vault":header.vault.get().to_string()});
     // discovery uses confirmed internally. Use its reusable key/layout filtering, then
-    // read those keys at finalized below; no confirmed account data is persisted.
+    // union with current keys so confirmed closes cannot hide finalized portfolios.
     let discovered = drip::discovery::discover_portfolios(rpc, &cfg.program)?;
-    let keys: Vec<Pubkey> = discovered
+    let discovered_keys = discovered
         .iter()
         .filter(|p| {
             p.market_group_id() == Some(cfg.market)
                 && p.layout_discriminator() == Some(drip::binding::V16_LAYOUT_DISCRIMINATOR)
         })
-        .map(|p| p.pubkey)
-        .collect();
+        .map(|p| p.pubkey);
+    let mut stmt = c.prepare("SELECT portfolio FROM current_portfolios")?;
+    let current = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .map(|key| Ok(key?.parse::<Pubkey>()?))
+        .collect::<Result<Vec<_>>>()?;
+    let keys = portfolio_keys(discovered_keys, current);
     let mut snapshots = Vec::new();
     for chunk in keys.chunks(100) {
         // Raw request permits minContextSlot and returns a slot for this exact account batch.
-        let result: Value = retry(|| {
+        let result: Value = retry(&cfg.rpc_url, || {
             rpc.send(
                 RpcRequest::GetMultipleAccounts,
                 json!([
@@ -238,20 +259,25 @@ fn state(rpc: &RpcClient, cfg: &Config) -> Result<(u64, Value, Vec<db::Snapshot>
             if raw.is_null() {
                 continue;
             }
-            anyhow::ensure!(
-                raw["owner"].as_str() == Some(cfg.program.to_string().as_str()),
-                "portfolio owner mismatch"
-            );
+            if raw["owner"].as_str() != Some(cfg.program.to_string().as_str()) {
+                continue;
+            }
             let bytes = STANDARD.decode(
                 raw["data"][0]
                     .as_str()
                     .context("missing base64 account data")?,
             )?;
-            let p = read_portfolio(&bytes).map_err(|e| anyhow!("read_portfolio {key}: {e:?}"))?;
-            anyhow::ensure!(
-                p.provenance_header.market_group_id == cfg.market.to_bytes(),
-                "portfolio market mismatch"
-            );
+            if drip::binding::layout_discriminator(&bytes)
+                != Some(drip::binding::V16_LAYOUT_DISCRIMINATOR)
+            {
+                continue;
+            }
+            let Ok(p) = read_portfolio(&bytes) else {
+                continue;
+            };
+            if p.provenance_header.market_group_id != cfg.market.to_bytes() {
+                continue;
+            }
             let positions:Vec<_>=p.legs.iter().filter(|l|l.active!=0).map(|l|json!({"asset_index":l.asset_index.get(),"market_id":l.market_id.get(),
                 "side":if l.side==0 {"long"} else {"short"},"basis_pos_q":l.basis_pos_q.get().to_string()})).collect();
             snapshots.push(db::Snapshot {
@@ -268,6 +294,9 @@ fn state(rpc: &RpcClient, cfg: &Config) -> Result<(u64, Value, Vec<db::Snapshot>
     Ok((slot, summary, snapshots))
 }
 pub fn pass(c: &mut Connection, cfg: &Config) -> Result<()> {
+    pass_inner(c, cfg).map_err(|e| anyhow!(crate::redact_rpc(&format!("{e:#}"), &cfg.rpc_url)))
+}
+fn pass_inner(c: &mut Connection, cfg: &Config) -> Result<()> {
     let rpc = RpcClient::new_with_timeout_and_commitment(
         cfg.rpc_url.clone(),
         Duration::from_secs(60),
@@ -278,7 +307,7 @@ pub fn pass(c: &mut Connection, cfg: &Config) -> Result<()> {
     }
     // Capture state first, then ingest landed transactions through that point before
     // applying the liquidation exclusion query. RPC reads never submit transactions.
-    let (slot, summary, snapshots) = state(&rpc, cfg)?;
+    let (slot, summary, snapshots) = state(&rpc, c, cfg)?;
     let through_slot = snapshots
         .iter()
         .map(|s| s.slot)
@@ -308,18 +337,40 @@ mod tests {
     #[test]
     fn permanent_errors_fail_without_retry_and_success_returns() {
         let mut attempts = 0;
-        let result: Result<()> = retry(|| {
+        let result: Result<()> = retry("https://rpc.invalid/key", || {
             attempts += 1;
             Err(anyhow!("permanent RPC failure"))
         });
         assert!(result.is_err());
         assert_eq!(attempts, 1);
-        assert_eq!(retry(|| Ok(7)).unwrap(), 7);
+        assert_eq!(retry("https://rpc.invalid/key", || Ok(7)).unwrap(), 7);
         let transport = solana_client::client_error::ClientError::from(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "reset",
         ));
         assert!(retryable(&transport));
+    }
+    #[test]
+    fn finalized_keys_include_current_portfolios_missing_from_discovery() {
+        let a = Pubkey::new_unique();
+        let b = Pubkey::new_unique();
+        let c = Pubkey::new_unique();
+        let keys = portfolio_keys([a, b], [b, c]);
+        assert_eq!(keys.len(), 3);
+        for key in [a, b, c] {
+            assert!(keys.contains(&key));
+        }
+        assert_eq!(portfolio_keys([], [c]), vec![c]);
+        assert!(portfolio_keys([], []).is_empty());
+    }
+    #[test]
+    fn retry_errors_redact_rpc_url() {
+        let url = "https://rpc.invalid/private-key";
+        let result: Result<()> = retry(url, || Err(anyhow!("request failed: {url}")));
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "request failed: <rpc>"
+        );
     }
     #[test]
     fn page_rows_and_cursor_commit_together() {

@@ -21,13 +21,14 @@ JSON and exits. `run` does the same initially, then polls every 10 seconds with
 HTTP on a separate thread. `serve` initializes schema if needed and serves HTTP.
 The default database is relative to **cwd**. Use a private writable directory or
 `--db indexer/indexer.sqlite`; do not commit database files. Root `/indexer.sqlite*`
-and indexer-local SQLite files are ignored. Legacy databases with `exec_price` are
-refused: preserve the old database and use a new `--db` path with `backfill` to
+and indexer-local SQLite files are ignored. Legacy databases with `exec_price` or
+marks without `observation_sequence` are refused: preserve the old database and use a new `--db` path with `backfill` to
 rebuild corrected market filtering, crank outcomes, and mark history. No automatic
 migration or deletion is performed.
 
 A devnet backfill of about 230 transactions takes about 15 minutes on the public
-RPC. Use a paid RPC via `INDEXER_RPC_URL` for faster backfills.
+RPC. Use a paid RPC via `INDEXER_RPC_URL` for faster backfills. Errors replace every
+occurrence of the configured RPC URL with `<rpc>`, including retry and exit errors.
 
 ## Configuration
 
@@ -103,12 +104,14 @@ configured base fee and NoCpi may derive a dynamic fee, so requested fees are no
 actual charged fees. The old `exec_price`, `fee_bps`, and `price_known` fields are
 removed.
 
-`marks(signature, ix_index, slot, asset_index, price)` stores successful tag 63
-PushAuthMark instructions, uniquely by signature/ix. `mark_price` is queried from
+`marks(signature, ix_index, slot, asset_index, price, observation_sequence)` stores
+successful tag 63 PushAuthMark instructions, uniquely by signature/ix. `mark_price` is queried from
 the latest push for this database's market and the fill's asset_index at an
 earlier slot, or the same transaction with a lower ix_index; it is null if none
 exists. Other transactions in the same slot have no reliable relative order and
-are excluded. Every fill includes:
+are excluded. Qualifying marks in the same slot are ordered by the monotonic
+`observation_sequence`, stored as decimal text to preserve full-width u64 values.
+Every fill includes:
 
 ```json
 {"price_note":"estimate: execution uses the engine mark; mark_price is the last pushed mark before this fill"}
@@ -119,7 +122,9 @@ are excluded. Every fill includes:
 ```
 
 `GET /positions?owner=EdcNDZxPK6NPSQW4Yo8Di1veA9PRpVo9cr4Zgq99tSXo`
-— latest changed snapshot per currently existing portfolio, with capital, pnl and active legs:
+— latest changed snapshot per currently existing portfolio, with capital, pnl and active legs.
+`as_of_slot` is the last completed ingest slot (also for empty results); each portfolio
+has `last_changed_slot`, the slot of its stored snapshot:
 
 ```json
 {"owner":"EdcNDZxPK6NPSQW4Yo8Di1veA9PRpVo9cr4Zgq99tSXo","as_of_slot":null,"portfolios":[]}
@@ -127,8 +132,10 @@ are excluded. Every fill includes:
 
 Bad/missing pubkeys or query parameters return 400 with `{"error":"..."}`;
 unknown routes return 404. Historical snapshots remain after an account closes,
-but `/positions` joins `current_portfolios`, which is replaced from completed
-discovery in the same transaction as each pass's snapshots.
+but `/positions` joins `current_portfolios`, which is replaced from valid finalized
+reads in the same transaction as each pass's snapshots. The keys read are the union
+of confirmed discovery (filtered by market/layout) and existing current portfolios,
+so a confirmed close cannot remove a portfolio before it closes at finalized.
 
 ## Coverage and limits
 
@@ -144,7 +151,9 @@ discovery in the same transaction as each pass's snapshots.
   delay. Null/unavailable transactions leave the page pending instead of silently
   advancing past missing history. RPC history retention bounds available backfill.
 - Failed transactions roll back all effects. Error codes belong only to the
-  failing instruction. Crank Custom(22) at that crank is idle; a different failure
+  failing instruction. Percolator error names are assigned only when that instruction
+  targets this program; foreign-program errors retain their code/raw JSON with a
+  null name. Crank Custom(22) at that crank is idle; a different failure
   at that crank is failed. Other cranks in a failed transaction are `reverted`,
   excluded from both the success-rate denominator and uptime liveness. Crank stats
   include every signer: cranking is permissionless. Preflight-rejected cranks never land, so the
@@ -155,7 +164,8 @@ discovery in the same transaction as each pass's snapshots.
   proof of the engine execution price. CPI size and limit are requests; matcher
   execution/return data is not decoded.
 - Snapshots are saved only when owner, capital, pnl or active-leg JSON changes. Discovery
-  uses drip's confirmed key/layout filtering, then account data is re-read finalized.
+  uses drip's confirmed key/layout filtering plus current portfolio keys, then
+  account data is re-read finalized. Only valid portfolios for this market remain current.
   Market and portfolio batches may have different context slots; each snapshot has
   its own actual slot. Positions report `basis_pos_q` only: the engine's pure
   `V16Core::effective_abs_quantity_for_leg` is `pub(crate)` at this pin
