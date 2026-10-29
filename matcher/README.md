@@ -46,7 +46,8 @@ Set-config: --lp-owner KEYPAIR --wrapper PUBKEY --market PUBKEY --portfolio PUBK
 --fill N --cap N --age N --deviation BPS --authority PUBKEY --paused 0 --inventory N.
 Test-fill: --wrapper PUBKEY --market PUBKEY --portfolio LP_PUBKEY --ctx PUBKEY
 --size SIGNED_BASE_UNITS --taker-keypair KEYPAIR --taker-portfolio-keypair KEYPAIR; the first run
-creates and funds that portfolio with --deposit TOKEN_ATOMS (payer must own the test mint).
+creates that portfolio and deposits --deposit TOKEN_ATOMS: minted when --payer holds the test mint,
+otherwise taken from the taker's token account, funded by `scripts/staging_usdc_faucet.sh`.
 
 The pusher must add UpdateRef to its PushAuthMark transaction, signed by the same
 oracle key. The matcher cannot read the market through the wrapper's CPI tail.

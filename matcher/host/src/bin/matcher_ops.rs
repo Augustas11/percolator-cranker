@@ -245,11 +245,7 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
             args.value("deposit")?,
         )?;
     }
-    println!(
-        "taker={} portfolio={}",
-        taker.pubkey(),
-        pf.pubkey()
-    );
+    println!("taker={} portfolio={}", taker.pubkey(), pf.pubkey());
     // Keep only cranks that simulate successfully, as in staging's fresh_cranks.
     let mut ixs = Vec::new();
     let now = rpc.get_slot()?;
@@ -333,15 +329,33 @@ fn funded_portfolio(
         bail!("the test mint must be an SPL Token test mint");
     }
     let mint_state = spl_token::state::Mint::unpack(&mint_account.data)?;
-    if mint_state.mint_authority != solana_sdk::program_option::COption::Some(payer.pubkey()) {
-        bail!("payer must be the test mint authority");
+    // Mint when the payer holds the test mint; otherwise deposit from the owner's
+    // associated token account, funded by the faucet (scripts/staging_usdc_faucet.sh).
+    let mints =
+        mint_state.mint_authority == solana_sdk::program_option::COption::Some(payer.pubkey());
+    let ata_program: Pubkey = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL".parse()?;
+    let owner_ata = Pubkey::find_program_address(
+        &[
+            owner.pubkey().as_ref(),
+            spl_token::ID.as_ref(),
+            mint.as_ref(),
+        ],
+        &ata_program,
+    )
+    .0;
+    let source = if mints { token.pubkey() } else { owner_ata };
+    if !mints {
+        let held = TokenAccount::unpack(&rpc.get_account_data(&owner_ata)?)?.amount;
+        if held < amount {
+            bail!("{owner_ata} holds {held} test-USDC atoms, need {amount}: run the faucet first");
+        }
     }
     if amount == 0 {
         bail!("deposit must be positive");
     }
     let len =
         state::portfolio_account_len_for_market_slots(group.config.max_portfolio_assets as usize)?;
-    let setup = vec![
+    let mut setup = vec![
         system_instruction::create_account(
             &payer.pubkey(),
             &pf.pubkey(),
@@ -358,39 +372,44 @@ fn funded_portfolio(
                 M::new(pf.pubkey(), false),
             ],
         ),
-        system_instruction::create_account(
-            &payer.pubkey(),
-            &token.pubkey(),
-            rpc.get_minimum_balance_for_rent_exemption(TokenAccount::LEN)?,
-            TokenAccount::LEN as u64,
-            &spl_token::ID,
-        ),
-        spl_token::instruction::initialize_account3(
-            &spl_token::ID,
-            &token.pubkey(),
-            &mint,
-            &owner.pubkey(),
-        )?,
-        spl_token::instruction::mint_to(
-            &spl_token::ID,
-            &mint,
-            &token.pubkey(),
-            &payer.pubkey(),
-            &[],
-            amount,
-        )?,
     ];
-    send(rpc, payer, &setup, &[owner, pf, &token])?;
+    let mut signers = vec![owner, pf];
+    if mints {
+        setup.extend([
+            system_instruction::create_account(
+                &payer.pubkey(),
+                &token.pubkey(),
+                rpc.get_minimum_balance_for_rent_exemption(TokenAccount::LEN)?,
+                TokenAccount::LEN as u64,
+                &spl_token::ID,
+            ),
+            spl_token::instruction::initialize_account3(
+                &spl_token::ID,
+                &token.pubkey(),
+                &mint,
+                &owner.pubkey(),
+            )?,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &mint,
+                &token.pubkey(),
+                &payer.pubkey(),
+                &[],
+                amount,
+            )?,
+        ]);
+        signers.push(&token);
+    }
+    send(rpc, payer, &setup, &signers)?;
     let pf_data = rpc.get_account_data(&pf.pubkey())?;
     let vault_authority = Pubkey::find_program_address(&[b"vault", market.as_ref()], &wrapper).0;
-    let ata: Pubkey = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL".parse()?;
     let vault = Pubkey::find_program_address(
         &[
             vault_authority.as_ref(),
             spl_token::ID.as_ref(),
             mint.as_ref(),
         ],
-        &ata,
+        &ata_program,
     )
     .0;
     let deposit = wrapper_ix(
@@ -404,7 +423,7 @@ fn funded_portfolio(
             M::new(owner.pubkey(), true),
             M::new(market, false),
             M::new(pf.pubkey(), false),
-            M::new(token.pubkey(), false),
+            M::new(source, false),
             M::new(vault, false),
             M::new_readonly(spl_token::ID, false),
         ],
