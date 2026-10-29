@@ -710,33 +710,7 @@ pub fn is_mainnet(rpc: &RpcClient) -> Result<bool> {
     Ok(rpc.get_genesis_hash().context("read genesis hash")?.to_string() == MAINNET_GENESIS)
 }
 
-/// Error text with every http(s) URL cut to its host: RPC transport errors
-/// quote the request URL, and paid endpoints carry their key in it.
+/// Error text with every URL cut to its host (the keeper's own scrubber).
 pub fn scrub(msg: &str) -> String {
-    let mut out = String::with_capacity(msg.len());
-    let mut rest = msg;
-    while let Some(i) = rest.find("http") {
-        out.push_str(&rest[..i]);
-        let tail = &rest[i..];
-        if tail.starts_with("http://") || tail.starts_with("https://") {
-            let end = tail.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>' | ',')).unwrap_or(tail.len());
-            out.push_str(&redact(&tail[..end]));
-            rest = &tail[end..];
-        } else {
-            out.push_str("http");
-            rest = &tail[4..];
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-#[cfg(test)]
-mod scrub_tests {
-    #[test]
-    fn urls_lose_their_credentials() {
-        let m = super::scrub("error sending request for url (https://rpc.example.com/SECRETKEY?api-key=X): timed out; http://127.0.0.1:8899");
-        assert!(!m.contains("SECRET") && !m.contains("api-key"), "{m}");
-        assert!(m.contains("https://rpc.example.com/") && m.contains("timed out"), "{m}");
-    }
+    drip::submit::scrub_urls(msg)
 }
