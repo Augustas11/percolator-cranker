@@ -1,16 +1,19 @@
 // Devnet round-trip for the TS client: create portfolio, deposit, open, close,
-// withdraw, built by src/chain/ exactly as the browser does (TradeCpi through
-// the LP's matcher; the tester is the only signer). Needs a funded throwaway
+// withdraw, close portfolio (refund rent), built by src/chain/ as the browser
+// does (TradeCpi through the LP's matcher; tester is the only signer). Needs a funded throwaway
 // wallet and the matcher keys (VITE_MATCHER_PROGRAM / VITE_MATCHER_CONTEXT).
 // Everything is simulated first. Reuse a saved portfolio unless
-// ROUNDTRIP_ALLOW_CREATE=1 explicitly allows creating one.
+// ROUNDTRIP_ALLOW_CREATE=1 explicitly allows creating one. Set
+// ROUNDTRIP_KEEP_PORTFOLIO=1 to skip closing the portfolio. Failed simulations
+// rebuild and retry up to 9 times, 3 s apart (simulation is free); failed transactions are never sent.
 //
 //   TESTER_KEYPAIR=... VITE_MATCHER_PROGRAM=... VITE_MATCHER_CONTEXT=... npm run roundtrip
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { ComputeBudgetProgram, Connection, Keypair, Transaction, VersionedTransaction, sendAndConfirmTransaction } from "@solana/web3.js";
 import type { PublicKey, SimulatedTransactionResponse, TransactionInstruction } from "@solana/web3.js";
 import { devnetConfig as cfg } from "../src/chain/config";
 import { parseMarket, parsePortfolio } from "../src/chain/accounts";
+import { closePortfolioIx, computeBudgetIxs } from "../src/chain/instructions";
 import { ata } from "../src/chain/pda";
 import { buildClose, buildCreatePortfolio, buildDeposit, buildTrade, buildWithdraw, findPortfolio } from "../src/chain/tx";
 
@@ -30,11 +33,30 @@ function checkSimulation(label: string, result: SimulatedTransactionResponse) {
   console.log(label, "simulation OK");
 }
 
-async function send(label: string, ixs: TransactionInstruction[], signers: Keypair[] = []) {
-  const tx = new Transaction({ feePayer: tester.publicKey, ...(await conn.getLatestBlockhash()) }).add(...ixs);
-  const simulation = await conn.simulateTransaction(new VersionedTransaction(tx.compileMessage()), { sigVerify: false });
-  checkSimulation(label, simulation.value);
+async function simulate(label: string, build: () => Promise<TransactionInstruction[]>) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const ixs = await build();
+      const tx = new Transaction({ feePayer: tester.publicKey, ...(await conn.getLatestBlockhash()) }).add(...ixs);
+      const simulation = await conn.simulateTransaction(new VersionedTransaction(tx.compileMessage()), { sigVerify: false });
+      if (!simulation.value.err || attempt >= 9) {
+        checkSimulation(label, simulation.value);
+        return tx;
+      }
+    } catch (error) {
+      if (attempt >= 9) {
+        console.error(label, error);
+        process.exit(1);
+      }
+    }
+    await new Promise(resolve => setTimeout(resolve, 3_000));
+  }
+}
+
+async function send(label: string, build: () => Promise<TransactionInstruction[]>, signers: Keypair[] = []) {
+  const tx = await simulate(label, build);
   sigs[label] = await sendAndConfirmTransaction(conn, tx, [tester, ...signers], { commitment: "confirmed" });
+  saveResult();
   console.log(label, sigs[label]);
 }
 
@@ -56,6 +78,11 @@ if (!portfolio) {
   portfolio = created.portfolio.publicKey;
 }
 
+function saveResult() {
+  writeFileSync("roundtrip-result.json", JSON.stringify({ tester: tester.publicKey.toBase58(), portfolio: portfolio!.toBase58(), sigs }, null, 2));
+}
+saveResult();
+
 function check(label: string, ok: boolean, detail: string) {
   console.log(`${label}: ${ok ? "OK" : "FAIL"} (${detail})`);
   if (!ok) process.exit(1);
@@ -73,10 +100,15 @@ if (depositNeeded > 0n) {
 } else {
   console.log("wallet USDC / deposit: skipped (capital >= 10 USDC)");
 }
-const freshMarket = parseMarket((await conn.getAccountInfo(cfg.market))!.data);
-const slot = BigInt(await conn.getSlot());
 // asset0.slotLast is the asset's funding accrual slot; group currentSlot is shared across assets.
-const age = slot - freshMarket.asset0.slotLast;
+// The heartbeat refreshes it every few seconds, so wait up to 30 s (read-only) for a fresh reading.
+let age = 0n;
+for (let tries = 0; tries < 15; tries++) {
+  const freshMarket = parseMarket((await conn.getAccountInfo(cfg.market))!.data);
+  age = BigInt(await conn.getSlot()) - freshMarket.asset0.slotLast;
+  if (age >= 0n && age <= 32n) break;
+  await new Promise(resolve => setTimeout(resolve, 2_000));
+}
 check("asset0 funding accrual within 32 slots", age >= 0n && age <= 32n, `${age} slots old`);
 
 const withoutBudget = (ixs: TransactionInstruction[]) => ixs.filter(ix => !ix.programId.equals(ComputeBudgetProgram.programId));
@@ -84,18 +116,24 @@ const withoutBudget = (ixs: TransactionInstruction[]) => ixs.filter(ix => !ix.pr
 // A brand-new portfolio can't be built against yet; its sends are still simulated one by one.
 if (created) console.log("preflight deposit/open_long: skipped (new portfolio)");
 else {
-  const depositIxs = depositNeeded > 0n ? await buildDeposit(conn, cfg, tester.publicKey, portfolio, depositNeeded) : [];
-  const dryRun = new Transaction({ feePayer: tester.publicKey, ...(await conn.getLatestBlockhash()) })
-    .add(...withoutBudget(depositIxs), ...await tradeIxs(portfolio, 100_000n));
-  checkSimulation("preflight deposit/open_long", (await conn.simulateTransaction(
-    new VersionedTransaction(dryRun.compileMessage()), { sigVerify: false })).value);
+  await simulate("preflight deposit/open_long", async () => {
+    const depositIxs = depositNeeded > 0n ? await buildDeposit(conn, cfg, tester.publicKey, portfolio, depositNeeded) : [];
+    return [...withoutBudget(depositIxs), ...await tradeIxs(portfolio, 100_000n)];
+  });
 }
 
-if (created) await send("create_portfolio", created.ixs, [created.portfolio]);
-if (depositNeeded > 0n) await send("deposit", await buildDeposit(conn, cfg, tester.publicKey, portfolio, depositNeeded));
-await send("open_long", await tradeIxs(portfolio, 100_000n));
-await send("close", await buildClose(conn, cfg, tester.publicKey, portfolio, 50n, 12n));
+if (created) await send("create_portfolio", async () => created!.ixs, [created.portfolio]);
+if (depositNeeded > 0n) await send("deposit", () => buildDeposit(conn, cfg, tester.publicKey, portfolio, depositNeeded));
+await send("open_long", () => tradeIxs(portfolio, 100_000n));
+await send("close", () => buildClose(conn, cfg, tester.publicKey, portfolio, 50n, 12n));
 const pf = parsePortfolio((await conn.getAccountInfo(portfolio))!.data);
 if (pf.legs.length) throw new Error("position still open after close");
-await send("withdraw", await buildWithdraw(conn, cfg, tester.publicKey, portfolio, pf.capital));
+await send("withdraw", () => buildWithdraw(conn, cfg, tester.publicKey, portfolio, pf.capital));
+if (process.env.ROUNDTRIP_KEEP_PORTFOLIO !== "1") {
+  await send("close_portfolio", async () => {
+    const { portfolioId, sequence, positionEpoch } = parsePortfolio((await conn.getAccountInfo(portfolio))!.data);
+    return [...computeBudgetIxs(), closePortfolioIx(cfg.programId, tester.publicKey, cfg.market, portfolio,
+      { portfolioId, expectedSequence: sequence, positionEpoch })];
+  });
+}
 console.log(JSON.stringify({ tester: tester.publicKey.toBase58(), portfolio: portfolio.toBase58(), sigs }, null, 2));
