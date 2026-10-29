@@ -11,7 +11,7 @@ pub fn cranks_and_uptime(
     let (ok, idle, failed) = (count("ok"), count("idle"), count("failed"));
     let first = rows.iter().filter_map(|r| r.1).min();
     let last = rows.iter().filter_map(|r| r.1).max();
-    let cranks = json!({"total":rows.len(),"ok":ok,"idle":idle,"failed":failed,
+    let cranks = json!({"total":rows.len(),"ok":ok,"idle":idle,"failed":failed,"reverted":count("reverted"),
         "success_rate": (ok+failed > 0).then(|| ok as f64 / (ok+failed) as f64),"first_at":first,"last_at":last});
     let mut times: Vec<_> = rows
         .iter()
@@ -64,6 +64,22 @@ mod tests {
         }
         assert!(
             cranks_and_uptime(&[("ok".into(), Some(100))], 100, 3, 10).1["uptime_pct"].is_null()
+        );
+    }
+    #[test]
+    fn reverted_is_neither_success_denominator_nor_liveness() {
+        let rows = [
+            ("ok".into(), Some(0)),
+            ("failed".into(), Some(3)),
+            ("reverted".into(), Some(60)),
+        ];
+        let (c, u) = cranks_and_uptime(&rows, 90, 3, 10);
+        assert_eq!(c["reverted"], 1);
+        assert_eq!(c["success_rate"], 0.5);
+        assert_eq!(u["missed_secs"], 60);
+        assert!(
+            cranks_and_uptime(&[("reverted".into(), Some(1))], 90, 3, 10).1["window_start"]
+                .is_null()
         );
     }
     #[test]

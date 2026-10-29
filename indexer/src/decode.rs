@@ -47,17 +47,18 @@ pub fn error_name(code: u64) -> Option<&'static str> {
 
 /// Account-index table: (market, portfolio A/target, portfolio B).
 /// Handler citations are in repo-prog/src/v16_program.rs at the pinned wrapper.
-pub fn account_indices(tag: Option<u8>) -> (usize, Option<usize>, Option<usize>) {
+pub fn account_indices(tag: Option<u8>) -> (Option<usize>, Option<usize>, Option<usize>) {
     match tag {
         // handle_trade_nocpi:8695; handle_batch_trade_nocpi:8272
-        Some(6 | 66) => (2, Some(3), Some(4)),
+        Some(6 | 66) => (Some(2), Some(3), Some(4)),
         // handle_trade_cpi:9235; handle_batch_trade_cpi:9638
-        Some(10 | 67) => (1, Some(2), Some(3)),
+        Some(10 | 67) => (Some(1), Some(2), Some(3)),
         // init_portfolio:7757, deposit:7825, withdraw:7896, crank:14333,
         // close_portfolio:9950, close_resolved:13609, claim_resolved_payout_topup:13730.
-        Some(1 | 3 | 4 | 5 | 8 | 30 | 46) => (1, Some(2), None),
+        Some(1 | 3 | 4 | 5 | 8 | 30 | 46) => (Some(1), Some(2), None),
         // init_market:7639; push_managed_mark (PushAuthMark tag 63):13516.
-        _ => (1, None, None),
+        Some(0 | 63) => (Some(1), None, None),
+        _ => (None, None, None),
     }
 }
 
@@ -75,6 +76,7 @@ pub struct Decoded {
     pub cranks: Vec<Crank>,
     pub fills: Vec<Fill>,
     pub transfers: Vec<Transfer>,
+    pub marks: Vec<Mark>,
 }
 #[derive(Debug)]
 pub struct IxRow {
@@ -106,10 +108,16 @@ pub struct Fill {
     pub asset_index: u16,
     pub market_id: u64,
     pub size_q: String,
-    pub exec_price: Option<u64>,
+    pub reported_price: Option<u64>,
     pub limit_price: Option<u64>,
-    pub fee_bps: u64,
-    pub price_known: bool,
+    pub requested_fee_bps: u64,
+    pub status: &'static str,
+}
+#[derive(Debug)]
+pub struct Mark {
+    pub ix_index: usize,
+    pub asset_index: u16,
+    pub price: u64,
 }
 #[derive(Debug)]
 pub struct Transfer {
@@ -149,6 +157,7 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
         cranks: vec![],
         fills: vec![],
         transfers: vec![],
+        marks: vec![],
     };
     for (i, raw) in message["instructions"]
         .as_array()
@@ -175,10 +184,6 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
                 .map(str::to_owned)
                 .context("missing instruction account")
         };
-        // Reference matching also retains future/undecodable instructions without guessing layouts.
-        if !accounts.iter().any(|n| key(n) == Some(market)) {
-            continue;
-        }
         let bytes = bs58::decode(raw["data"].as_str().unwrap_or("")).into_vec();
         let tag = bytes.as_ref().ok().and_then(|b| b.first().copied());
         let decoded = bytes
@@ -194,7 +199,14 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
                     .to_owned()
             })
             .unwrap_or_else(|_| "Undecodable".into());
-        let (_, a, b) = account_indices(tag);
+        let (market_index, a, b) = account_indices(tag);
+        let matches_market = match market_index {
+            Some(n) => accounts.get(n).and_then(key) == Some(market),
+            None => accounts.iter().any(|n| key(n) == Some(market)),
+        };
+        if !matches_market {
+            continue;
+        }
         out.instructions.push(IxRow {
             ix_index: i,
             tag,
@@ -202,6 +214,9 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
             decode_error: decoded.as_ref().err().cloned(),
             portfolio: a.and_then(|n| account(n).ok()),
         });
+        if market_index.is_none() {
+            continue;
+        }
         // Classification is by public tag even when malformed data was rejected.
         // Invalid account lists remain generic rows rather than blocking a whole page.
         if tag == Some(5) {
@@ -215,6 +230,8 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
                     target_portfolio,
                     outcome: if out.ok {
                         "ok"
+                    } else if failed_ix_index != Some(i as u64) {
+                        "reverted"
                     } else if code == Some(22) {
                         "idle"
                     } else {
@@ -263,6 +280,18 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
         if !out.ok {
             continue;
         }
+        if let Instruction::PushAuthMark {
+            asset_index,
+            mark_e6,
+            ..
+        } = &ix
+        {
+            out.marks.push(Mark {
+                ix_index: i,
+                asset_index: *asset_index,
+                price: *mark_e6,
+            });
+        }
         let mut fill = |leg,
                         aid,
                         bid,
@@ -286,10 +315,14 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
                 asset_index,
                 market_id,
                 size_q: size_q.to_string(),
-                exec_price,
+                reported_price: exec_price,
                 limit_price,
-                fee_bps,
-                price_known: exec_price.is_some(),
+                requested_fee_bps: fee_bps,
+                status: if matches!(tag, Some(10 | 67)) {
+                    "requested"
+                } else {
+                    "executed"
+                },
             });
             Ok(())
         };
@@ -548,13 +581,13 @@ pub(crate) mod tests {
                     assert_eq!(f.asset_index, 2);
                     assert_eq!(f.market_id, 9);
                     assert_eq!(f.size_q, "-42");
-                    assert_eq!(f.fee_bps, 5);
+                    assert_eq!(f.requested_fee_bps, 5);
                     let cpi = matches!(
                         ix,
                         Instruction::TradeCpi { .. } | Instruction::BatchTradeCpi { .. }
                     );
-                    assert_eq!(f.price_known, !cpi);
-                    assert_eq!(f.exec_price, (!cpi).then_some(12345));
+                    assert_eq!(f.status, if cpi { "requested" } else { "executed" });
+                    assert_eq!(f.reported_price, (!cpi).then_some(12345));
                     assert_eq!(f.limit_price, cpi.then_some(12345));
                     let batch = matches!(
                         ix,
@@ -590,7 +623,7 @@ pub(crate) mod tests {
             assert!(!d.ok);
             assert_eq!(d.error_name.as_deref(), Some(name));
             assert_eq!(d.failed_ix_index, Some(1));
-            assert_eq!(d.cranks[0].outcome, "failed");
+            assert_eq!(d.cranks[0].outcome, "reverted");
             assert_eq!(d.cranks[0].error_code, None);
             assert_eq!(d.cranks[1].outcome, outcome);
             assert_eq!(d.cranks[1].error_code, Some(code));
@@ -600,7 +633,7 @@ pub(crate) mod tests {
         v["tx"]["meta"]["err"] = json!({"InstructionError":[2,{"Custom":22}]});
         let d = decode("atomic", &v["tx"], PROGRAM, MARKET).unwrap();
         assert!(d.fills.is_empty());
-        assert_eq!(d.cranks[1].outcome, "failed");
+        assert_eq!(d.cranks[1].outcome, "reverted");
         tx["meta"]["err"] = json!("AccountNotFound");
         let d = decode("failed", &tx, PROGRAM, MARKET).unwrap();
         assert_eq!(d.err_json.as_deref(), Some("\"AccountNotFound\""));
@@ -634,9 +667,55 @@ pub(crate) mod tests {
         tx["transaction"]["message"]["instructions"][0]["accounts"] = json!([2]);
         tx["meta"]["err"] = json!({"InstructionError":[0,"NotEnoughAccountKeys"]});
         let d = decode("bad_accounts", &tx, PROGRAM, MARKET).unwrap();
-        assert_eq!(d.instructions.len(), 1);
-        assert!(d.instructions[0].decode_error.is_some());
+        assert!(d.instructions.is_empty());
         assert!(d.cranks.is_empty());
+    }
+    #[test]
+    fn unknown_layout_is_generic_and_failed_marks_are_ignored() {
+        let mark = Instruction::PushAuthMark {
+            asset_index: 2,
+            market_id: 9,
+            now_slot: 100,
+            mark_e6: u64::MAX,
+            observation_sequence: 1,
+            authority_epoch: 0,
+        };
+        let mut tx = synthetic(&mark);
+        let d = decode("mark", &tx, PROGRAM, MARKET).unwrap();
+        assert_eq!(d.marks[0].price, u64::MAX);
+        assert_eq!(d.marks[0].asset_index, 2);
+        tx["meta"]["err"] = json!({"InstructionError":[0,{"Custom":19}]});
+        assert!(decode("failed", &tx, PROGRAM, MARKET)
+            .unwrap()
+            .marks
+            .is_empty());
+        tx["transaction"]["message"]["instructions"][0]["data"] =
+            json!(bs58::encode([255u8]).into_string());
+        let d = decode("unknown", &tx, PROGRAM, MARKET).unwrap();
+        assert_eq!(d.instructions.len(), 1);
+        assert!(
+            d.fills.is_empty()
+                && d.cranks.is_empty()
+                && d.transfers.is_empty()
+                && d.marks.is_empty()
+        );
+    }
+    #[test]
+    fn appended_market_does_not_match_handler_market() {
+        let mut v: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/crank_trade.json")).unwrap();
+        let message = &mut v["tx"]["transaction"]["message"];
+        let mut trade = message["instructions"][4].clone();
+        let accounts = trade["accounts"].as_array_mut().unwrap();
+        let market = accounts[2].clone();
+        accounts[2] = accounts[3].clone();
+        accounts.push(market);
+        message["instructions"] = json!([trade]);
+        let d = decode("other", &v["tx"], PROGRAM, MARKET).unwrap();
+        assert!(d.instructions.is_empty());
+        assert!(d.fills.is_empty());
+        assert!(d.cranks.is_empty());
+        assert!(d.transfers.is_empty());
     }
     #[test]
     fn real_devnet_fixtures() {
@@ -656,9 +735,9 @@ pub(crate) mod tests {
         assert_eq!(f.asset_index, 0);
         assert_eq!(f.market_id, 1);
         assert_eq!(f.size_q, "10000000");
-        assert_eq!(f.exec_price, Some(100038102));
-        assert_eq!(f.fee_bps, 12);
-        assert!(f.price_known);
+        assert_eq!(f.reported_price, Some(100038102));
+        assert_eq!(f.requested_fee_bps, 12);
+        assert_eq!(f.status, "executed");
         let dep = fixture("deposit");
         assert_eq!(dep.instructions[0].tag, Some(3));
         assert_eq!(dep.transfers[0].amount, "30000000000");

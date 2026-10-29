@@ -45,12 +45,13 @@ fn signatures(
     cfg: &Config,
     before: Option<&str>,
     until: Option<&str>,
+    min_context_slot: Option<u64>,
 ) -> Result<Vec<String>> {
     let result: Value = retry(|| {
         rpc.send(
             RpcRequest::GetSignaturesForAddress,
             json!([cfg.program.to_string(),{
-        "limit":1000,"before":before,"until":until,"commitment":"finalized"} ]),
+        "limit":1000,"before":before,"until":until,"commitment":"finalized","minContextSlot":min_context_slot} ]),
         )
         .map_err(Into::into)
     })?;
@@ -118,7 +119,7 @@ fn commit(
 fn backfill(rpc: &RpcClient, c: &mut Connection, cfg: &Config) -> Result<()> {
     let mut before = db::meta(c, "oldest_signature")?;
     loop {
-        let page = signatures(rpc, cfg, before.as_deref(), None)?;
+        let page = signatures(rpc, cfg, before.as_deref(), None, None)?;
         if page.is_empty() {
             db::set_meta(c, "backfill_complete", "true")?;
             return Ok(());
@@ -136,12 +137,12 @@ fn backfill(rpc: &RpcClient, c: &mut Connection, cfg: &Config) -> Result<()> {
         before = page.last().cloned();
     }
 }
-fn catch_up(rpc: &RpcClient, c: &mut Connection, cfg: &Config) -> Result<()> {
+fn catch_up(rpc: &RpcClient, c: &mut Connection, cfg: &Config, slot: u64) -> Result<()> {
     let until = db::meta(c, "newest_signature")?;
     let mut before = None;
     let mut pages = Vec::new();
     loop {
-        let page = signatures(rpc, cfg, before.as_deref(), until.as_deref())?;
+        let page = signatures(rpc, cfg, before.as_deref(), until.as_deref(), Some(slot))?;
         if page.is_empty() {
             break;
         }
@@ -278,14 +279,25 @@ pub fn pass(c: &mut Connection, cfg: &Config) -> Result<()> {
     // Capture state first, then ingest landed transactions through that point before
     // applying the liquidation exclusion query. RPC reads never submit transactions.
     let (slot, summary, snapshots) = state(&rpc, cfg)?;
-    catch_up(&rpc, c, cfg)?;
+    let through_slot = snapshots
+        .iter()
+        .map(|s| s.slot)
+        .max()
+        .unwrap_or(slot)
+        .max(slot);
+    catch_up(&rpc, c, cfg, through_slot)?;
     let tx = c.transaction()?;
+    tx.execute("DELETE FROM current_portfolios", [])?;
     for s in &snapshots {
+        tx.execute("INSERT INTO current_portfolios VALUES(?1)", [&s.portfolio])?;
         db::snapshot(&tx, s)?;
     }
     db::set_meta(&tx, "market_json", &summary.to_string())?;
-    db::set_meta(&tx, "last_ingest_at", &now().to_string())?;
+    let pass_time = now();
+    db::set_meta(&tx, "last_ingest_at", &pass_time.to_string())?;
     db::set_meta(&tx, "last_ingest_slot", &slot.to_string())?;
+    let stats = db::stats(&tx, cfg, pass_time)?;
+    db::set_meta(&tx, "stats_json", &stats.to_string())?;
     tx.commit()?;
     Ok(())
 }

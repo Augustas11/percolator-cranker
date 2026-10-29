@@ -122,7 +122,7 @@ fn main() -> Result<()> {
         "serve" => api::serve(cfg),
         "backfill" => {
             ingest::pass(&mut conn, &cfg)?;
-            println!("{}", db::stats(&conn, &cfg, now())?);
+            println!("{}", db::cached_stats(&conn, &cfg)?);
             Ok(())
         }
         _ => {

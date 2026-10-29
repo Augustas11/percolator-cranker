@@ -59,6 +59,7 @@ jobs:
       - name: unit tests (validator-gated integration tests self-skip)
         run: cargo test --release --manifest-path "$CRANKER_MANIFEST"
       - name: indexer unit tests
+        if: ${{ hashFiles('indexer/Cargo.toml') != '' }}
         run: cargo test --release --manifest-path indexer/Cargo.toml
 
   # Runs only where scripts/export_public.sh exists (the maintainers' export

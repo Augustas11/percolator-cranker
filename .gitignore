@@ -42,3 +42,4 @@ Thumbs.db
 
 # Private indexer databases
 indexer/*.sqlite*
+/indexer.sqlite*

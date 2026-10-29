@@ -16,7 +16,7 @@ pub enum Query {
     Fills {
         portfolio: String,
         limit: u64,
-        before: Option<u64>,
+        before: Option<String>,
     },
     Positions {
         owner: String,
@@ -37,7 +37,7 @@ pub fn parse(url: &str) -> Result<Query> {
         );
     }
     let allowed: &[&str] = match path {
-        "/fills" => &["portfolio", "limit", "before_slot"],
+        "/fills" => &["portfolio", "limit", "before"],
         "/positions" => &["owner"],
         _ => &[],
     };
@@ -62,15 +62,10 @@ pub fn parse(url: &str) -> Result<Query> {
                 .parse::<u64>()
                 .context("invalid limit")?;
             anyhow::ensure!((1..=500).contains(&limit), "limit must be 1..500");
-            let before = pairs
-                .get("before_slot")
-                .map(|s| s.parse::<u64>())
-                .transpose()
-                .context("invalid before_slot")?;
-            anyhow::ensure!(
-                before.is_none_or(|n| n <= i64::MAX as u64),
-                "before_slot exceeds SQLite range"
-            );
+            let before = pairs.get("before").map(|s| (*s).to_owned());
+            if let Some(value) = &before {
+                db::fill_cursor(value)?;
+            }
             Query::Fills {
                 portfolio: pubkey("portfolio")?,
                 limit,
@@ -95,23 +90,43 @@ fn query(c: &Connection, cfg: &Config, q: Query) -> Result<(u16, Value)> {
                 json!({"ok":lag.is_some_and(|l|l<=cfg.poll_secs.saturating_mul(3)),"last_ingest_at":at,"last_ingest_slot":slot,
                 "backfill_complete":db::meta(c,"backfill_complete")?.as_deref()==Some("true"),"lag_secs":lag})
             }
-            Query::Stats => db::stats(c, cfg, now())?,
+            Query::Stats => db::cached_stats(c, cfg)?,
             Query::Fills {
                 portfolio,
                 limit,
                 before,
-            } => db::fills(c, &portfolio, limit, before)?,
+            } => db::fills(c, &portfolio, limit, before.as_deref())?,
             Query::Positions { owner } => db::positions(c, &owner)?,
             Query::NotFound => return Ok((404, json!({"error":"not found"}))),
         },
     ))
 }
 pub fn server(cfg: &Config) -> Result<Server> {
-    Server::http(&cfg.bind).map_err(|e| anyhow::anyhow!("HTTP bind {}: {e}", cfg.bind))
+    let address: std::net::SocketAddr = cfg.bind.parse().context("INDEXER_BIND must be a loopback socket address; put a reverse proxy in front for any non-local use")?;
+    anyhow::ensure!(
+        address.ip().is_loopback(),
+        "INDEXER_BIND must be loopback; put a reverse proxy in front for any non-local use"
+    );
+    Server::http(address).map_err(|e| anyhow::anyhow!("HTTP bind {}: {e}", cfg.bind))
 }
 pub fn serve(cfg: Config) -> Result<()> {
     requests(server(&cfg)?, &cfg);
     Ok(())
+}
+fn body_status(headers: &[Header]) -> Option<u16> {
+    for header in headers {
+        if header.field.equiv("Transfer-Encoding") {
+            return Some(400);
+        }
+        if header.field.equiv("Content-Length") {
+            match header.value.as_str().parse::<u64>() {
+                Ok(0) => {}
+                Ok(_) => return Some(413),
+                Err(_) => return Some(400),
+            }
+        }
+    }
+    None
 }
 pub fn requests(server: Server, cfg: &Config) {
     for request in server.incoming_requests() {
@@ -122,6 +137,9 @@ pub fn requests(server: Server, cfg: &Config) {
             .map(|h| h.value.as_str());
         let allowed = cors(origin, &cfg.cors_origins).map(str::to_owned);
         let result: Result<(u16, Value)> = (|| {
+            if let Some(status) = body_status(request.headers()) {
+                return Ok((status, json!({"error":"request bodies are not supported"})));
+            }
             if request.method() == &Method::Options {
                 if allowed.is_none() {
                     return Ok((403, json!({"error":"origin not allowed"})));
@@ -186,6 +204,35 @@ pub fn requests(server: Server, cfg: &Config) {
 mod tests {
     use super::*;
     #[test]
+    fn nonlocal_binds_and_body_headers_are_rejected() {
+        let (_, mut cfg) = Config::parse(["serve".into()]).unwrap();
+        for bind in [
+            "0.0.0.0:8090",
+            "[::]:8090",
+            "192.168.1.1:8090",
+            "localhost:8090",
+        ] {
+            cfg.bind = bind.into();
+            assert!(server(&cfg)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("reverse proxy"));
+        }
+        for (key, value, expected) in [
+            ("Content-Length", "1", Some(413)),
+            ("Content-Length", "0", None),
+            ("Content-Length", "bad", Some(400)),
+            ("Transfer-Encoding", "chunked", Some(400)),
+        ] {
+            assert_eq!(
+                body_status(&[Header::from_bytes(key, value).unwrap()]),
+                expected
+            );
+        }
+        assert_eq!(body_status(&[]), None);
+    }
+    #[test]
     fn exact_cors_only() {
         let allowed = vec!["http://localhost:5173".into()];
         assert_eq!(
@@ -213,11 +260,11 @@ mod tests {
             }
         );
         assert_eq!(
-            parse(&format!("/fills?portfolio={p}&limit=500&before_slot=7")).unwrap(),
+            parse(&format!("/fills?portfolio={p}&limit=500&before=7.1111111111111111111111111111111111111111111111111111111111111111.0.0")).unwrap(),
             Query::Fills {
                 portfolio: p.into(),
                 limit: 500,
-                before: Some(7)
+                before: Some(format!("7.{}.0.0", "1".repeat(64)))
             }
         );
         assert_eq!(
@@ -238,8 +285,11 @@ mod tests {
             "limit=-1",
             "limit=no",
             "limit=2&limit=3",
-            "before_slot=-1",
-            "before_slot=18446744073709551615",
+            "before=-1",
+            "before=1.bad.0.0",
+            "before=01.111.0.0",
+            "before=18446744073709551615",
+            "before_slot=7",
         ] {
             assert!(
                 parse(&format!("/fills?portfolio={p}&{tail}")).is_err(),

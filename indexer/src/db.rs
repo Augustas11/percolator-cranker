@@ -7,12 +7,24 @@ use std::{path::Path, time::Duration};
 pub fn open(path: &Path) -> Result<Connection> {
     let c = Connection::open(path)?;
     c.busy_timeout(Duration::from_secs(5))?;
+    let legacy: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fills') WHERE name='exec_price')",
+        [],
+        |r| r.get(0),
+    )?;
+    anyhow::ensure!(
+        !legacy,
+        "legacy indexer schema: use a new database and backfill to rebuild corrected history"
+    );
     c.execute_batch("PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS txs(signature TEXT PRIMARY KEY,slot INTEGER,block_time INTEGER,ok INTEGER,err_json TEXT,failed_ix_index INTEGER,error_code INTEGER,error_name TEXT);
 -- portfolio associates successful closes with the liquidation exclusion query.
 CREATE TABLE IF NOT EXISTS instructions(signature TEXT,ix_index INTEGER,tag INTEGER,name TEXT,decode_error TEXT,portfolio TEXT,PRIMARY KEY(signature,ix_index));
 CREATE TABLE IF NOT EXISTS cranks(signature TEXT,ix_index INTEGER,slot INTEGER,block_time INTEGER,signer TEXT,target_portfolio TEXT,outcome TEXT,error_code INTEGER,PRIMARY KEY(signature,ix_index));
-CREATE TABLE IF NOT EXISTS fills(signature TEXT,ix_index INTEGER,leg INTEGER,slot INTEGER,block_time INTEGER,taker_portfolio TEXT,taker_portfolio_id TEXT,maker_portfolio TEXT,maker_portfolio_id TEXT,asset_index INTEGER,market_id TEXT,size_q TEXT,exec_price TEXT,limit_price TEXT,fee_bps TEXT,price_known INTEGER,PRIMARY KEY(signature,ix_index,leg));
+CREATE TABLE IF NOT EXISTS fills(signature TEXT,ix_index INTEGER,leg INTEGER,slot INTEGER,block_time INTEGER,taker_portfolio TEXT,taker_portfolio_id TEXT,maker_portfolio TEXT,maker_portfolio_id TEXT,asset_index INTEGER,market_id TEXT,size_q TEXT,reported_price TEXT,limit_price TEXT,requested_fee_bps TEXT,status TEXT,PRIMARY KEY(signature,ix_index,leg));
+CREATE TABLE IF NOT EXISTS marks(signature TEXT,ix_index INTEGER,slot INTEGER,asset_index INTEGER,price TEXT,PRIMARY KEY(signature,ix_index));
+CREATE INDEX IF NOT EXISTS marks_asset_slot ON marks(asset_index,slot DESC);
+CREATE TABLE IF NOT EXISTS current_portfolios(portfolio TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS transfers(signature TEXT,ix_index INTEGER,slot INTEGER,block_time INTEGER,kind TEXT CHECK(kind IN ('deposit','withdraw')),portfolio TEXT,portfolio_id TEXT,signer TEXT,amount TEXT,ok INTEGER,PRIMARY KEY(signature,ix_index));
 CREATE TABLE IF NOT EXISTS portfolio_snapshots(portfolio TEXT,slot INTEGER,taken_at INTEGER,owner TEXT,capital TEXT,pnl TEXT,positions_json TEXT,PRIMARY KEY(portfolio,slot));
 CREATE TABLE IF NOT EXISTS liquidations(portfolio TEXT,slot INTEGER,signature TEXT,before_json TEXT,after_json TEXT,PRIMARY KEY(portfolio,signature));
@@ -87,7 +99,19 @@ pub fn insert(c: &Connection, t: &Decoded) -> Result<()> {
         )?;
     }
     for r in &t.fills {
-        c.execute("INSERT OR IGNORE INTO fills VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",params![r.signature,r.ix_index,r.leg,r.slot,r.block_time,r.taker_portfolio,r.taker_portfolio_id.to_string(),r.maker_portfolio,r.maker_portfolio_id.to_string(),r.asset_index,r.market_id.to_string(),r.size_q,r.exec_price.map(|x|x.to_string()),r.limit_price.map(|x|x.to_string()),r.fee_bps.to_string(),r.price_known])?;
+        c.execute("INSERT OR IGNORE INTO fills VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",params![r.signature,r.ix_index,r.leg,r.slot,r.block_time,r.taker_portfolio,r.taker_portfolio_id.to_string(),r.maker_portfolio,r.maker_portfolio_id.to_string(),r.asset_index,r.market_id.to_string(),r.size_q,r.reported_price.map(|x|x.to_string()),r.limit_price.map(|x|x.to_string()),r.requested_fee_bps.to_string(),r.status])?;
+    }
+    for r in &t.marks {
+        c.execute(
+            "INSERT OR IGNORE INTO marks VALUES(?1,?2,?3,?4,?5)",
+            params![
+                t.signature,
+                r.ix_index,
+                t.slot,
+                r.asset_index,
+                r.price.to_string()
+            ],
+        )?;
     }
     for r in &t.transfers {
         c.execute(
@@ -120,12 +144,14 @@ pub struct Snapshot {
 }
 
 pub fn snapshot(c: &Connection, s: &Snapshot) -> Result<()> {
-    let previous: Option<(u64,String,String,String)> = c.query_row(
-        "SELECT slot,capital,pnl,positions_json FROM portfolio_snapshots WHERE portfolio=?1 ORDER BY slot DESC LIMIT 1",
-        [&s.portfolio],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let previous: Option<(u64,String,String,String,String)> = c.query_row(
+        "SELECT slot,capital,pnl,positions_json,owner FROM portfolio_snapshots WHERE portfolio=?1 ORDER BY slot DESC LIMIT 1",
+        [&s.portfolio],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
     let positions = s.positions.to_string();
-    if let Some((slot, capital, pnl, p)) = &previous {
-        if s.slot <= *slot || (capital == &s.capital && pnl == &s.pnl && p == &positions) {
+    if let Some((slot, capital, pnl, p, owner)) = &previous {
+        if s.slot <= *slot
+            || (owner == &s.owner && capital == &s.capital && pnl == &s.pnl && p == &positions)
+        {
             return Ok(());
         }
     }
@@ -141,7 +167,7 @@ pub fn snapshot(c: &Connection, s: &Snapshot) -> Result<()> {
             positions
         ],
     )?;
-    if let Some((slot, capital, pnl, p)) = previous {
+    if let Some((slot, capital, pnl, p, _)) = previous {
         let before: Value = serde_json::from_str(&p)?;
         if magnitude(&s.positions)? >= magnitude(&before)? {
             return Ok(());
@@ -208,15 +234,63 @@ pub fn stats(c: &Connection, cfg: &Config, now: i64) -> Result<Value> {
         "open_interest":market.get("open_interest").cloned().unwrap_or(json!({})),
         "depositors":count("SELECT COUNT(DISTINCT portfolio) FROM transfers WHERE kind='deposit' AND ok=1")?,
         "portfolios":count("SELECT COUNT(DISTINCT portfolio) FROM portfolio_snapshots")?,
-        "fills":count("SELECT COUNT(*) FROM fills")?,"mode":market["mode"],
+        "fills":count("SELECT COUNT(*) FROM fills WHERE status='executed'")?,"mode":market["mode"],
         "materialized_portfolio_count":market["materialized_portfolio_count"],
         "insurance":market["insurance"],"vault":market["vault"]}),
     )
 }
 
-pub fn fills(c: &Connection, portfolio: &str, limit: u64, before: Option<u64>) -> Result<Value> {
-    // Fetch one extra row to determine whether there is another page.
-    let mut stmt=c.prepare("SELECT * FROM fills WHERE (taker_portfolio=?1 OR maker_portfolio=?1) AND (?2 IS NULL OR slot<?2) ORDER BY slot DESC,signature DESC,ix_index DESC,leg DESC LIMIT ?3")?;
+/// Cursor numbers must fit SQLite integers; signatures are canonical Solana signatures.
+pub fn fill_cursor(value: &str) -> Result<(i64, String, i64, i64)> {
+    let parts: Vec<_> = value.split('.').collect();
+    anyhow::ensure!(parts.len() == 4, "invalid before cursor");
+    let number = |s: &str| -> Result<i64> {
+        anyhow::ensure!(
+            !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()),
+            "invalid cursor number"
+        );
+        let n: i64 = s.parse()?;
+        anyhow::ensure!(n.to_string() == s, "noncanonical cursor number");
+        Ok(n)
+    };
+    let signature = bs58::decode(parts[1]).into_vec()?;
+    anyhow::ensure!(
+        signature.len() == 64 && bs58::encode(&signature).into_string() == parts[1],
+        "invalid cursor signature"
+    );
+    Ok((
+        number(parts[0])?,
+        parts[1].into(),
+        number(parts[2])?,
+        number(parts[3])?,
+    ))
+}
+pub fn cached_stats(c: &Connection, cfg: &Config) -> Result<Value> {
+    if let Some(value) = meta(c, "stats_json")? {
+        return Ok(serde_json::from_str(&value)?);
+    }
+    let (cranks, uptime) =
+        stats::cranks_and_uptime(&[], 0, cfg.cycle_secs, cfg.uptime_slack_cycles);
+    Ok(
+        json!({"market":cfg.market.to_string(),"program":cfg.program.to_string(),
+        "as_of_slot":null,"as_of":null,"cranks":cranks,"uptime":uptime,
+        "liquidations_observed":0,"liquidations_since_slot":null,"open_interest":{},
+        "depositors":0,"portfolios":0,"fills":0,"mode":null,
+        "materialized_portfolio_count":null,"insurance":null,"vault":null}),
+    )
+}
+pub fn fills(c: &Connection, portfolio: &str, limit: u64, before: Option<&str>) -> Result<Value> {
+    let cursor = before.map(fill_cursor).transpose()?;
+    let (slot, signature, ix, leg) = cursor.unwrap_or((i64::MAX, String::new(), 0, 0));
+    let mut stmt = c.prepare(
+        "SELECT f.*,
+        (SELECT m.price FROM marks m WHERE m.asset_index=f.asset_index
+         AND (m.slot<f.slot OR (m.signature=f.signature AND m.ix_index<f.ix_index))
+         ORDER BY m.slot DESC,m.signature DESC,m.ix_index DESC LIMIT 1)
+        FROM fills f WHERE (taker_portfolio=?1 OR maker_portfolio=?1)
+        AND (?2 IS NULL OR (f.slot,f.signature,f.ix_index,f.leg)<(?3,?4,?5,?6))
+        ORDER BY f.slot DESC,f.signature DESC,f.ix_index DESC,f.leg DESC LIMIT ?7",
+    )?;
     let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Value> {
         let size: String = r.get(11)?;
         let taker: String = r.get(5)?;
@@ -229,23 +303,33 @@ pub fn fills(c: &Connection, portfolio: &str, limit: u64, before: Option<u64>) -
         Ok(
             json!({"signature":r.get::<_,String>(0)?,"ix_index":r.get::<_,u64>(1)?,"leg":r.get::<_,u64>(2)?,"slot":r.get::<_,u64>(3)?,"block_time":r.get::<_,Option<i64>>(4)?,
             "taker_portfolio":taker,"taker_portfolio_id":unsigned(6)?,"maker_portfolio":r.get::<_,String>(7)?,"maker_portfolio_id":unsigned(8)?,
-            "asset_index":r.get::<_,u64>(9)?,"market_id":unsigned(10)?,"size_q":size,"exec_price":unsigned(12)?,"limit_price":unsigned(13)?,"fee_bps":unsigned(14)?,"price_known":r.get::<_,bool>(15)?,
+            "asset_index":r.get::<_,u64>(9)?,"market_id":unsigned(10)?,"size_q":size,"reported_price":unsigned(12)?,"limit_price":unsigned(13)?,"requested_fee_bps":unsigned(14)?,"status":r.get::<_,String>(15)?,"mark_price":unsigned(16)?,
+            "price_note":"estimate: execution uses the engine mark; mark_price is the last pushed mark before this fill",
             "side":if (taker == portfolio) == positive {"buy"} else {"sell"}}),
         )
     };
     let mut rows = stmt
-        .query_map(params![portfolio, before, limit + 1], read)?
+        .query_map(
+            params![portfolio, before, slot, signature, ix, leg, limit + 1],
+            read,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut next = None;
     if rows.len() > limit as usize {
         rows.truncate(limit as usize);
-        let slot = rows.last().unwrap()["slot"].as_u64().unwrap();
-        next = Some(slot);
+        let row = rows.last().unwrap();
+        next = Some(format!(
+            "{}.{}.{}.{}",
+            row["slot"],
+            row["signature"].as_str().unwrap(),
+            row["ix_index"],
+            row["leg"]
+        ));
     }
-    Ok(json!({"fills":rows,"next_before_slot":next}))
+    Ok(json!({"fills":rows,"next_before":next}))
 }
 pub fn positions(c: &Connection, owner: &str) -> Result<Value> {
-    let mut stmt=c.prepare("SELECT portfolio,slot,capital,pnl,positions_json FROM portfolio_snapshots s WHERE owner=?1 AND slot=(SELECT MAX(slot) FROM portfolio_snapshots WHERE portfolio=s.portfolio) ORDER BY portfolio")?;
+    let mut stmt=c.prepare("SELECT s.portfolio,slot,capital,pnl,positions_json FROM portfolio_snapshots s JOIN current_portfolios c ON c.portfolio=s.portfolio WHERE owner=?1 AND slot=(SELECT MAX(slot) FROM portfolio_snapshots WHERE portfolio=s.portfolio) ORDER BY s.portfolio")?;
     let rows = stmt
         .query_map([owner], |r| {
             Ok((
@@ -353,6 +437,8 @@ mod tests {
                 .unwrap(),
             1
         );
+        c.execute("INSERT INTO current_portfolios VALUES(?1)", [A])
+            .unwrap();
         let out = positions(&c, PROGRAM).unwrap();
         assert_eq!(out["portfolios"][0]["positions"][0]["basis_pos_q"], "50");
         assert_eq!(out["as_of_slot"], slot + 1);
@@ -409,22 +495,21 @@ mod tests {
         assert_eq!(f["fills"][0]["side"], "sell");
         let b = &trade.fills[0].maker_portfolio;
         assert_eq!(fills(&c, b, 1, None).unwrap()["fills"][0]["side"], "buy");
-        assert_eq!(
-            fills(&c, A, 1, Some(trade.slot)).unwrap()["fills"],
-            json!([])
-        );
         assert_eq!(fills(&c, MARKET, 1, None).unwrap()["fills"], json!([]));
-        trade.signature = "older".into();
-        trade.slot -= 1;
-        trade.fills[0].signature = "older".into();
-        trade.fills[0].slot -= 1;
+        trade.signature = bs58::encode([0u8; 64]).into_string();
+        // Keep both rows in the same slot to exercise a split page.
+        trade.fills[0].signature = bs58::encode([0u8; 64]).into_string();
+        trade.fills[0].ix_index += 1;
         insert(&c, &trade).unwrap();
         let first = fills(&c, A, 1, None).unwrap();
         assert_eq!(first["fills"].as_array().unwrap().len(), 1);
-        let cursor = first["next_before_slot"].as_u64().unwrap();
+        let cursor = first["next_before"].as_str().unwrap();
         let second = fills(&c, A, 1, Some(cursor)).unwrap();
-        assert_eq!(second["fills"][0]["signature"], "older");
-        assert!(second["next_before_slot"].is_null());
+        assert_eq!(
+            second["fills"][0]["signature"],
+            bs58::encode([0u8; 64]).into_string()
+        );
+        assert!(second["next_before"].is_null());
     }
     #[test]
     fn stats_have_counts_and_no_volume() {
@@ -438,6 +523,117 @@ mod tests {
         assert_eq!(s["fills"], 1);
         assert!(s.get("volume").is_none());
         assert!(s.get("notional").is_none());
+    }
+    #[test]
+    fn marks_only_precede_fills_by_slot_or_same_transaction() {
+        let c = memory();
+        let trade = fixture("crank_trade");
+        let f = &trade.fills[0];
+        insert(&c, &trade).unwrap();
+        assert!(fills(&c, A, 1, None).unwrap()["fills"][0]["mark_price"].is_null());
+        let add = |signature: &str, ix: usize, slot: u64, asset: u16, price: &str| {
+            c.execute(
+                "INSERT INTO marks VALUES(?1,?2,?3,?4,?5)",
+                params![signature, ix, slot, asset, price],
+            )
+            .unwrap();
+        };
+        add("earlier", 0, f.slot - 1, f.asset_index, "11");
+        add("other_asset", 0, f.slot - 1, f.asset_index + 1, "99");
+        add("same_slot_other_tx", 0, f.slot, f.asset_index, "99");
+        add(&f.signature, f.ix_index + 1, f.slot, f.asset_index, "99");
+        add("future", 0, f.slot + 1, f.asset_index, "99");
+        assert_eq!(fills(&c, A, 1, None).unwrap()["fills"][0]["mark_price"], 11);
+        add(
+            &f.signature,
+            f.ix_index - 1,
+            f.slot,
+            f.asset_index,
+            &u64::MAX.to_string(),
+        );
+        assert_eq!(
+            fills(&c, A, 1, None).unwrap()["fills"][0]["mark_price"],
+            u64::MAX
+        );
+    }
+    #[test]
+    fn owner_changes_and_closed_portfolios_preserve_history() {
+        let mut c = memory();
+        snapshot(&c, &snap(1, 100)).unwrap();
+        c.execute("INSERT INTO current_portfolios VALUES(?1)", [A])
+            .unwrap();
+        let mut changed = snap(2, 100);
+        changed.owner = MARKET.into();
+        snapshot(&c, &changed).unwrap();
+        assert!(positions(&c, PROGRAM).unwrap()["portfolios"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            positions(&c, MARKET).unwrap()["portfolios"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let tx = c.transaction().unwrap();
+        tx.execute("DELETE FROM current_portfolios", []).unwrap();
+        drop(tx);
+        assert_eq!(
+            positions(&c, MARKET).unwrap()["portfolios"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        c.execute("DELETE FROM current_portfolios", []).unwrap();
+        assert!(positions(&c, MARKET).unwrap()["portfolios"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            c.query_row("SELECT COUNT(*) FROM portfolio_snapshots", [], |r| r
+                .get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+    }
+    #[test]
+    fn requested_fills_are_not_counted_and_stats_are_cached() {
+        let c = memory();
+        let (_, cfg) = Config::parse(["serve".into()]).unwrap();
+        let empty = cached_stats(&c, &cfg).unwrap();
+        let mut trade = fixture("crank_trade");
+        trade.fills[0].status = "requested";
+        insert(&c, &trade).unwrap();
+        let s = stats(&c, &cfg, 1234).unwrap();
+        assert_eq!(s["fills"], 0);
+        assert_eq!(s["uptime"]["window_end"], 1234);
+        assert_eq!(cached_stats(&c, &cfg).unwrap(), empty);
+        set_meta(&c, "stats_json", &s.to_string()).unwrap();
+        c.execute("DELETE FROM cranks", []).unwrap();
+        assert_eq!(cached_stats(&c, &cfg).unwrap(), s);
+    }
+    #[test]
+    fn cursor_resumes_inside_one_transaction_and_rejects_invalid_values() {
+        let c = memory();
+        let mut trade = fixture("crank_trade");
+        let mut leg = crate::decode::tests::fixture("crank_trade").fills.remove(0);
+        leg.leg = 1;
+        trade.fills.push(leg);
+        insert(&c, &trade).unwrap();
+        let first = fills(&c, A, 1, None).unwrap();
+        assert_eq!(first["fills"][0]["leg"], 1);
+        let second = fills(&c, A, 1, first["next_before"].as_str()).unwrap();
+        assert_eq!(second["fills"][0]["leg"], 0);
+        assert!(second["next_before"].is_null());
+        for value in ["", "1.a.2.3", "1.a.2.3.4", "-1.a.0.0", "1.' OR 1=1.0.0"] {
+            assert!(fill_cursor(value).is_err());
+        }
+        let sig = bs58::encode([0u8; 64]).into_string();
+        for n in ["01", "+1", "9223372036854775808", " 1"] {
+            assert!(fill_cursor(&format!("{n}.{sig}.0.0")).is_err());
+        }
     }
     fn now_for_test() -> i64 {
         2_000_000_000

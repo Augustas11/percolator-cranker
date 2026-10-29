@@ -3,7 +3,8 @@
 A synchronous, read-only Solana poller for the devnet SOL-PERP market. It decodes
 landed top-level wrapper instructions, keeps SQLite WAL history and portfolio
 snapshots, and serves frontend history/positions plus honest keeper statistics.
-It never submits transactions. Fill count is reported; volume/notional is not.
+It never submits transactions. Executed NoCpi fill count is reported; CPI requests
+are retained separately. Volume/notional is not reported.
 
 From the repository root:
 
@@ -19,7 +20,14 @@ cargo run --release --manifest-path indexer/Cargo.toml -- serve
 JSON and exits. `run` does the same initially, then polls every 10 seconds with
 HTTP on a separate thread. `serve` initializes schema if needed and serves HTTP.
 The default database is relative to **cwd**. Use a private writable directory or
-`--db indexer/indexer.sqlite`; do not commit database files.
+`--db indexer/indexer.sqlite`; do not commit database files. Root `/indexer.sqlite*`
+and indexer-local SQLite files are ignored. Legacy databases with `exec_price` are
+refused: preserve the old database and use a new `--db` path with `backfill` to
+rebuild corrected market filtering, crank outcomes, and mark history. No automatic
+migration or deletion is performed.
+
+A devnet backfill of about 230 transactions takes about 15 minutes on the public
+RPC. Use a paid RPC via `INDEXER_RPC_URL` for faster backfills.
 
 ## Configuration
 
@@ -37,6 +45,13 @@ Flags override environment variables. All flags take a separate value.
 | `--rpc-delay-ms` | `INDEXER_RPC_DELAY_MS` | `250` |
 | `--cycle-secs` | `INDEXER_CYCLE_SECS` | `3` |
 | `--uptime-slack-cycles` | `INDEXER_UPTIME_SLACK_CYCLES` | `10` |
+
+The API is local-only. `INDEXER_BIND` / `--bind` must be a numeric loopback socket
+address (`127.0.0.0/8` or `::1`, e.g. `[::1]:8090`). Put a reverse proxy in front
+for any non-local use, with request body limits and timeouts. Requests with a
+positive Content-Length are rejected with 413, and Transfer-Encoding or malformed
+Content-Length with 400, before URL parsing (best effort). tiny_http 0.12 drains
+unread bodies, so these checks do not make direct public exposure safe.
 
 CORS echoes an exactly allowed Origin and `Vary: Origin`, including error
 responses; no wildcard is supported. OPTIONS is accepted only for allowed
@@ -57,61 +72,89 @@ Examples illustrate an empty database before its first successful ingest.
 {"ok":false,"last_ingest_at":null,"last_ingest_slot":null,"backfill_complete":false,"lag_secs":null}
 ```
 
-`GET /stats` — success rate is `ok / (ok + failed)`, excluding idle. Idle still
+`GET /stats` — success rate is `ok / (ok + failed)`, excluding idle and reverted. Idle still
 counts as keeper activity. Uptime starts at the first ok/idle crank, subtracts
-`max(0, gap - slack * cycle)` for each gap including the tail to now, and excludes
+`max(0, gap - slack * cycle)` for each gap including the tail to the pass time, and excludes
 unknown block times. An empty or zero-duration window has a null percentage.
-`as_of` is the last complete ingest time, while the uptime window ends at request
-time. Open interest includes per-asset lifecycle and effective engine OI.
+`as_of` and `uptime.window_end` are the last complete ingest pass time. Stats are
+computed once per completed pass and stored in `meta.stats_json`; requests read
+that cached JSON without history scans. Before the first pass the empty shape is
+returned, with window_end 0. Open interest includes per-asset lifecycle and
+effective engine OI.
 
 ```json
-{"market":"7p8DtcMHSjdCsM9xWvBwF6TebGBSL18wKvfM7BS1zyHq","program":"GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS","as_of_slot":null,"as_of":null,"cranks":{"total":0,"ok":0,"idle":0,"failed":0,"success_rate":null,"first_at":null,"last_at":null},"uptime":{"cycle_secs":3,"window_start":null,"window_end":1793243324,"covered_secs":null,"missed_secs":null,"uptime_pct":null,"longest_gap_secs":null,"gaps_over_slack":null},"liquidations_observed":0,"liquidations_since_slot":null,"open_interest":{},"depositors":0,"portfolios":0,"fills":0,"mode":null,"materialized_portfolio_count":null,"insurance":null,"vault":null}
+{"market":"7p8DtcMHSjdCsM9xWvBwF6TebGBSL18wKvfM7BS1zyHq","program":"GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS","as_of_slot":null,"as_of":null,"cranks":{"total":0,"ok":0,"idle":0,"failed":0,"reverted":0,"success_rate":null,"first_at":null,"last_at":null},"uptime":{"cycle_secs":3,"window_start":null,"window_end":0,"covered_secs":null,"missed_secs":null,"uptime_pct":null,"longest_gap_secs":null,"gaps_over_slack":null},"liquidations_observed":0,"liquidations_since_slot":null,"open_interest":{},"depositors":0,"portfolios":0,"fills":0,"mode":null,"materialized_portfolio_count":null,"insurance":null,"vault":null}
 ```
 
 `GET /fills?portfolio=5XWHkzJhpp1hFjMrTwbARWqCJGGuRmrrDDqHW9EmYbzN&limit=100`
-— newest first; `limit` is 1..500, default 100, optional exclusive
-`before_slot`. Each row has signature, ix/leg, slot/time, both portfolio keys/IDs,
-asset/market ID, raw taker-signed `size_q`, exec/limit price, fee, price-known flag,
-and `side` from the queried portfolio's view (buy means it went longer).
+— newest first by `(slot, signature, ix_index, leg)` descending; `limit` is 1..500,
+default 100. Pass the returned opaque `next_before` as `before` to resume,
+including inside one slot or transaction. The exclusive cursor format is
+`<slot>.<signature>.<ix_index>.<leg>`; malformed/noncanonical cursors are rejected.
+`before_slot` is no longer supported.
+
+Each row has signature, ix/leg, slot/time, both portfolio keys/IDs, asset/market ID,
+raw taker-signed `size_q`, `reported_price` (NoCpi instruction price, otherwise
+null), `limit_price` (CPI), `requested_fee_bps`, `mark_price`, `status`, and `side`
+from the queried portfolio's view (buy means it went longer). NoCpi rows are
+`executed`; TradeCpi/BatchTradeCpi rows are `requested`, because successful handlers
+can execute zero size. `/stats.fills` counts only `executed` rows. CPI uses the
+configured base fee and NoCpi may derive a dynamic fee, so requested fees are not
+actual charged fees. The old `exec_price`, `fee_bps`, and `price_known` fields are
+removed.
+
+`marks(signature, ix_index, slot, asset_index, price)` stores successful tag 63
+PushAuthMark instructions, uniquely by signature/ix. `mark_price` is queried from
+the latest push for this database's market and the fill's asset_index at an
+earlier slot, or the same transaction with a lower ix_index; it is null if none
+exists. Other transactions in the same slot have no reliable relative order and
+are excluded. Every fill includes:
 
 ```json
-{"fills":[],"next_before_slot":null}
+{"price_note":"estimate: execution uses the engine mark; mark_price is the last pushed mark before this fill"}
 ```
 
-The slot-only cursor cannot resume inside a slot. If a page cuts through multiple
-fills at its boundary slot, remaining same-slot fills are skipped by the next
-`before_slot` query. Use a larger limit (up to 500); a composite cursor is a future
-API extension for complete pagination of unusually busy slots.
+```json
+{"fills":[],"next_before":null}
+```
 
 `GET /positions?owner=EdcNDZxPK6NPSQW4Yo8Di1veA9PRpVo9cr4Zgq99tSXo`
-— latest changed snapshot per portfolio, with capital, pnl and active legs:
+— latest changed snapshot per currently existing portfolio, with capital, pnl and active legs:
 
 ```json
 {"owner":"EdcNDZxPK6NPSQW4Yo8Di1veA9PRpVo9cr4Zgq99tSXo","as_of_slot":null,"portfolios":[]}
 ```
 
 Bad/missing pubkeys or query parameters return 400 with `{"error":"..."}`;
-unknown routes return 404. Historical snapshots remain after an account closes.
+unknown routes return 404. Historical snapshots remain after an account closes,
+but `/positions` joins `current_portfolios`, which is replaced from completed
+discovery in the same transaction as each pass's snapshots.
 
 ## Coverage and limits
 
 - Finalized commitment is approximately 13 seconds behind tip. Signature paging
   follows the program, but **only transactions referencing this market are stored**;
   cursors in `meta` also cover skipped unrelated transactions. Top-level program
-  instructions must reference the market; inner/CPI invocations are ignored.
+  instructions with known handler layouts must have this market at their handler's
+  market account index. Unknown layouts retain the market-anywhere rule but create
+  only generic instruction rows; inner/CPI invocations are ignored.
 - Oldest-page cursors and rows commit atomically; tip cursors advance only after
   the full gap is committed. Replaying rows is idempotent. RPC 429/transport failures
   back off from 0.5 to 30 seconds, and every getTransaction attempt has the configured
   delay. Null/unavailable transactions leave the page pending instead of silently
   advancing past missing history. RPC history retention bounds available backfill.
-- Failed transactions mark every wrapper instruction failed atomically. Error codes
-  belong only to the failing instruction. Crank Custom(22) at that crank is idle;
-  a different failure is failed. Preflight-rejected cranks never land, so the
+- Failed transactions roll back all effects. Error codes belong only to the
+  failing instruction. Crank Custom(22) at that crank is idle; a different failure
+  at that crank is failed. Other cranks in a failed transaction are `reverted`,
+  excluded from both the success-rate denominator and uptime liveness. Crank stats
+  include every signer: cranking is permissionless. Preflight-rejected cranks never land, so the
   success rate covers **landed transactions only**, not all attempted submissions.
-- TradeCpi/BatchTradeCpi exec price is unknown (`null`, `price_known=false`); the
-  stored limit price and signed size come from the request. Matcher return data
-  contains actual execution price (and may adjust size); decoding it is a follow-up.
-- Snapshots are saved only when capital, pnl or active-leg JSON changes. Discovery
+- Fill prices are estimates. The wrapper uses the engine effective price when
+  the profile does not update the mark from trades (this AuthMark market), and
+  otherwise clamps the reported price. The last pushed mark is an estimate, not
+  proof of the engine execution price. CPI size and limit are requests; matcher
+  execution/return data is not decoded.
+- Snapshots are saved only when owner, capital, pnl or active-leg JSON changes. Discovery
   uses drip's confirmed key/layout filtering, then account data is re-read finalized.
   Market and portfolio batches may have different context slots; each snapshot has
   its own actual slot. Positions report `basis_pos_q` only: the engine's pure
@@ -123,21 +166,28 @@ unknown routes return 404. Historical snapshots remain after an account closes.
   snapshot slot: a decrease in total absolute basis quantity, a successful targeted
   crank in `(previous.slot, new.slot]`, and no successful fill, withdrawal or close
   on that portfolio in that interval. It can miss intermediate changes and does
-  not prove causality. It never invents historical liquidation counts from backfill.
+  not prove causality. An undecodable trade on a portfolio can look like a
+  liquidation to this heuristic. Catch-up signature requests use minContextSlot
+  at least as high as every captured snapshot before running exclusions; an RPC
+  rejection fails the pass without writing liquidation rows. It never invents
+  historical liquidation counts from backfill.
   The generic instruction table has one extra portfolio column to exclude closes.
   `portfolios` counts distinct snapshotted keys; the market's current count is
   reported separately as `materialized_portfolio_count`.
+
+- `rustls-webpki 0.101.7` via Solana 1.18 has advisory RUSTSEC-2026-0099.
+  This is a repo-wide dependency pin and is not changed here.
+- CI gates the private indexer test step on `indexer/Cargo.toml` being present;
+  public exports omit this crate.
 
 Offline verification (after dependencies have been fetched once):
 
 ```sh
 source scripts/env.sh
-cargo test --offline --manifest-path indexer/Cargo.toml
-cargo build --release --manifest-path indexer/Cargo.toml
-cargo test --release --offline --manifest-path indexer/Cargo.toml
-cargo clippy --manifest-path indexer/Cargo.toml --all-targets --no-deps -- -D warnings
+export CARGO_NET_OFFLINE=true
+cargo test --release --manifest-path indexer/Cargo.toml
+cargo clippy --release --manifest-path indexer/Cargo.toml -- -D warnings
 cargo fmt --manifest-path indexer/Cargo.toml --check
-python3 scripts/test_check_public_tree.py
 ```
 
 ## Prior art
