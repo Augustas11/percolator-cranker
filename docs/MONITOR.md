@@ -352,7 +352,7 @@ Alerts with the bots paused (threshold conditions, by hand from `/metrics`):
 KeeperNoSuccessfulCrank (8,554 slots since the last landed crank > 750,
 Live), KeeperLogStale (log age 2,059 s), PusherMarkStale (2,087 s since the
 last push), PusherMarkLagHigh (last lag 110,610 ms: Pyth's devnet account
-was minutes old). BackingBucketExpiringWithLiens and MonitorChainReadFailing
+was ~2 min old). BackingBucketExpiringWithLiens and MonitorChainReadFailing
 stayed false. Before this change the dashboard showed only the first two.
 
 Unit tests: `cargo test --release --manifest-path monitor/Cargo.toml` has 13
