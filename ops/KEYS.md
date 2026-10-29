@@ -15,8 +15,9 @@ summarised here.
 | **Asset admin** (cold) | asset 0 `asset_admin` | Hardware wallet C, offline | Re-keys roles. It cannot take a funded role without the incumbent (`P 12070-12095`). It can also SHUTDOWN its asset and `RestartAssetOracle` an empty asset in Recovery (playbook section a). **Keep it, don't burn it**: burning (playbook: `P 12081-12085`) gives up those recovery levers |
 | **Insurance operator** (warm) | asset 0 `insurance_operator` | Separate hardware wallet, or an air-gapped signer | Signs Live insurance withdrawals, to its own token account only (`P 10936-10957`). Forward to the multisig the same day |
 | **Backing authority** (warm) | asset 0 `backing_bucket_authority` | Hardware wallet, used at each roll | Holds the backing principal. It must act before every expiry |
-| **Oracle pusher** (hot) | asset 0 `oracle_authority` | Pusher host only | **It is the price under AuthMark.** `max_price_move_bps_per_slot` limits how fast the *effective* price can walk toward a pushed target. It does **not** check the push against Pyth, and it is no dollar-loss bound: losses depend on exposure and on how fast we react. Replacing it once there is exposure needs its own signature (`P 12070-12095`); see the incident below |
-| **LP / matcher** (hot) | LP portfolio owner; co-signs every fill | Matcher host only | Can withdraw LP capital, so LP capital stays capped (`CAPITAL_PLAN.md`) |
+| **Oracle pusher** (hot) | asset 0 `oracle_authority`; also the matcher ctx price authority (`UpdateRef` rides in each `PushAuthMark` tx; no other process signs with it) | Pusher host only | **It is the price under AuthMark.** `max_price_move_bps_per_slot` limits how fast the *effective* price can walk toward a pushed target. It does **not** check the push against Pyth, and it is no dollar-loss bound: losses depend on exposure and on how fast we react. Replacing it once there is exposure needs its own signature (`P 12070-12095`); see the incident below |
+| **Bots' LP owner** (hot) | the bots' LP portfolio (NO matcher binding); co-signs each bot `TradeNoCpi` fill | Bot host only | Can withdraw that LP's capital, so LP capital stays capped (`CAPITAL_PLAN.md`) |
+| **Matcher LP owner** (hot, separate key) | the matcher's own LP portfolio, bound to the on-chain matcher ctx; signs only `SetMatcherConfig` / `SetParams` for it | Matcher host only | Never used by the bots. A `TradeNoCpi` on this LP would bump its position epoch and revoke the matcher's capability. The hedger nets both LPs |
 | **Keeper** (hot) | fee payer + reward portfolio owner | Keeper host only | ≤ 3 days of SOL; rewards swept weekly |
 | **Bot fee payers** (hot) | SOL for tx fees | each bot host | ≤ 3 days of SOL |
 
@@ -27,6 +28,10 @@ Rules:
   store), never in git, CI, chat or notes.
 - Every key's **public** key goes into the private launch config (outside
   this repo) and into the monitor's expected-roles check.
+
+**Launch key.** It holds `marketauth` only from create and init until the
+handover, then nothing (see the launch-key exception in this file, and `docs/LAUNCH.md`). The key-split
+layout above was applied on devnet on 2026-10-29 (owner decision).
 
 ## Creation (owner only)
 
