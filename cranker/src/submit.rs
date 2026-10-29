@@ -876,5 +876,9 @@ mod scrub_tests {
             assert!(m.contains("rpc.example.com/[redacted]"), "{input} -> {m}");
         }
         assert_eq!(scrub_urls("no url here; http only"), "no url here; http only");
+        // Scrubbed before serializing, an error with a quoted URL stays valid JSON.
+        let line = serde_json::json!({ "error": scrub_urls(r#"send "https://rpc.example.com/KEY" failed"#) }).to_string();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(!v["error"].as_str().unwrap().contains("KEY"));
     }
 }
