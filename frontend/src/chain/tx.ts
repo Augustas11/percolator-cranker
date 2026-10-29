@@ -2,7 +2,7 @@ import { Buffer } from "buffer";
 import { Connection, Keypair, PublicKey, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import type { TransactionInstruction } from "@solana/web3.js";
 import type { DevnetConfig } from "./config";
-import { parseMarket, parsePortfolio } from "./accounts";
+import { effectiveAbsQ, parseMarket, parsePortfolio } from "./accounts";
 import { layout } from "./layout";
 import { computeBudgetIxs, crankIx, createPortfolioIxs, depositIx, tradeCpiIx, withdrawIx } from "./instructions";
 import { ata, matcherDelegate, vault, vaultAuthority } from "./pda";
@@ -83,11 +83,34 @@ export async function buildTrade(
   conn: Connection, cfg: DevnetConfig, owner: PublicKey, portfolio: PublicKey,
   sizeQ: bigint, limitPrice: bigint, feeBps: bigint,
 ) {
+  return buildTradeIxs(conn, cfg, owner, portfolio, () => ({ sizeQ, limitPrice }), feeBps);
+}
+
+export async function buildClose(
+  conn: Connection, cfg: DevnetConfig, owner: PublicKey, portfolio: PublicKey,
+  slippageBps: bigint, feeBps: bigint,
+) {
+  return buildTradeIxs(conn, cfg, owner, portfolio, (pf, market) => {
+    const leg = pf.legs.find(leg => leg.assetIndex === 0 && leg.marketId === market.asset0.marketId);
+    const q = leg ? effectiveAbsQ(market, leg) : 0n;
+    if (!leg || q === 0n) throw new Error("no open position");
+    const price = market.asset0.effectivePrice;
+    const slippage = price * slippageBps / 10000n;
+    return { sizeQ: leg.side === "long" ? -q : q, limitPrice: leg.side === "long" ? price - slippage : price + slippage };
+  }, feeBps);
+}
+
+async function buildTradeIxs(
+  conn: Connection, cfg: DevnetConfig, owner: PublicKey, portfolio: PublicKey,
+  order: (pf: ReturnType<typeof parsePortfolio>, market: ReturnType<typeof parseMarket>) => { sizeQ: bigint; limitPrice: bigint },
+  feeBps: bigint,
+) {
   if (!cfg.matcherProgram || !cfg.matcherContext) throw new Error("Trading is waiting on the matcher program (devnet PoC)");
   const { ixs, accounts } = await withFreshCrank(conn, owner, cfg.programId, cfg.market,
     [portfolio, cfg.lpPortfolio], [portfolio, cfg.lpPortfolio, cfg.market]);
   const a = parsePortfolio(accounts[0]), b = parsePortfolio(accounts[1]);
   const market = parseMarket(accounts[2]);
+  const { sizeQ, limitPrice } = order(a, market);
   const delegate = matcherDelegate(cfg.programId, cfg.market, cfg.lpPortfolio, b.owner, cfg.matcherProgram, cfg.matcherContext);
   return [...ixs, tradeCpiIx(cfg.programId, owner, cfg.market, portfolio, cfg.lpPortfolio,
     cfg.matcherProgram, cfg.matcherContext, delegate, {

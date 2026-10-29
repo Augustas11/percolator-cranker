@@ -64,12 +64,12 @@ export default function App({ client }: { client: MarketClient }) {
         <section aria-labelledby="health-heading">
           <h2 id="health-heading">Margin &amp; health</h2>
           <dl>
-            <dt>Collateral</dt><dd>{usd.format(portfolio.collateral)}</dd>
-            <dt>Equity</dt><dd>{usd.format(health.equity)}</dd>
-            <dt>Initial margin used</dt><dd>{usd.format(health.initialMarginUsed)}</dd>
-            <dt>Maintenance margin</dt><dd>{usd.format(health.maintenanceMargin)}</dd>
-            <dt>Free collateral</dt><dd>{usd.format(health.freeCollateral)}</dd>
-            <dt>Health ratio</dt><dd>{number.format(health.ratio)}</dd>
+            <dt>Collateral</dt><dd>{dollars(portfolio.collateral)}</dd>
+            <dt>Equity</dt><dd>{dollars(health.equity)}</dd>
+            <dt>Initial margin used</dt><dd>{dollars(health.initialMarginUsed)}</dd>
+            <dt>Maintenance margin</dt><dd>{dollars(health.maintenanceMargin)}</dd>
+            <dt>Free collateral</dt><dd>{dollars(health.freeCollateral)}</dd>
+            <dt>Health ratio</dt><dd>{Number.isFinite(health.ratio) ? number.format(health.ratio) : "—"}</dd>
             <dt>Status</dt><dd><span className={`badge ${health.status}`}>{health.status}</span></dd>
           </dl>
         </section>

@@ -10,7 +10,7 @@ import type { PublicKey, TransactionInstruction } from "@solana/web3.js";
 import { devnetConfig as cfg } from "../src/chain/config";
 import { parseMarket, parsePortfolio } from "../src/chain/accounts";
 import { createAtaIdempotentIx } from "../src/chain/pda";
-import { buildCreatePortfolio, buildDeposit, buildTrade, buildWithdraw, findPortfolio } from "../src/chain/tx";
+import { buildClose, buildCreatePortfolio, buildDeposit, buildTrade, buildWithdraw, findPortfolio } from "../src/chain/tx";
 
 const path = process.env.TESTER_KEYPAIR;
 if (!path) throw new Error("set TESTER_KEYPAIR");
@@ -41,7 +41,7 @@ if (!portfolio) {
 await send("deposit", [createAtaIdempotentIx(tester.publicKey, tester.publicKey, cfg.mint),
   ...await buildDeposit(conn, cfg, tester.publicKey, portfolio, 10_000_000n)]);
 await trade("open_long", portfolio, 100_000n); // 0.1 SOL
-await trade("close", portfolio, -100_000n);
+await send("close", await buildClose(conn, cfg, tester.publicKey, portfolio, 50n, 12n));
 const pf = parsePortfolio((await conn.getAccountInfo(portfolio))!.data);
 if (pf.legs.length) throw new Error("position still open after close");
 await send("withdraw", await buildWithdraw(conn, cfg, tester.publicKey, portfolio, pf.capital));

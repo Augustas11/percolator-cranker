@@ -44,8 +44,9 @@ it("polls engine values and leaves entry price and unrealized PnL unknown", asyn
   expect(s.mark.price).toBe(99.938164);
   expect(s.portfolio.collateral).toBe(29982.010738);
   expect(s.portfolio.legs[0]).toEqual({ side: "long", size: 10, entryPrice: NaN, unrealizedPnl: NaN });
-  expect(s.portfolio.health.initialMarginUsed).toBeCloseTo(199.876328);
-  expect(s.portfolio.health.maintenanceMargin).toBeCloseTo(99.938164);
+  expect(s.portfolio.health).toEqual({
+    equity: s.portfolio.collateral, initialMarginUsed: NaN, maintenanceMargin: NaN, freeCollateral: NaN, ratio: NaN, status: "unknown",
+  });
   const reads = vi.mocked(Connection.prototype.getMultipleAccountsInfo);
   const before = reads.mock.calls.length;
   await vi.advanceTimersByTimeAsync(2000);
@@ -85,11 +86,11 @@ it.each(["long", "short"] as const)("closes a %s using exact bigint size and sur
   const tx = Transaction.from(send.mock.calls[0][0]);
   expect(i128(tx.instructions.at(-1)!.data, 51)).toBe(side === "long" ? -q : q);
   expect(tx.signatures).toHaveLength(1);
-  expect(client.getSnapshot().fills[0]).toMatchObject({ id: "signature", side: side === "long" ? "short" : "long", mine: true, price: 99.938164 });
+  expect(client.getSnapshot().fills).toHaveLength(0);
   await expect(client.openPosition("long", 1, 6)).rejects.toThrow(/leverage/);
   send.mockRejectedValue(new SendTransactionError({ action: "send", signature: "", transactionMessage: "simulation failed", logs: ["first", "matcher rejected"] }));
   await expect(client.openPosition("long", 1, 2)).rejects.toThrow(/matcher rejected/);
-  expect(client.getSnapshot().fills).toHaveLength(1);
+  expect(client.getSnapshot().fills).toHaveLength(0);
 });
 
 it("ignores positive PnL when computing health", async () => {
@@ -128,4 +129,35 @@ it("waits for a slow poll to finish before scheduling another", async () => {
   expect(reads).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(1);
   expect(reads).toHaveBeenCalledTimes(2);
+});
+
+it.each(["missing leg", "zero size", "expired epoch"])("rejects a close without sending when the post-crank portfolio has %s", async flat => {
+  client = new DevnetMarketClient({ ...devnetConfig, matcherProgram: tester.publicKey, matcherContext: portfolio });
+  await client.connect();
+  expect(client.getSnapshot().portfolio.legs).toHaveLength(1);
+  const postCrank = Buffer.from(data);
+  const leg = layout.HEADER_LEN + layout["pf.legs"];
+  if (flat === "missing leg") postCrank[leg + layout["leg.active"]] = 0;
+  else if (flat === "zero size") postCrank.fill(0, leg + layout["leg.basis_pos_q"], leg + layout["leg.basis_pos_q"] + 16);
+  else postCrank.writeBigUInt64LE(999n, leg + layout["leg.epoch_snap"]);
+  vi.mocked(Connection.prototype.simulateTransaction).mockResolvedValue({ context: { slot: 123 }, value: {
+    err: null, logs: [], accounts: [postCrank, lp, market].map(data => ({
+      ...account(data), owner: devnetConfig.programId.toBase58(), data: [data.toString("base64"), "base64"],
+    })),
+  } });
+  const reads = vi.mocked(Connection.prototype.getMultipleAccountsInfo);
+  reads.mockClear();
+  await expect(client.closePosition()).rejects.toThrow("no open position");
+  expect(Connection.prototype.sendRawTransaction).not.toHaveBeenCalled();
+  expect(reads).not.toHaveBeenCalled();
+});
+
+it("keeps flat health margins at zero and free collateral available", async () => {
+  const leg = layout.HEADER_LEN + layout["pf.legs"];
+  data[leg + layout["leg.active"]] = 0;
+  client = new DevnetMarketClient(devnetConfig);
+  await client.connect();
+  const { collateral, legs, health } = client.getSnapshot().portfolio;
+  expect(legs).toEqual([]);
+  expect(health).toEqual({ equity: collateral, initialMarginUsed: 0, maintenanceMargin: 0, freeCollateral: collateral, ratio: Infinity, status: "healthy" });
 });

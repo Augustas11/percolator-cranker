@@ -4,7 +4,7 @@ import type { Fill, MarketClient, MarketSnapshot, Side } from "./types";
 import type { DevnetConfig } from "../chain/config";
 import { effectiveAbsQ, parseMarket, parsePortfolio } from "../chain/accounts";
 import { createAtaIdempotentIx } from "../chain/pda";
-import { buildCreatePortfolio, buildDeposit, buildTrade, buildWithdraw, findPortfolio } from "../chain/tx";
+import { buildClose, buildCreatePortfolio, buildDeposit, buildTrade, buildWithdraw, findPortfolio } from "../chain/tx";
 import { getWallet } from "../chain/wallet";
 import type { Wallet } from "../chain/wallet";
 
@@ -67,9 +67,10 @@ export class DevnetMarketClient implements MarketClient {
     // The engine counts only realizable positive PnL (v16.rs:12353-12378).
     const collateral = pf ? Number(pf.capital + (pf.pnl < 0n ? pf.pnl : 0n)) / 1e6 : 0;
     const mmRatio = Number(market.maintenanceMarginBps) / 10000;
-    const maintenanceMargin = size * price * mmRatio;
-    const initialMarginUsed = size * price * Number(market.initialMarginBps) / 10000;
-    const ratio = size ? collateral / maintenanceMargin : Infinity;
+    // Engine health (floors, lag penalty, v16.rs:4095-4139) is not reproduced client-side.
+    const maintenanceMargin = size ? NaN : 0;
+    const initialMarginUsed = size ? NaN : 0;
+    const ratio = size ? NaN : Infinity;
     if (this.disposed) return;
     const now = Date.now();
     this.snapshot = {
@@ -79,8 +80,8 @@ export class DevnetMarketClient implements MarketClient {
         owner: this.wallet?.publicKey.toBase58() ?? null, collateral, realizedPnl: NaN,
         legs: leg && size ? [{ side: leg.side, size, entryPrice: NaN, unrealizedPnl: NaN }] : [],
         health: {
-          equity: collateral, initialMarginUsed, maintenanceMargin, freeCollateral: Math.max(0, collateral - initialMarginUsed), ratio,
-          status: collateral < 0 || ratio <= 1 ? "liquidatable" : ratio < 1.5 ? "warning" : "healthy",
+          equity: collateral, initialMarginUsed, maintenanceMargin, freeCollateral: size ? NaN : collateral, ratio,
+          status: size ? "unknown" : "healthy",
         },
       },
       fills: this.snapshot.fills,
@@ -177,16 +178,9 @@ export class DevnetMarketClient implements MarketClient {
   }
 
   async closePosition() {
-    this.connected();
-    const accounts = await this.conn.getMultipleAccountsInfo([this.cfg.market, this.requirePortfolio()]);
-    if (!accounts[0] || !accounts[1]) throw new Error("Trade account not found");
-    const market = parseMarket(accounts[0].data), pf = parsePortfolio(accounts[1].data);
-    const leg = pf.legs.find(leg => leg.assetIndex === 0 && leg.marketId === market.asset0.marketId);
-    if (!leg) throw new Error("no open position");
-    const magnitude = effectiveAbsQ(market, leg);
-    if (!magnitude) throw new Error("no open position");
-    await this.refresh();
-    await this.trade(leg.side === "long" ? -magnitude : magnitude);
+    const wallet = this.connected();
+    const ixs = await buildClose(this.conn, this.cfg, wallet.publicKey, this.requirePortfolio(), 50n, 12n);
+    await this.send(ixs);
   }
 
   dispose() {

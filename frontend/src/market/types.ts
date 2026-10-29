@@ -10,7 +10,7 @@ export interface Health {
   maintenanceMargin: number;
   freeCollateral: number;
   ratio: number; // equity / maintenanceMargin, Infinity if flat
-  status: "healthy" | "warning" | "liquidatable";
+  status: "healthy" | "warning" | "liquidatable" | "unknown";
 }
 export interface Portfolio {
   owner: string | null;
