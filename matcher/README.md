@@ -36,7 +36,7 @@ With this machine's older launcher: `PATH="$HOME/.cargo/bin:$PATH" cargo build-s
 Test: `cd matcher/host && cargo test`; CLI: `cargo build --bin matcher_ops`.
 Tests require `repo-prog/target/deploy/percolator_prog.so` at wrapper pin 5cb331dd.
 Deploy: `solana program deploy --url devnet matcher/program/target/deploy/drip_matcher.so`.
-CLI: `matcher_ops <init-ctx|set-matcher-config|update-ref|set-params|show|test-fill>`.
+CLI: `matcher_ops <init-ctx|init-lp|set-matcher-config|set-params|show|test-fill>`.
 Options use `--name value` or `MATCHER_NAME` env; RPC defaults to devnet and rejects mainnet URLs.
 Writes use --payer KEYPAIR; all commands use --matcher PUBKEY; show uses --ctx PUBKEY.
 Init: --ctx-keypair KEYPAIR --lp-owner KEYPAIR --wrapper PUBKEY --market PUBKEY
@@ -44,10 +44,10 @@ Init: --ctx-keypair KEYPAIR --lp-owner KEYPAIR --wrapper PUBKEY --market PUBKEY
 Set-config: --lp-owner KEYPAIR --wrapper PUBKEY --market PUBKEY --portfolio PUBKEY
 --ctx PUBKEY --expiry-slots N. Set-params: --lp-owner KEYPAIR --ctx PUBKEY
 --fill N --cap N --age N --deviation BPS --authority PUBKEY --paused 0 --inventory N.
-Update-ref: --price-authority KEYPAIR --market PUBKEY --ctx PUBKEY;
-optional --push-auth-mark --wrapper PUBKEY pushes the same effective price in that tx.
 Test-fill: --wrapper PUBKEY --market PUBKEY --portfolio LP_PUBKEY --ctx PUBKEY
---size SIGNED_BASE_UNITS --deposit TOKEN_ATOMS (payer must own the test mint).
+--size SIGNED_BASE_UNITS --taker-keypair KEYPAIR --taker-portfolio-keypair KEYPAIR --deposit ATOMS.
+Setup is idempotent: the portfolio is created once, and --deposit moves from the owner's token
+account while it still holds that much, funded by `scripts/staging_usdc_faucet.sh` (init-lp too).
 
 The pusher must add UpdateRef to its PushAuthMark transaction, signed by the same
 oracle key. The matcher cannot read the market through the wrapper's CPI tail.
@@ -55,15 +55,30 @@ At this pin fills book at AuthMark; returned price only feeds the taker's limit 
 The wrapper rejects target/effective mismatch and fees below the 12 bps base fee.
 SetMatcherConfig uses a 12 bps cap; TradeCpi charges the LP exactly the base fee.
 Return flags are VALID only: backing-fee cap bits are zero, so the LP pays no backing fee.
-Test-fill option --price-authority KEYPAIR pushes the reference (plus the mark with --push-auth-mark) just before
-the trade (rehearsal while the pusher is paused); the trade itself is signed by the taker only.
+
+`check` (same options as test-fill) gates read-only on what the fill transaction cannot fix:
+market Live, accrual within 32 slots, matcher reference fresh and near the mark, LP capability
+set. test-fill runs it first, then simulates every transaction and sends none that fails
+(devnet SOL rule: no on-chain test that is expected to fail).
+
+**Operating rule: one key per role.** Only the pusher signs with the oracle key, and UpdateRef
+rides in its PushAuthMark transaction; this CLI never takes the oracle key. Only the matcher LP's
+own owner key signs init-ctx, init-lp, set-matcher-config and set-params for that LP. A test
+fill is signed by a throwaway tester wallet only. Never sign with another role's or bot's key.
 
 Devnet (2026-10-29): program `8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE`, context
-`3WPsoVhij9XCZkJJ12zcev1DwqCouXXEFvnYKUnH1WMi` for the relisted market `HyMKxfct…`, LP portfolio
-`GUvzajrr…`, delegate `DfrgfJRy…`. (Context `BHsZrk4c…` is bound to the retired market `7p8DtcMH…`.)
-Limits: fill 10 SOL, inventory 100 SOL, age 25 slots, deviation 10 bps; price authority = the
-run's oracle key. Keys live in `~/.config/drip-devnet/`.
+`GMXktcTjqh8z3h2oCgUnodcLbh6hH4W6YUfL4hZMaXe7` on market `HyMKxfct…` for the matcher's own LP
+portfolio `6wH2d4CARhEWeGC2deBDb9pVT1a7Tgd48VUiFmkTNAHY` (owner `TVA9xtfv…`, its own key held by the
+re-pin run). Limits: fill 10 SOL, inventory 100 SOL, deviation 10 bps, price authority = the
+pusher's oracle key. Max reference age is 150 slots on devnet, where pushes land every 40-90
+slots; mainnet wants it near the 400 ms lag target. First TradeCpi fill, signed by the taker
+only: `4biJBxUbhkEXpr1Zb43CYmEFU74rqBH12p6qjeGM7JfuWNy4Vf4wLMkLEtPHLiQNoq7xgjjSi9iAvKjHJnhemaZt`.
+Retired contexts: `BHsZrk4c…`, `3WPsoVhi…`, `8WhyZi5U…`.
 
-Any non-matcher position change on the LP (for example a co-signed `TradeNoCpi`) clears the
-LP's matcher capability at this wrapper pin (`v16_program.rs:1180-1203`, `:8251-8256`), so the
-LP must sign SetMatcherConfig again. Do not co-sign TradeNoCpi on the matcher's LP portfolio.
+**Operating rule: one LP portfolio per fill path.** Any non-matcher position change on an LP
+(for example a co-signed `TradeNoCpi`) bumps its position epoch and clears its matcher
+capability at this wrapper pin (`v16_program.rs:1180-1203`, `:8251-8256`). Bots never trade or
+co-sign on the matcher's LP; monitoring and the hedge count both LPs.
+
+Trades must crank every portfolio that holds a position on the asset first (`test-fill --crank
+PF1,PF2`); otherwise the wrapper refuses with EngineLockActive while the market is loss-stale.
