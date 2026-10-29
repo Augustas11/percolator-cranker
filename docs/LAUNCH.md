@@ -341,11 +341,17 @@ fills as STALE.
 - **Mainnet target: 5 slots,** reachable only with a sub-second source. A fill priced off
   a stale reference is what latency arbitrage picks off (research/replay/REPORT.md).
 
-Apply it by hand with the matcher LP owner key. **Only while no fills can land**
-(frontend paused): the matcher's `SetParams` rewrites every parameter, inventory
-included, and has no age-only form, so a fill between the read and the write would
-be overwritten. Read the current values first, and pass them back unchanged except
-`--age`:
+Apply it by hand with the matcher LP owner key. **Known race:** the matcher's
+`SetParams` rewrites every parameter, inventory included, and has no age-only
+form. So a `TradeCpi` fill that lands between the read and the write is erased from
+the matcher's inventory accounting. Pausing the frontend does NOT prevent this:
+any client can send `TradeCpi` directly, and only the on-chain `paused` flag
+stops fills. Setting that flag itself goes through `SetParams`. Treat this as a
+devnet-only manual step, run when no taker is active, and re-check inventory
+against the LP portfolio's position afterwards. An age-only (or
+compare-and-set) matcher instruction would remove the race; that's a
+matcher-program change for later. Read the current values first, and pass
+them back unchanged except `--age`:
 
 ```bash
 matcher_ops show --matcher <program> --ctx <ctx>

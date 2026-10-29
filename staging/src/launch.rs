@@ -67,6 +67,10 @@ pub struct ClusterCfg {
     pub price_source: String,
     #[serde(default)]
     pub matcher_ctxs: Vec<String>,
+    /// Recorded target for the matcher ctxs' max reference age (slots); applied
+    /// by hand (docs/LAUNCH.md). Not read by the bots.
+    #[serde(default)]
+    pub matcher_max_ref_age_slots: u64,
     #[serde(default)]
     pub multisig_vault: String,
     /// Mainnet: the asset-0 role holders the `handover` step moves to
@@ -776,4 +780,15 @@ pub fn scrub(msg: &str) -> String {
 /// (read-only), else the cluster's.
 pub fn pyth_rpc_url(o: &OracleCfg, cluster_rpc: &str) -> String {
     if o.pyth_rpc.is_empty() { cluster_rpc.to_string() } else { o.pyth_rpc.clone() }
+}
+
+#[cfg(test)]
+mod config_tests {
+    /// The shipped config must load (deny_unknown_fields catches stray keys).
+    #[test]
+    fn shipped_config_loads() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../launch/sol-perp.toml");
+        let cfg = super::load(path).expect("launch/sol-perp.toml loads");
+        assert_eq!(cfg.cluster["devnet"].matcher_max_ref_age_slots, 80);
+    }
 }
