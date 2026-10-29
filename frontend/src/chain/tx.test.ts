@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { devnetConfig } from "./config";
-import { buildClose, buildDeposit, buildTrade, buildWithdraw, findPortfolio, withFreshCrank } from "./tx";
+import { buildClose, buildDeposit, buildTrade, buildWithdraw, findPortfolio, positionedPortfolios, withFreshCrank } from "./tx";
 import { effectiveAbsQ, parseMarket, parsePortfolio } from "./accounts";
 import { i128, u64 } from "./bytes";
 import { layout } from "./layout";
@@ -24,6 +24,8 @@ function simulatedAccounts(buffers: Buffer[]) {
 }
 
 function mockCranks(buffers: Buffer[] = [data, lp, market]) {
+  vi.spyOn(conn, "getAccountInfo").mockResolvedValue(account(market));
+  vi.spyOn(conn, "getProgramAccounts").mockResolvedValue([]);
   vi.spyOn(conn, "getSlot").mockResolvedValue(123);
   vi.spyOn(conn, "getLatestBlockhash").mockResolvedValue({ blockhash: cfg.market.toBase58(), lastValidBlockHeight: 1234 });
   return vi.spyOn(conn, "simulateTransaction").mockResolvedValue({ context: { slot: 123 }, value: { err: null, logs: [], accounts: simulatedAccounts(buffers) } });
@@ -52,18 +54,56 @@ it("simulates each crank after previously kept cranks and drops a no-op", async 
   expect(simulate.mock.calls[0][1]).toEqual({ sigVerify: false, replaceRecentBlockhash: true });
 });
 
+it("finds asset-0 positions without an owner filter and drops flat portfolios", async () => {
+  const flat = Buffer.from(data), otherAsset = Buffer.from(data), inactive = Buffer.from(data);
+  const leg = layout.HEADER_LEN + layout["pf.legs"];
+  flat.fill(0, leg + layout["leg.basis_pos_q"], leg + layout["leg.basis_pos_q"] + 16);
+  otherAsset.writeUInt32LE(1, leg + layout["leg.asset_index"]);
+  inactive[leg + layout["leg.active"]] = 0;
+  const get = vi.spyOn(conn, "getProgramAccounts").mockResolvedValue([
+    { pubkey: cfg.lpPortfolio, account: account(flat) },
+    { pubkey: portfolio, account: account(data) },
+    { pubkey: cfg.lpPortfolio, account: account(otherAsset) },
+    { pubkey: cfg.lpPortfolio, account: account(inactive) },
+  ]);
+  expect(await positionedPortfolios(conn, cfg.programId, parseMarket(market))).toEqual([portfolio]);
+  expect(get).toHaveBeenCalledWith(cfg.programId, { filters: [
+    { dataSize: layout.PORTFOLIO_ACCOUNT_LEN },
+    { memcmp: { offset: layout.HEADER_LEN + layout["pf.provenance_header"], bytes: new PublicKey(parseMarket(market).marketGroupId).toBase58() } },
+  ] });
+});
+
+it("cranks a third positioned portfolio once when building a trade", async () => {
+  mockCranks();
+  const third = new PublicKey(new Uint8Array(32).fill(5));
+  vi.mocked(conn.getProgramAccounts).mockResolvedValue([portfolio, cfg.lpPortfolio, third, third].map(pubkey => ({ pubkey, account: account(data) })));
+  const ixs = await buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n);
+  expect(ixs.filter(ix => ix.programId.equals(cfg.programId) && ix.data[0] === 5).map(ix => ix.keys[2].pubkey))
+    .toEqual([portfolio, cfg.lpPortfolio, third]);
+});
+
+it("cranks other positioned portfolios once when building a withdraw", async () => {
+  mockCranks([data]);
+  const third = new PublicKey(new Uint8Array(32).fill(5));
+  vi.mocked(conn.getProgramAccounts).mockResolvedValue([portfolio, third, third].map(pubkey => ({ pubkey, account: account(data) })));
+  const ixs = await buildWithdraw(conn, cfg, owner, portfolio, 789n);
+  expect(ixs.filter(ix => ix.programId.equals(cfg.programId) && ix.data[0] === 5).map(ix => ix.keys[2].pubkey))
+    .toEqual([portfolio, third]);
+});
+
 it("reads a new sequence on every deposit and withdraw build", async () => {
   const changed = Buffer.from(data);
   changed.writeBigUInt64LE(987n, layout.PORTFOLIO_MATCHER_SEQUENCE_OFF);
   mockCranks([changed]);
-  const read = vi.spyOn(conn, "getAccountInfo").mockResolvedValueOnce(account(data)).mockResolvedValue(account(changed));
+  const read = vi.mocked(conn.getAccountInfo).mockResolvedValueOnce(account(data)).mockResolvedValueOnce(account(changed));
   const first = await buildDeposit(conn, cfg, owner, portfolio, 123n);
   const second = await buildDeposit(conn, cfg, owner, portfolio, 456n);
   const withdraw = await buildWithdraw(conn, cfg, owner, portfolio, 789n);
   expect(u64(first.at(-1)!.data, 9)).toBe(1n);
   expect(u64(second.at(-1)!.data, 9)).toBe(987n);
   expect(u64(withdraw.at(-1)!.data, 9)).toBe(987n);
-  expect(read).toHaveBeenCalledTimes(2);
+  expect(read).toHaveBeenCalledTimes(3);
+  expect(read).toHaveBeenLastCalledWith(cfg.market);
   expect(withdraw.at(-2)!.data[0]).toBe(5);
 });
 

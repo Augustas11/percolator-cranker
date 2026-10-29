@@ -16,6 +16,15 @@ export async function findPortfolio(conn: Connection, programId: PublicKey, mark
   return accounts[0]?.pubkey ?? null;
 }
 
+export async function positionedPortfolios(conn: Connection, programId: PublicKey, market: { marketGroupId: Uint8Array }): Promise<PublicKey[]> {
+  const accounts = await conn.getProgramAccounts(programId, { filters: [
+    { dataSize: layout.PORTFOLIO_ACCOUNT_LEN },
+    { memcmp: { offset: layout.HEADER_LEN + layout["pf.provenance_header"], bytes: new PublicKey(market.marketGroupId).toBase58() } },
+  ] });
+  return accounts.filter(({ account }) => parsePortfolio(account.data).legs.some(leg => leg.assetIndex === 0 && leg.basisPosQ !== 0n))
+    .map(({ pubkey }) => pubkey);
+}
+
 export async function withFreshCrank(
   conn: Connection, payer: PublicKey, programId: PublicKey, market: PublicKey,
   portfolios: PublicKey[], readAccounts: PublicKey[],
@@ -72,7 +81,11 @@ export async function buildDeposit(conn: Connection, cfg: DevnetConfig, owner: P
 }
 
 export async function buildWithdraw(conn: Connection, cfg: DevnetConfig, owner: PublicKey, portfolio: PublicKey, amountAtoms: bigint) {
-  const { ixs, accounts } = await withFreshCrank(conn, owner, cfg.programId, cfg.market, [portfolio], [portfolio]);
+  const marketAccount = await conn.getAccountInfo(cfg.market);
+  if (!marketAccount) throw new Error("Market account not found");
+  const positioned = await positionedPortfolios(conn, cfg.programId, parseMarket(marketAccount.data));
+  const portfolios = [...new Set([portfolio, ...positioned].map(key => key.toBase58()))].map(key => new PublicKey(key));
+  const { ixs, accounts } = await withFreshCrank(conn, owner, cfg.programId, cfg.market, portfolios, [portfolio]);
   const pf = parsePortfolio(accounts[0]);
   return [...ixs, withdrawIx(cfg.programId, owner, cfg.market, portfolio,
     ata(owner, cfg.mint), vault(cfg.programId, cfg.market, cfg.mint), vaultAuthority(cfg.programId, cfg.market),
@@ -106,8 +119,12 @@ async function buildTradeIxs(
   feeBps: bigint,
 ) {
   if (!cfg.matcherProgram || !cfg.matcherContext) throw new Error("Trading is waiting on the matcher program (devnet PoC)");
+  const marketAccount = await conn.getAccountInfo(cfg.market);
+  if (!marketAccount) throw new Error("Market account not found");
+  const positioned = await positionedPortfolios(conn, cfg.programId, parseMarket(marketAccount.data));
+  const portfolios = [...new Set([portfolio, cfg.lpPortfolio, ...positioned].map(key => key.toBase58()))].map(key => new PublicKey(key));
   const { ixs, accounts } = await withFreshCrank(conn, owner, cfg.programId, cfg.market,
-    [portfolio, cfg.lpPortfolio], [portfolio, cfg.lpPortfolio, cfg.market]);
+    portfolios, [portfolio, cfg.lpPortfolio, cfg.market]);
   const a = parsePortfolio(accounts[0]), b = parsePortfolio(accounts[1]);
   const market = parseMarket(accounts[2]);
   const { sizeQ, limitPrice } = order(a, market);
