@@ -117,6 +117,7 @@ pub struct Fill {
 pub struct Mark {
     pub ix_index: usize,
     pub asset_index: u16,
+    pub market_id: u64,
     pub price: u64,
     pub observation_sequence: u64,
 }
@@ -286,6 +287,7 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
         }
         if let Instruction::PushAuthMark {
             asset_index,
+            market_id,
             mark_e6,
             observation_sequence,
             ..
@@ -294,6 +296,7 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
             out.marks.push(Mark {
                 ix_index: i,
                 asset_index: *asset_index,
+                market_id: *market_id,
                 price: *mark_e6,
                 observation_sequence: *observation_sequence,
             });
@@ -709,6 +712,7 @@ pub(crate) mod tests {
         let d = decode("mark", &tx, PROGRAM, MARKET).unwrap();
         assert_eq!(d.marks[0].price, u64::MAX);
         assert_eq!(d.marks[0].asset_index, 2);
+        assert_eq!(d.marks[0].market_id, 9);
         assert_eq!(d.marks[0].observation_sequence, 1);
         tx["meta"]["err"] = json!({"InstructionError":[0,{"Custom":19}]});
         assert!(decode("failed", &tx, PROGRAM, MARKET)

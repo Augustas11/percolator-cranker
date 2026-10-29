@@ -10,7 +10,8 @@ pub fn open(path: &Path) -> Result<Connection> {
     let legacy: bool = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fills') WHERE name='exec_price')
          OR (EXISTS(SELECT 1 FROM pragma_table_info('marks'))
-             AND NOT EXISTS(SELECT 1 FROM pragma_table_info('marks') WHERE name='observation_sequence'))",
+             AND (NOT EXISTS(SELECT 1 FROM pragma_table_info('marks') WHERE name='observation_sequence')
+                  OR NOT EXISTS(SELECT 1 FROM pragma_table_info('marks') WHERE name='market_id')))",
         [],
         |r| r.get(0),
     )?;
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS txs(signature TEXT PRIMARY KEY,slot INTEGER,block_tim
 CREATE TABLE IF NOT EXISTS instructions(signature TEXT,ix_index INTEGER,tag INTEGER,name TEXT,decode_error TEXT,portfolio TEXT,PRIMARY KEY(signature,ix_index));
 CREATE TABLE IF NOT EXISTS cranks(signature TEXT,ix_index INTEGER,slot INTEGER,block_time INTEGER,signer TEXT,target_portfolio TEXT,outcome TEXT,error_code INTEGER,PRIMARY KEY(signature,ix_index));
 CREATE TABLE IF NOT EXISTS fills(signature TEXT,ix_index INTEGER,leg INTEGER,slot INTEGER,block_time INTEGER,taker_portfolio TEXT,taker_portfolio_id TEXT,maker_portfolio TEXT,maker_portfolio_id TEXT,asset_index INTEGER,market_id TEXT,size_q TEXT,reported_price TEXT,limit_price TEXT,requested_fee_bps TEXT,status TEXT,PRIMARY KEY(signature,ix_index,leg));
-CREATE TABLE IF NOT EXISTS marks(signature TEXT,ix_index INTEGER,slot INTEGER,asset_index INTEGER,price TEXT,observation_sequence TEXT,PRIMARY KEY(signature,ix_index));
+CREATE TABLE IF NOT EXISTS marks(signature TEXT,ix_index INTEGER,slot INTEGER,asset_index INTEGER,price TEXT,observation_sequence TEXT,market_id TEXT,PRIMARY KEY(signature,ix_index));
 CREATE INDEX IF NOT EXISTS marks_asset_slot ON marks(asset_index,slot DESC);
 CREATE TABLE IF NOT EXISTS current_portfolios(portfolio TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS transfers(signature TEXT,ix_index INTEGER,slot INTEGER,block_time INTEGER,kind TEXT CHECK(kind IN ('deposit','withdraw')),portfolio TEXT,portfolio_id TEXT,signer TEXT,amount TEXT,ok INTEGER,PRIMARY KEY(signature,ix_index));
@@ -105,14 +106,15 @@ pub fn insert(c: &Connection, t: &Decoded) -> Result<()> {
     }
     for r in &t.marks {
         c.execute(
-            "INSERT OR IGNORE INTO marks VALUES(?1,?2,?3,?4,?5,?6)",
+            "INSERT OR IGNORE INTO marks VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![
                 t.signature,
                 r.ix_index,
                 t.slot,
                 r.asset_index,
                 r.price.to_string(),
-                r.observation_sequence.to_string()
+                r.observation_sequence.to_string(),
+                r.market_id.to_string()
             ],
         )?;
     }
@@ -287,7 +289,7 @@ pub fn fills(c: &Connection, portfolio: &str, limit: u64, before: Option<&str>) 
     let (slot, signature, ix, leg) = cursor.unwrap_or((i64::MAX, String::new(), 0, 0));
     let mut stmt = c.prepare(
         "SELECT f.*,
-        (SELECT m.price FROM marks m WHERE m.asset_index=f.asset_index
+        (SELECT m.price FROM marks m WHERE m.asset_index=f.asset_index AND m.market_id=f.market_id
          AND (m.slot<f.slot OR (m.signature=f.signature AND m.ix_index<f.ix_index))
          ORDER BY m.slot DESC,length(m.observation_sequence) DESC,m.observation_sequence DESC,m.signature DESC,m.ix_index DESC LIMIT 1)
         FROM fills f WHERE (taker_portfolio=?1 OR maker_portfolio=?1)
@@ -543,8 +545,8 @@ mod tests {
         assert!(fills(&c, A, 1, None).unwrap()["fills"][0]["mark_price"].is_null());
         let add = |signature: &str, ix: usize, slot: u64, asset: u16, price: &str| {
             c.execute(
-                "INSERT INTO marks VALUES(?1,?2,?3,?4,?5,'1')",
-                params![signature, ix, slot, asset, price],
+                "INSERT INTO marks VALUES(?1,?2,?3,?4,?5,'1',?6)",
+                params![signature, ix, slot, asset, price, f.market_id.to_string()],
             )
             .unwrap();
         };
@@ -567,6 +569,39 @@ mod tests {
         );
     }
     #[test]
+    fn reused_asset_index_requires_a_mark_from_the_same_generation() {
+        let c = memory();
+        let mut trade = fixture("crank_trade");
+        trade.slot = 20;
+        trade.fills[0].slot = 20;
+        insert(&c, &trade).unwrap();
+        let mut mark = fixture("push_mark");
+        mark.slot = 10;
+        mark.marks[0].asset_index = trade.fills[0].asset_index;
+        mark.marks[0].market_id = trade.fills[0].market_id;
+        mark.marks[0].price = 11;
+        insert(&c, &mark).unwrap();
+
+        trade.signature = "new_generation".into();
+        trade.fills[0].signature = trade.signature.clone();
+        trade.slot = 30;
+        trade.fills[0].slot = 30;
+        trade.fills[0].market_id = u64::MAX;
+        insert(&c, &trade).unwrap();
+        let out = fills(&c, A, 10, None).unwrap();
+        assert!(out["fills"][0]["mark_price"].is_null());
+        assert_eq!(out["fills"][1]["mark_price"], 11);
+
+        mark.signature = "new_generation_mark".into();
+        mark.slot = 25;
+        mark.marks[0].market_id = u64::MAX;
+        mark.marks[0].price = 22;
+        insert(&c, &mark).unwrap();
+        let out = fills(&c, A, 10, None).unwrap();
+        assert_eq!(out["fills"][0]["mark_price"], 22);
+        assert_eq!(out["fills"][1]["mark_price"], 11);
+    }
+    #[test]
     fn same_slot_marks_order_by_full_width_observation_sequence() {
         let c = memory();
         let trade = fixture("crank_trade");
@@ -578,8 +613,15 @@ mod tests {
             ("b", "18446744073709551615", "33"),
         ] {
             c.execute(
-                "INSERT INTO marks VALUES(?1,0,?2,?3,?4,?5)",
-                params![signature, f.slot - 1, f.asset_index, price, sequence],
+                "INSERT INTO marks VALUES(?1,0,?2,?3,?4,?5,?6)",
+                params![
+                    signature,
+                    f.slot - 1,
+                    f.asset_index,
+                    price,
+                    sequence,
+                    f.market_id.to_string()
+                ],
             )
             .unwrap();
             assert_eq!(
@@ -589,9 +631,9 @@ mod tests {
         }
     }
     #[test]
-    fn old_mark_schema_requires_rebuild() {
+    fn marks_without_market_id_require_rebuild() {
         let c = memory();
-        c.execute_batch("DROP TABLE marks; CREATE TABLE marks(signature TEXT,ix_index INTEGER,slot INTEGER,asset_index INTEGER,price TEXT);").unwrap();
+        c.execute_batch("DROP TABLE marks; CREATE TABLE marks(signature TEXT,ix_index INTEGER,slot INTEGER,asset_index INTEGER,price TEXT,observation_sequence TEXT);").unwrap();
         // Exercise open() without leaving a database file behind.
         let path = std::env::temp_dir().join(format!(
             "indexer-legacy-marks-{}.sqlite",

@@ -324,7 +324,7 @@ fn pass_inner(c: &mut Connection, cfg: &Config) -> Result<()> {
     db::set_meta(&tx, "market_json", &summary.to_string())?;
     let pass_time = now();
     db::set_meta(&tx, "last_ingest_at", &pass_time.to_string())?;
-    db::set_meta(&tx, "last_ingest_slot", &slot.to_string())?;
+    db::set_meta(&tx, "last_ingest_slot", &through_slot.to_string())?;
     let stats = db::stats(&tx, cfg, pass_time)?;
     db::set_meta(&tx, "stats_json", &stats.to_string())?;
     tx.commit()?;
