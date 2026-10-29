@@ -39,7 +39,7 @@ use drip::{
     setup,
     submit::{self, CrankRoute, OutcomeClass},
 };
-use percolator::{BackingBucketStatusV16 as Bucket, MarketModeV16, BOUND_SCALE};
+use percolator::{BackingBucketStatusV16 as Bucket, MarketModeV16, BOUND_SCALE, AssetStateV16, PortfolioLegV16Account, MIN_A_SIDE, ADL_ONE};
 use percolator_prog::{
     ix::Instruction as P,
     processor::ASSET_ACTION_SHUTDOWN,
@@ -163,6 +163,7 @@ struct Staging {
     feed: u64,
     mark: u64,
     push_heartbeat_slots: u64,
+    matcher_ctxs: Vec<String>,
     pushed: Option<std::sync::Arc<std::sync::Mutex<pusher::Shared>>>,
     /// The trader's open size, as the matcher last left it.
     open: Option<i128>,
@@ -335,6 +336,7 @@ impl Staging {
             feed: cfg.market.initial_price,
             mark: cfg.market.initial_price,
             push_heartbeat_slots: env_or("STAGING_PUSH_HEARTBEAT_SLOTS", o.push_heartbeat_slots),
+            matcher_ctxs: cfg.cluster.get("local").map(|c| c.matcher_ctxs.clone()).unwrap_or_default(),
             pushed: None,
             open: None,
             rolling: false,
@@ -487,11 +489,18 @@ impl Staging {
         Ok(reading)
     }
 
-    fn match_trade(&mut self) -> Result<Option<String>> {
+    fn match_trade(&mut self, lifecycle: &std::sync::Mutex<()>) -> Result<Option<String>> {
         if self.trader_pf == Pubkey::default() {
             return Ok(None); // no test trader (mainnet)
         }
-        let (data, g, _) = self.read()?;
+        // Match the pusher's processed confirmation, including the preceding
+        // push, and keep market/LP in one snapshot through trade confirmation.
+        let _in_flight = lifecycle.lock().unwrap();
+        let snapshot = self.rpc.get_multiple_accounts_with_commitment(
+            &[self.market, self.lp_pf], CommitmentConfig::processed(),
+        )?;
+        let data = &snapshot.value[0].as_ref().context("market missing")?.data;
+        let (_, g) = read_market(data).map_err(|e| anyhow!("{e:?}"))?;
         if self.rolling && self.open.is_none() {
             return Ok(None);
         }
@@ -511,16 +520,15 @@ impl Staging {
         if self.open.is_none() {
             let fresh = self.pushed.as_ref().is_some_and(|p| {
                 let p = p.lock().unwrap();
-                p.market == self.market && p.landed_ms.is_some_and(|at| launch::now_ms().saturating_sub(at) <= self.cfg.oracle.open_max_mark_age_ms)
+                p.market == self.market && p.published_ms.is_some_and(|at| launch::now_ms().saturating_sub(at) <= self.cfg.oracle.open_max_mark_age_ms)
             });
             if !fresh { return Ok(Some("refused(stale_mark)".into())); }
         }
         let mark = g.assets[0].effective_price;
-        let lp_data = self.rpc.get_account_data(&self.lp_pf)?;
-        let lp = read_portfolio(&lp_data).map_err(|e| anyhow!("{e:?}"))?;
-        let lp_position = lp.legs.iter().filter(|l| l.active != 0 && l.asset_index.get() == 0)
-            .map(|l| l.basis_pos_q.get()).sum();
-        if let Err(reason) = fill_allowed(q, mark, lp_position, &self.cfg.matcher) {
+        let lp_data = &snapshot.value[1].as_ref().context("LP portfolio missing")?.data;
+        let lp = read_portfolio(lp_data).map_err(|e| anyhow!("{e:?}"))?;
+        let lp_position = net_q(&lp.legs, 0, &g.assets[0])?;
+        if let Err(reason) = fill_allowed(q, mark, g.assets[0].raw_oracle_target_price, lp_position, &self.cfg.matcher) {
             return Ok(Some(format!("refused({reason})")));
         }
         let half = mark * self.cfg.matcher.spread_bps / 10_000;
@@ -550,8 +558,8 @@ impl Staging {
             ],
         ));
         if let Err(error) = self.send(&ixs, &[&self.trader, &self.lp]) {
-            // A concurrent push can expose target/effective lag after the
-            // cranks were prepared. The engine still refuses the fill.
+            // The snapshot can already have target/effective lag; the engine
+            // still refuses the fill.
             if short(&error) == "EngineLockActive" {
                 return Ok(Some("refused(target_effective_lag)".into()));
             }
@@ -827,7 +835,7 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         println!("market            = {}", st.market);
     }
 
-    let (pushed, push_lifecycle, pusher_thread) = pusher::start(&st);
+    let (pushed, push_lifecycle, pusher_thread) = pusher::start(&st)?;
     st.pushed = Some(std::sync::Arc::clone(&pushed));
     let budget = CycleBudget::from_env();
     let mut quarantine = Quarantine::new(QuarantineConfig::from_env());
@@ -863,12 +871,13 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
             push_state.market = st.market;
             push_state.mark = st.mark;
             push_state.landed_ms = None;
+            push_state.published_ms = None;
         }
         push = push_state.role.clone();
         drop(push_state);
         drop(in_flight);
         let p = "thread";
-        let t = if live { trade.record(st.match_trade()) } else { "-".into() };
+        let t = if live { trade.record(st.match_trade(&push_lifecycle)) } else { "-".into() };
         let b = if live { backing.record(st.manage_backing()) } else { "-".into() };
         let i = if live && tick % insurance_every == 0 { insurance.record(st.top_up_insurance(st.cfg.amounts.insurance_topup)) } else { "-".into() };
 
@@ -939,9 +948,37 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
     Ok(())
 }
 
+// Effective signed quantity, copied from hedger/src/chain.rs::net_q.
+fn net_q(legs: &[PortfolioLegV16Account], asset: usize, a: &AssetStateV16) -> Result<i128> {
+    let mut net = 0i128;
+    for l in legs.iter().filter(|l| l.active != 0 && l.asset_index.get() as usize == asset) {
+        let (current_a, epoch, sign) = match l.side {
+            0 => (a.a_long, a.epoch_long, 1),
+            1 => (a.a_short, a.epoch_short, -1),
+            s => bail!("unknown leg side {s}"),
+        };
+        let epoch_snap = l.epoch_snap.get();
+        if epoch_snap < epoch {
+            continue;
+        }
+        if epoch_snap > epoch {
+            bail!("leg epoch {epoch_snap} ahead of asset epoch {epoch}");
+        }
+        let (raw, basis) = (l.basis_pos_q.get().unsigned_abs(), l.a_basis.get());
+        if !(MIN_A_SIDE..=ADL_ONE).contains(&basis) || !(1..=basis).contains(&current_a) {
+            bail!("leg A index out of range");
+        }
+        let prod = raw.checked_mul(current_a).context("effective quantity overflow")?;
+        let eff = prod.div_ceil(basis);
+        net += sign * i128::try_from(eff).context("effective quantity exceeds i128")?;
+    }
+    Ok(net)
+}
+
 /// size_q is the trader delta; the LP takes its opposite. Compare full
 /// products so one atom above a dollar limit cannot disappear in rounding.
-fn fill_allowed(size_q: i128, mark_e6: u64, lp_position_q: i128, cfg: &launch::MatcherCfg) -> Result<(), &'static str> {
+fn fill_allowed(size_q: i128, effective_price: u64, target_price: u64, lp_position_q: i128, cfg: &launch::MatcherCfg) -> Result<(), &'static str> {
+    let mark_e6 = effective_price.max(target_price);
     let next = lp_position_q.checked_sub(size_q).ok_or("inventory_overflow")?;
     let notional = size_q.unsigned_abs().checked_mul(mark_e6 as u128).ok_or("notional_overflow")?;
     if notional > cfg.max_fill_notional_usd as u128 * 1_000_000_000_000 {
@@ -959,18 +996,43 @@ fn fill_allowed(size_q: i128, mark_e6: u64, lp_position_q: i128, cfg: &launch::M
 mod fill_tests {
     use super::*;
     fn cfg() -> launch::MatcherCfg {
-        launch::MatcherCfg { size_q: 1, spread_bps: 10, fee_bps: 12, max_fill_notional_usd: 100_000, max_lp_inventory_usd: 100_000 }
+        launch::MatcherCfg { program_id: Pubkey::new_unique().to_string(), size_q: 1, spread_bps: 10, fee_bps: 12, max_fill_notional_usd: 100_000, max_lp_inventory_usd: 100_000 }
+    }
+    #[test]
+    fn cap_uses_higher_price() {
+        assert_eq!(fill_allowed(1_000_000_000, 100_000_000, 100_000_001, 0, &cfg()), Err("max_fill_notional"));
+        assert_eq!(fill_allowed(1_000_000_000, 100_000_001, 100_000_000, 0, &cfg()), Err("max_fill_notional"));
+        assert_eq!(fill_allowed(-1, 100_000_000, 100_000_001, 999_999_999, &cfg()), Err("max_lp_inventory"));
+    }
+    #[test]
+    fn scaled_and_reset_inventory() {
+        use percolator::{V16PodI128, V16PodU128, V16PodU32, V16PodU64};
+        let mut a = AssetStateV16::default();
+        a.a_long = ADL_ONE / 2;
+        a.epoch_long = 2;
+        a.a_short = ADL_ONE;
+        a.epoch_short = 3;
+        let leg = PortfolioLegV16Account {
+            active: 1, asset_index: V16PodU32::new(0), side: 0,
+            basis_pos_q: V16PodI128::new(5), a_basis: V16PodU128::new(ADL_ONE),
+            epoch_snap: V16PodU64::new(2), ..Default::default()
+        };
+        let mut reset = leg;
+        reset.side = 1;
+        assert_eq!(net_q(&[leg, reset], 0, &a).unwrap(), 3); // ceil(5 / 2), reset short contributes zero
+        reset.epoch_snap = V16PodU64::new(3);
+        assert_eq!(net_q(&[leg, reset], 0, &a).unwrap(), -2);
     }
     #[test]
     fn fill_limit_exact_and_one_atom_over() {
-        assert_eq!(fill_allowed(1_000_000_000, 100_000_000, 0, &cfg()), Ok(()));
-        assert_eq!(fill_allowed(1_000_000_001, 100_000_000, 0, &cfg()), Err("max_fill_notional"));
+        assert_eq!(fill_allowed(1_000_000_000, 100_000_000, 100_000_000, 0, &cfg()), Ok(()));
+        assert_eq!(fill_allowed(1_000_000_001, 100_000_000, 100_000_000, 0, &cfg()), Err("max_fill_notional"));
     }
     #[test]
     fn inventory_limit_and_reduction() {
-        assert_eq!(fill_allowed(-1, 100_000_000, 999_999_999, &cfg()), Ok(()));
-        assert_eq!(fill_allowed(-1, 100_000_000, 1_000_000_000, &cfg()), Err("max_lp_inventory"));
-        assert_eq!(fill_allowed(1, 100_000_000, 2_000_000_000, &cfg()), Ok(()));
-        assert_eq!(fill_allowed(-1, 100_000_000, -2_000_000_000, &cfg()), Ok(()));
+        assert_eq!(fill_allowed(-1, 100_000_000, 100_000_000, 999_999_999, &cfg()), Ok(()));
+        assert_eq!(fill_allowed(-1, 100_000_000, 100_000_000, 1_000_000_000, &cfg()), Err("max_lp_inventory"));
+        assert_eq!(fill_allowed(1, 100_000_000, 100_000_000, 2_000_000_000, &cfg()), Ok(()));
+        assert_eq!(fill_allowed(-1, 100_000_000, 100_000_000, -2_000_000_000, &cfg()), Ok(()));
     }
 }

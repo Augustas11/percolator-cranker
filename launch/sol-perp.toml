@@ -24,6 +24,7 @@ rpc = "http://127.0.0.1:8799"
 program_id = ""
 collateral_mint = "create"
 price_source = "mock"
+matcher_ctxs = []
 
 [cluster.devnet]
 rpc = "https://api.devnet.solana.com"
@@ -31,12 +32,15 @@ rpc = "https://api.devnet.solana.com"
 program_id = "Bu1J8eQQN2mNnUgisSEd5StBG6zDaRb7fwDjN34VzgLG"
 collateral_mint = "create"
 price_source = "exchanges"
+# May change when the matcher gets its own LP portfolio.
+matcher_ctxs = ["3WPsoVhij9XCZkJJ12zcev1DwqCouXXEFvnYKUnH1WMi"]
 
 [cluster.mainnet]
 rpc = ""                # the paid RPC endpoint
 program_id = ""         # the official program id, set on Day 0
 collateral_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
 price_source = "pyth"
+matcher_ctxs = []
 # Squads vault (2-of-3, ops/KEYS.md): marketauth after the handover. Until
 # then a fresh launch key (keys/launch_authority.json) holds it.
 multisig_vault = ""
@@ -55,7 +59,8 @@ asset_admin = ""                # cold hardware wallet C
 # Binance SOL/USDT is treated as USD. Median of fresh prices, then exclude
 # prices >50 bps from that median and recompute; require 2 usable venues.
 # Lag uses the newest USED exchange event timestamp, never receipt time.
-# No quorum means no push; existing failure counts and stale alarms apply.
+# No quorum means no push; PusherMarkStale remains the outage alarm.
+exchange_clock_skew_ms = 500
 exchange_max_age_ms = 2000
 exchange_max_dev_bps = 50
 exchange_min_venues = 2
@@ -86,6 +91,8 @@ push_min_move_bps = 1
 priority_fee_micro_lamports = 10000
 # Local landed PushAuthMark: 6,596 CU including budget instructions; ~2x.
 push_cu_limit = 14000
+# Source publish age, not landing age. Slow sources (e.g. devnet Pyth
+# fallback, ~13 s) refuse opens unless this is raised for that run.
 open_max_mark_age_ms = 1000
 
 # InitMarket. Values and reasoning: docs/OPERATOR_PLAYBOOK.md section 2.
@@ -127,8 +134,9 @@ stale_slots = 9000
 force_close_delay_slots = 20
 
 # Off-chain matcher: LP and trader co-sign TradeNoCpi at mark +- spread.
-# Nothing to configure on chain (no TradeCpi matcher program).
+# Pushes also refresh any configured on-chain TradeCpi matcher contexts.
 [matcher]
+program_id = "8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE"
 # REPORT.md: tickets above $100k carry 2.7–4.8 bps adverse selection.
 max_fill_notional_usd = 100000
 # REPORT.md inventory limit (~line 260), ops/CAPITAL_PLAN.md: 10% of

@@ -66,6 +66,8 @@ pub struct ClusterCfg {
     pub collateral_mint: String,
     pub price_source: String,
     #[serde(default)]
+    pub matcher_ctxs: Vec<String>,
+    #[serde(default)]
     pub multisig_vault: String,
     /// Mainnet: the asset-0 role holders the `handover` step moves to
     /// (public keys, ops/KEYS.md). Local and devnet generate them in keys/.
@@ -76,6 +78,8 @@ pub struct ClusterCfg {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct OracleCfg {
+    #[serde(default = "default_exchange_clock_skew")]
+    pub exchange_clock_skew_ms: u64,
     #[serde(default = "default_exchange_max_age")]
     pub exchange_max_age_ms: u64,
     #[serde(default = "default_exchange_max_dev")]
@@ -106,6 +110,7 @@ pub struct OracleCfg {
     pub open_max_mark_age_ms: u64,
 }
 
+fn default_exchange_clock_skew() -> u64 { 500 }
 fn default_exchange_max_age() -> u64 { 2000 }
 fn default_exchange_max_dev() -> u64 { 50 }
 fn default_exchange_min_venues() -> usize { 2 }
@@ -155,6 +160,7 @@ pub struct ResolveCfg {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct MatcherCfg {
+    pub program_id: String,
     pub size_q: i64,
     pub max_fill_notional_usd: u64,
     pub max_lp_inventory_usd: u64,
@@ -547,6 +553,7 @@ fn open(args: &[String]) -> Result<(Staging, State, PathBuf, String)> {
         bail!("{} uses mint {}, the config says {mint}; use a fresh run dir", run.display(), state.mint);
     }
     let mut st = Staging::new(cfg, rpc, program_id, payer, admin, lp, trader, mint, own_mint);
+    st.matcher_ctxs = c.matcher_ctxs.clone();
     match c.price_source.as_str() {
         "pyth" => st.pyth_feed = Some(feed_id(&st.cfg.oracle)?),
         "exchanges" => st.exchanges = Some(crate::pusher::Exchanges::new(&st.cfg.oracle)?),

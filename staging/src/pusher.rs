@@ -36,13 +36,14 @@ pub struct Shared {
     pub stop: bool,
     pub mark: u64,
     pub landed_ms: Option<u64>,
+    pub published_ms: Option<u64>,
     pub role: Role,
 }
 
-pub fn start(st: &Staging) -> (Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::JoinHandle<()>) {
+pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::JoinHandle<()>)> {
     let shared = Arc::new(Mutex::new(Shared {
         market: st.market, live: true, stop: false, mark: st.mark,
-        landed_ms: None, role: Role::default(),
+        landed_ms: None, published_ms: None, role: Role::default(),
     }));
     let state = Arc::clone(&shared);
     let lifecycle = Arc::new(Mutex::new(()));
@@ -67,13 +68,16 @@ pub fn start(st: &Staging) -> (Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::
     let oracle = st.oracle_kp.insecure_clone();
     let program_id = st.program_id;
     let keeper_log = st.keeper_log;
+    let matcher_program = Pubkey::from_str(&st.cfg.matcher.program_id).context("matcher.program_id")?;
+    let matcher_ctxs = st.matcher_ctxs.iter().map(|ctx| Pubkey::from_str(ctx).context("matcher_ctxs")).collect::<Result<Vec<_>>>()?;
     let handle = std::thread::spawn(move || {
         let mut last_slot = 0;
         let mut market = Pubkey::default();
+        let mut read_error = None;
         loop {
             let started = Instant::now();
-            // Only lifecycle transitions wait for in-flight pushes; shared
-            // mark reads never hold a mutex across RPC calls.
+            // Lifecycle transitions and trades wait for in-flight pushes;
+            // shared mark reads never hold a mutex across RPC calls.
             let in_flight = flight.lock().unwrap();
             let mut s = state.lock().unwrap();
             if s.stop { break; }
@@ -82,10 +86,12 @@ pub fn start(st: &Staging) -> (Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::
                     market = s.market;
                     last_slot = 0;
                     s.landed_ms = None;
+                    s.published_ms = None;
                 }
                 let last_mark = s.mark;
                 let has_landed = s.landed_ms.is_some();
                 drop(s);
+                let mut send_attempted = false;
                 let result = (|| -> Result<Option<String>> {
                     let data = rpc.get_account_data(&market)?;
                     let (_, g) = read_market(&data).map_err(|e| anyhow!("{e:?}"))?;
@@ -98,6 +104,7 @@ pub fn start(st: &Staging) -> (Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::
                     let (mark, published) = source.latest()?;
                     let moved = mark.abs_diff(last_mark) as u128 * 10_000 / last_mark as u128;
                     if has_landed && slot.saturating_sub(last_slot) < heartbeat && moved < cfg.push_min_move_bps as u128 {
+                        log_read_state(&mut read_error, None);
                         return Ok(None);
                     }
                     let ix = Instruction {
@@ -109,11 +116,16 @@ pub fn start(st: &Staging) -> (Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::
                             authority_epoch: seq.authority_epoch,
                         }.encode(),
                     };
-                    let tx = Transaction::new_signed_with_payer(&[
+                    let mut ixs = vec![
                         ComputeBudgetInstruction::set_compute_unit_limit(cfg.push_cu_limit),
                         ComputeBudgetInstruction::set_compute_unit_price(cfg.priority_fee_micro_lamports),
                         ComputeBudgetInstruction::request_heap_frame(128 * 1024), ix,
-                    ], Some(&payer.pubkey()), &[&payer, &oracle], rpc.get_latest_blockhash()?);
+                    ];
+                    ixs.extend(matcher_ctxs.iter().map(|ctx| update_ref(matcher_program, oracle.pubkey(), *ctx, mark)));
+                    let tx = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &[&payer, &oracle], rpc.get_latest_blockhash()?);
+                    if bincode::serialized_size(&tx)? > 1232 { bail!("push transaction exceeds 1232 bytes"); }
+                    log_read_state(&mut read_error, None);
+                    send_attempted = true;
                     let sig = rpc.send_transaction_with_config(&tx, RpcSendTransactionConfig { skip_preflight: true, ..Default::default() })?;
                     let sent = Instant::now();
                     loop {
@@ -124,6 +136,7 @@ pub fn start(st: &Staging) -> (Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::
                             let mut s = state.lock().unwrap();
                             s.mark = mark;
                             s.landed_ms = Some(landed);
+                            s.published_ms = Some(published);
                             drop(s);
                             last_slot = slot;
                             if keeper_log {
@@ -135,18 +148,25 @@ pub fn start(st: &Staging) -> (Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::
                         std::thread::sleep(Duration::from_millis(50));
                     }
                 })();
+                // Reads/build preparation are not PushAuthMark send attempts.
+                let result = match result {
+                    Err(e) if !send_attempted => {
+                        log_read_state(&mut read_error, Some(short(&e)));
+                        Ok(None)
+                    },
+                    other => other,
+                };
                 let outcome = state.lock().unwrap().role.record(result);
                 if outcome != "-" { println!("push={outcome}"); }
             } else {
                 drop(s);
             }
             drop(in_flight);
-            if let Some(rest) = Duration::from_millis(cfg.push_poll_ms.max(1)).checked_sub(started.elapsed()) {
-                std::thread::sleep(rest);
-            }
+            // Even an overrun yields the lifecycle mutex to trades/shutdown.
+            std::thread::sleep(Duration::from_millis(cfg.push_poll_ms.max(1)).saturating_sub(started.elapsed()).max(Duration::from_millis(5)));
         }
     });
-    (shared, lifecycle, handle)
+    Ok((shared, lifecycle, handle))
 }
 
 /// Public prices only: no RPC, keys, market setup or transaction submission.
@@ -166,5 +186,56 @@ pub fn prices(args: &[String]) -> Result<()> {
             Err(e) => println!("{}", serde_json::json!({"error": e.to_string()})),
         }
         std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+// Log source/RPC availability transitions, without counting them as failed sends.
+fn log_read_state(previous: &mut Option<String>, error: Option<String>) {
+    if *previous != error {
+        eprintln!("push read: {}", error.as_deref().unwrap_or("recovered"));
+        *previous = error;
+    }
+}
+
+fn update_ref(program_id: Pubkey, authority: Pubkey, ctx: Pubkey, mark_e6: u64) -> Instruction {
+    let mut data = vec![4];
+    data.extend_from_slice(&mark_e6.to_le_bytes());
+    Instruction {
+        program_id,
+        accounts: vec![AccountMeta::new_readonly(authority, true), AccountMeta::new(ctx, false)],
+        data,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn matcher_update_ref_wire_and_transaction_size() {
+        let payer = Keypair::new();
+        let oracle = Keypair::new();
+        let cfg = launch::load(DEFAULT_CONFIG).unwrap();
+        let ctx = Pubkey::from_str(&cfg.cluster["devnet"].matcher_ctxs[0]).unwrap();
+        let mark = 150_000_000u64;
+        let ix = update_ref(Pubkey::from_str(&cfg.matcher.program_id).unwrap(), oracle.pubkey(), ctx, mark);
+        assert_eq!(ix.program_id.to_string(), "8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE");
+        assert_eq!(ix.data, [vec![4], mark.to_le_bytes().to_vec()].concat());
+        assert_eq!(ix.accounts, vec![AccountMeta::new_readonly(oracle.pubkey(), true), AccountMeta::new(ctx, false)]);
+        let push = Instruction {
+            program_id: Pubkey::new_unique(),
+            accounts: vec![AccountMeta::new(oracle.pubkey(), true), AccountMeta::new(Pubkey::new_unique(), false)],
+            data: P::PushAuthMark { asset_index: 0, market_id: 1, now_slot: 1, mark_e6: mark, observation_sequence: 1, authority_epoch: 1 }.encode(),
+        };
+        let tx = Transaction::new_signed_with_payer(&[
+            ComputeBudgetInstruction::set_compute_unit_limit(cfg.oracle.push_cu_limit),
+            ComputeBudgetInstruction::set_compute_unit_price(cfg.oracle.priority_fee_micro_lamports),
+            ComputeBudgetInstruction::request_heap_frame(128 * 1024), push, ix,
+        ], Some(&payer.pubkey()), &[&payer, &oracle], solana_sdk::hash::Hash::default());
+        let bytes = bincode::serialized_size(&tx).unwrap();
+        assert!(bytes <= 1232, "{bytes} bytes");
+        println!("PushAuthMark + UpdateRef: {bytes} bytes, {} signatures", tx.signatures.len());
+        assert_eq!(tx.signatures.len(), 2);
+        assert!(cfg.cluster["local"].matcher_ctxs.is_empty());
+        assert!(cfg.cluster["mainnet"].matcher_ctxs.is_empty());
     }
 }

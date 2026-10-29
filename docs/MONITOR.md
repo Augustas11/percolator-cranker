@@ -112,7 +112,9 @@ pins. Counters are identified below; other families are gauges.
 | `keeper_quarantined_accounts` | Accounts struck without subsequent observed Progress |
 | `keeper_account_quarantined_slots{account,error,strike}` | Current chain slot minus first quarantine event slot |
 | `keeper_last_success_slot` | Slot of the latest landed crank signature (`getSignatureStatuses` with history), absent until known |
-| `keeper_mark_lag_ms` | Day-0 bots log only: the pusher's last `mark_lag` event, source price time to push landed (docs/LAUNCH.md); alert `PusherMarkLagHigh` > 400 ms |
+| `keeper_mark_lag_ms` | Day-0 bots log only: the pusher's last `mark_lag` event, source price time to push landed (docs/LAUNCH.md); latest sample only |
+| `keeper_mark_lag_p50_ms`, `keeper_mark_lag_p95_ms` | Nearest-rank p50/p95 source-to-landing lag over the last 300 pushes; `PusherMarkLagHigh` uses p95 > 400 ms |
+| `keeper_mark_push_age_seconds` | Seconds since the last landed push (or monitor watch start before the first push); drives `PusherMarkStale` |
 | `keeper_slots_since_last_success` | Chain slot minus that slot, saturating at zero. Any landed crank (`Ok(mut)`, `Ok(no-mut)`, `Ok(unreconciled)`) counts as successful |
 
 Bucket JSON lists every non-empty bucket, with expiry, signed slots to expiry
@@ -216,7 +218,7 @@ the scrape job `percolator-monitor`: MonitorDown matches `up{job="percolator-mon
 | BackingBucketExpiringWithLiens | expiring with liens > 0 | 1m / warning |
 | KeeperNoSuccessfulCrank | slots since last landed crank > 750, Live mode only | 1m / warning |
 | KeeperLogStale | log age > 120s or log read fails | 1m / critical |
-| PusherMarkLagHigh | last `mark_lag` > 400 ms | 5m / warning |
+| PusherMarkLagHigh | p95 `mark_lag` over the last 300 pushes > 400 ms | 5m / warning |
 | PusherMarkStale | no push landed for > 120 s (`keeper_mark_push_age_seconds`) | 2m / critical |
 | MonitorChainReadFailing | chain read fails | 5m / critical |
 | MonitorDown | scrape `up == 0` or monitor metrics absent | 5m / critical |

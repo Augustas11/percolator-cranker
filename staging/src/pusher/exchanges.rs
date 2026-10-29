@@ -41,13 +41,21 @@ fn median(prices: &mut [u64]) -> Option<u64> {
     if n == 0 { None } else { Some(prices[(n - 1) / 2] + (prices[n / 2] - prices[(n - 1) / 2]) / 2) }
 }
 
+// Reject bad clocks before they can poison the timestamp ordering.
+fn cache_quote(cached: &mut Option<Quote>, q: Quote, now: u64, skew_ms: u64) {
+    if q.timestamp > now.saturating_add(skew_ms) { return; }
+    if cached.map_or(true, |old| old.timestamp > now || q.timestamp >= old.timestamp) {
+        *cached = Some(q);
+    }
+}
+
 fn filter(quotes: &Quotes, now: u64, cfg: &launch::OracleCfg) -> (Result<Reading>, Vec<String>) {
     let mut drops = Vec::new();
     let fresh: Vec<_> = quotes.iter().enumerate().filter_map(|(i, q)| {
         let reason = match q {
             None => "missing",
-            Some(q) if q.timestamp > now => "future timestamp",
-            Some(q) if now - q.timestamp > cfg.exchange_max_age_ms => "stale",
+            Some(q) if q.timestamp > now.saturating_add(cfg.exchange_clock_skew_ms) => "future timestamp",
+            Some(q) if now.saturating_sub(q.timestamp) > cfg.exchange_max_age_ms => "stale",
             Some(q) if q.price == 0 => "invalid price",
             Some(q) => return Some((i, *q)),
         };
@@ -67,6 +75,9 @@ fn filter(quotes: &Quotes, now: u64, cfg: &launch::OracleCfg) -> (Result<Reading
         }
         let mut prices: Vec<_> = used.iter().map(|(_, q)| q.price).collect();
         let price = median(&mut prices).unwrap();
+        if used.len() == 2 && (prices[1] - prices[0]) as u128 * 10_000 > price as u128 * cfg.exchange_max_dev_bps as u128 {
+            bail!("exchange quorum: two-venue spread exceeds {} bps", cfg.exchange_max_dev_bps);
+        }
         Ok(Reading {
             price,
             publish_time_ms: used.iter().map(|(_, q)| q.timestamp).max().unwrap(),
@@ -110,6 +121,7 @@ impl Exchanges {
         for i in 0..3 {
             // Weak ownership lets readers stop after the last source is dropped.
             let shared = Arc::downgrade(&quotes);
+            let skew_ms = cfg.exchange_clock_skew_ms;
             std::thread::spawn(move || {
                 let mut backoff = 1;
                 let mut last_error = String::new();
@@ -135,7 +147,7 @@ impl Exchanges {
                                     if let Some(q) = parse(i, &text) {
                                         if let Some(shared) = shared.upgrade() {
                                             let mut quotes = shared.lock().unwrap();
-                                            if quotes[i].map_or(true, |old| q.timestamp >= old.timestamp) { quotes[i] = Some(q); }
+                                            cache_quote(&mut quotes[i], q, launch::now_ms(), skew_ms);
                                         }
                                         backoff = 1;
                                         last_error.clear();
@@ -186,7 +198,26 @@ mod tests {
         let text = include_str!("../../../launch/sol-perp.toml");
         let old = text.lines().filter(|line| !line.starts_with("exchange_")).collect::<Vec<_>>().join("\n");
         let cfg: launch::Config = toml::from_str(&old).unwrap();
+        assert_eq!(cfg.oracle.exchange_clock_skew_ms, 500);
         assert_eq!((cfg.oracle.exchange_max_age_ms, cfg.oracle.exchange_max_dev_bps, cfg.oracle.exchange_min_venues), (2000, 50, 2));
+    }
+    #[test]
+    fn future_quote_recovers() {
+        let mut cached = q(100, 4999);
+        cache_quote(&mut cached, Quote { price: 999, timestamp: 6000 }, 5000, 500);
+        assert_eq!(cached, q(100, 4999));
+        cache_quote(&mut cached, Quote { price: 101, timestamp: 5000 }, 5000, 500);
+        assert_eq!(cached, q(101, 5000));
+        cached = q(999, 6000); // recover even an already poisoned cache
+        cache_quote(&mut cached, Quote { price: 102, timestamp: 5000 }, 5000, 500);
+        assert_eq!(cached, q(102, 5000));
+        assert!(filter(&[q(100, 5500); 3], 5000, &cfg()).0.is_ok());
+    }
+    #[test]
+    fn two_venue_spread() {
+        assert!(filter(&[q(99_600_000, 5000), q(100_400_000, 5000), None], 5000, &cfg()).0.is_err());
+        assert!(filter(&[q(99_750_000, 5000), q(100_250_000, 5000), None], 5000, &cfg()).0.is_ok());
+        assert!(filter(&[q(99_750_000, 5000), q(100_250_001, 5000), None], 5000, &cfg()).0.is_err());
     }
     #[test]
     fn medians() {
@@ -210,7 +241,7 @@ mod tests {
         assert_eq!(drops, ["binance: outlier"]);
         assert!(filter(&[q(100, 5000), None, None], 5000, &cfg).0.is_err());
         assert!(filter(&[None; 3], 5000, &cfg).0.is_err());
-        assert!(filter(&[q(100, 5001); 3], 5000, &cfg).0.is_err());
+        assert!(filter(&[q(100, 5501); 3], 5000, &cfg).0.is_err());
         assert!(filter(&[q(0, 5000); 3], 5000, &cfg).0.is_err());
         assert!(filter(&[q(100, 3000); 3], 5000, &cfg).0.is_ok());
     }
