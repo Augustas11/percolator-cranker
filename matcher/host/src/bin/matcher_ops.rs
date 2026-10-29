@@ -229,7 +229,7 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
     // and retries cost only fees.
     let taker = args.key("taker-keypair")?;
     let pf = args.key("taker-portfolio-keypair")?;
-    if rpc.get_account(&pf.pubkey()).is_err() {
+    if rpc.get_balance(&taker.pubkey())? < 5_000_000 {
         send(
             rpc,
             payer,
@@ -240,16 +240,16 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
             )],
             &[],
         )?;
-        funded_portfolio(
-            rpc,
-            payer,
-            wrapper,
-            market,
-            &taker,
-            &pf,
-            args.value("deposit")?,
-        )?;
     }
+    funded_portfolio(
+        rpc,
+        payer,
+        wrapper,
+        market,
+        &taker,
+        &pf,
+        args.value("deposit")?,
+    )?;
     println!("taker={} portfolio={}", taker.pubkey(), pf.pubkey());
     // Keep only cranks that simulate successfully, as in staging's fresh_cranks.
     let mut ixs = Vec::new();
@@ -314,8 +314,9 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
     send(&fast, &taker, &ixs, &[])
 }
 
-/// New wrapper portfolio for `owner` on `market`, funded with `amount` test-USDC atoms
-/// minted by the payer (the test mint authority).
+/// Idempotent setup of `owner`'s portfolio `pf` on `market`: create it only if the account
+/// is absent, then deposit `amount` while the owner's faucet-funded token account still
+/// holds it, so a re-run completes a setup that stopped between the two transactions.
 fn funded_portfolio(
     rpc: &RpcClient,
     payer: &Keypair,
@@ -325,98 +326,63 @@ fn funded_portfolio(
     pf: &Keypair,
     amount: u64,
 ) -> Result<()> {
-    let token = Keypair::new();
-    let market_data = rpc.get_account_data(&market)?;
-    let (cfg, group) = state::read_market(&market_data)?;
-    let mint = Pubkey::new_from_array(cfg.collateral_mint);
-    let mint_account = rpc.get_account(&mint)?;
-    if mint_account.owner != spl_token::ID {
-        bail!("the test mint must be an SPL Token test mint");
-    }
-    let mint_state = spl_token::state::Mint::unpack(&mint_account.data)?;
-    // Mint when the payer holds the test mint; otherwise deposit from the owner's
-    // associated token account, funded by the faucet (scripts/staging_usdc_faucet.sh).
-    let mints =
-        mint_state.mint_authority == solana_sdk::program_option::COption::Some(payer.pubkey());
-    let ata_program: Pubkey = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL".parse()?;
-    let owner_ata = Pubkey::find_program_address(
-        &[
-            owner.pubkey().as_ref(),
-            spl_token::ID.as_ref(),
-            mint.as_ref(),
-        ],
-        &ata_program,
-    )
-    .0;
-    let source = if mints { token.pubkey() } else { owner_ata };
-    if !mints {
-        let held = TokenAccount::unpack(&rpc.get_account_data(&owner_ata)?)?.amount;
-        if held < amount {
-            bail!("{owner_ata} holds {held} test-USDC atoms, need {amount}: run the faucet first");
-        }
-    }
     if amount == 0 {
         bail!("deposit must be positive");
     }
-    let len =
-        state::portfolio_account_len_for_market_slots(group.config.max_portfolio_assets as usize)?;
-    let mut setup = vec![
-        system_instruction::create_account(
-            &payer.pubkey(),
-            &pf.pubkey(),
-            rpc.get_minimum_balance_for_rent_exemption(len)?,
-            len as u64,
-            &wrapper,
-        ),
-        wrapper_ix(
-            wrapper,
-            P::InitPortfolio,
-            vec![
-                M::new(owner.pubkey(), true),
-                M::new(market, false),
-                M::new(pf.pubkey(), false),
-            ],
-        ),
-    ];
-    let mut signers = vec![owner, pf];
-    if mints {
-        setup.extend([
+    let (cfg, group) = state::read_market(&rpc.get_account_data(&market)?)?;
+    let mint = Pubkey::new_from_array(cfg.collateral_mint);
+    let ata_program: Pubkey = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL".parse()?;
+    let ata = |authority: &Pubkey| {
+        Pubkey::find_program_address(
+            &[authority.as_ref(), spl_token::ID.as_ref(), mint.as_ref()],
+            &ata_program,
+        )
+        .0
+    };
+    let source = ata(&owner.pubkey());
+    let held = match rpc
+        .get_account_with_commitment(&source, rpc.commitment())?
+        .value
+    {
+        Some(account) => TokenAccount::unpack(&account.data)?.amount,
+        None => 0,
+    };
+    let absent = rpc
+        .get_account_with_commitment(&pf.pubkey(), rpc.commitment())?
+        .value
+        .is_none();
+    if absent {
+        if held < amount {
+            bail!("{source} holds {held} test-USDC atoms, need {amount}: run the faucet first");
+        }
+        let len = state::portfolio_account_len_for_market_slots(
+            group.config.max_portfolio_assets as usize,
+        )?;
+        let create = [
             system_instruction::create_account(
                 &payer.pubkey(),
-                &token.pubkey(),
-                rpc.get_minimum_balance_for_rent_exemption(TokenAccount::LEN)?,
-                TokenAccount::LEN as u64,
-                &spl_token::ID,
+                &pf.pubkey(),
+                rpc.get_minimum_balance_for_rent_exemption(len)?,
+                len as u64,
+                &wrapper,
             ),
-            spl_token::instruction::initialize_account3(
-                &spl_token::ID,
-                &token.pubkey(),
-                &mint,
-                &owner.pubkey(),
-            )?,
-            spl_token::instruction::mint_to(
-                &spl_token::ID,
-                &mint,
-                &token.pubkey(),
-                &payer.pubkey(),
-                &[],
-                amount,
-            )?,
-        ]);
-        signers.push(&token);
+            wrapper_ix(
+                wrapper,
+                P::InitPortfolio,
+                vec![
+                    M::new(owner.pubkey(), true),
+                    M::new(market, false),
+                    M::new(pf.pubkey(), false),
+                ],
+            ),
+        ];
+        send(rpc, payer, &create, &[owner, pf])?;
     }
-    send(rpc, payer, &setup, &signers)?;
+    if held < amount {
+        return Ok(()); // already deposited on an earlier run
+    }
     let pf_data = rpc.get_account_data(&pf.pubkey())?;
     let vault_authority = Pubkey::find_program_address(&[b"vault", market.as_ref()], &wrapper).0;
-    let vault = Pubkey::find_program_address(
-        &[
-            vault_authority.as_ref(),
-            spl_token::ID.as_ref(),
-            mint.as_ref(),
-        ],
-        &ata_program,
-    )
-    .0;
     let deposit = wrapper_ix(
         wrapper,
         P::Deposit {
@@ -429,12 +395,11 @@ fn funded_portfolio(
             M::new(market, false),
             M::new(pf.pubkey(), false),
             M::new(source, false),
-            M::new(vault, false),
+            M::new(ata(&vault_authority), false),
             M::new_readonly(spl_token::ID, false),
         ],
     );
-    send(rpc, payer, &[deposit], &[owner])?;
-    Ok(())
+    send(rpc, payer, &[deposit], &[owner])
 }
 
 /// Read-only devnet fill preconditions; prints each and fails if any does not hold.
