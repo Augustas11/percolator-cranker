@@ -27,7 +27,7 @@ call order mirror the upstream wrapper's test support
 
 | # | Role | What the bot does |
 |---|---|---|
-| 1 | price pusher | Reads the price source (below) every tick and sends `PushAuthMark` when the heartbeat (`STAGING_PUSH_HEARTBEAT_SLOTS`, 25, about 10 s) has elapsed or the price moved more than `STAGING_PUSH_DEVIATION_BPS` (10) since the last push (Pyth price_pusher's rule), and always just before the matcher opens: a risk-increasing fill is refused (`EngineLockActive`) without a fresh mark. |
+| 1 | price pusher | Runs on its own thread and RPC, polling every `oracle.push_poll_ms` (400). Sends `PushAuthMark` when the heartbeat (`STAGING_PUSH_HEARTBEAT_SLOTS`, 25, about 10 s) elapses or the price moves at least `oracle.push_min_move_bps` (1). Opens require a landed push within `oracle.open_max_mark_age_ms` (1,000); the engine target/effective-price gate remains active. |
 | 2 | LP matcher | Our matcher is the only LP. LP and trader co-sign `TradeNoCpi` for 10 SOL (about $1.5k, 5% of a deposit) at mark ± 10 bps. The trader alternates open and close, so open interest never exceeds 10 SOL a side. Cranks of both portfolios go first in the same tx when they would land (trades need the asset accrued to the current slot). |
 | 3 | backing manager | Keeps backing buckets on domains 0 (long) and 1 (short): $10k each, expiry `STAGING_BACKING_TENOR_SLOTS` ahead (9_000, about 1 h). In the last quarter of the tenor it rolls: it holds the matcher at flat, withdraws the principal not backing open PnL claims (`WithdrawBackingBucket`), and tops up a new bucket once the old one is `Empty` or `Expired`. |
 | 4 | insurance | `TopUpInsurance` of $10 every `STAGING_INSURANCE_EVERY` (30) ticks. |
@@ -92,7 +92,7 @@ Ctrl-C stops it; the validator is killed on exit and its `ledger/` deleted
 Knobs (environment): `STAGING_HOURS`, `STAGING_TICK_MS`, `STAGING_SEED`,
 `STAGING_BACKING_TENOR_SLOTS`, `STAGING_INSURANCE_EVERY`,
 `STAGING_LIFECYCLE_TICK`, `STAGING_PUSH_HEARTBEAT_SLOTS`,
-`STAGING_PUSH_DEVIATION_BPS`, `STAGING_SUMMARY_EVERY` (100),
+`STAGING_SUMMARY_EVERY` (100),
 `STAGING_MAX_CONSEC_FAIL` (10), `STAGING_TRADE_FEE_BPS` (config `matcher.fee_bps`, 12),
 `STAGING_USDC_MINT` (use an existing mint whose authority is the payer),
 `STAGING_RPC_PORT`, `STAGING_RUN_DIR`. The keeper's own `CRANKER_*` budget and

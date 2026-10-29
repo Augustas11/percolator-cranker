@@ -15,26 +15,32 @@ engine_rev = "4db11a8cb0053815e23a35d3a7d3edc265d8d866"
 # the id of repo-prog/target/deploy/percolator_prog-keypair.json.
 # collateral_mint: a mint address, or "create" for a fresh 6-decimal test USDC
 # mint whose authority is the run's payer (local and devnet only).
-# price_source: "mock" (seeded walk, local) or "pyth" (the on-chain Pyth
-# SOL/USD price account, read over this RPC).
+# price_source: "mock" (local), "exchanges" (devnet public SOL/USD median),
+# or "pyth" (mainnet on-chain price account over RPC). Exchanges is the
+# devnet source until a paid Pyth plan (~$500/month, pre-mainnet decision).
+# Hermes has required a paid key since 2026-08-26.
 [cluster.local]
 rpc = "http://127.0.0.1:8799"
 program_id = ""
 collateral_mint = "create"
 price_source = "mock"
+matcher_ctxs = []
 
 [cluster.devnet]
 rpc = "https://api.devnet.solana.com"
 # Upstream's devnet program; replace with ours to rehearse on our deployment.
 program_id = "Bu1J8eQQN2mNnUgisSEd5StBG6zDaRb7fwDjN34VzgLG"
 collateral_mint = "create"
-price_source = "pyth"
+price_source = "exchanges"
+# Matcher owns LP 6wH2d4CARhEWeGC2deBDb9pVT1a7Tgd48VUiFmkTNAHY; bots never trade on that LP.
+matcher_ctxs = ["GMXktcTjqh8z3h2oCgUnodcLbh6hH4W6YUfL4hZMaXe7"]
 
 [cluster.mainnet]
 rpc = ""                # the paid RPC endpoint
 program_id = ""         # the official program id, set on Day 0
 collateral_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
 price_source = "pyth"
+matcher_ctxs = []
 # Squads vault (2-of-3, ops/KEYS.md): marketauth after the handover. Until
 # then a fresh launch key (keys/launch_authority.json) holds it.
 multisig_vault = ""
@@ -49,6 +55,15 @@ insurance_authority = ""        # the Squads vault
 asset_admin = ""                # cold hardware wallet C
 
 [oracle]
+# Public Coinbase + Kraken, plus Binance when reachable without a key.
+# Binance SOL/USDT is treated as USD. Median of fresh prices, then exclude
+# prices >50 bps from that median and recompute; require 2 usable venues.
+# Lag uses the newest USED exchange event timestamp, never receipt time.
+# No quorum means no push; PusherMarkStale remains the outage alarm.
+exchange_clock_skew_ms = 500
+exchange_max_age_ms = 2000
+exchange_max_dev_bps = 50
+exchange_min_venues = 2
 # Pyth SOL/USD. price_source = "pyth" reads its PriceUpdateV2 account (the
 # sponsored push-oracle account, shard 0, same address on devnet and
 # mainnet) with the wrapper's own parser; a reading older than
@@ -58,21 +73,34 @@ asset_admin = ""                # cold hardware wallet C
 pyth_feed_id = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
 pyth_price_account = "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE"
 pyth_max_age_s = 120
+# Optional read-only RPC for the Pyth price account. Devnet's own copy is
+# minutes stale; mainnet's sponsored SOL/USD account is ~5-10 s fresh, so a
+# devnet pusher with price_source = "pyth" can read it from mainnet (reads
+# only; nothing is ever sent there). Empty = the cluster's own RPC.
+# pyth_rpc = "https://api.mainnet-beta.solana.com"
 pyth_max_conf_bps = 100
 # The money case holds only with the mark within ~400 ms of the market
 # (research/replay/REPORT.md, "Recommended start"). Lag = source price time
 # to push landed; the pusher logs it, the health check and monitor alert on it.
 lag_target_ms = 400
-# One bots tick: the pusher reads the source, then the matcher, backing,
-# insurance and keeper run. Sub-400 ms needs the pusher on its own loop.
+# Main bots tick; the pusher has its own RPC and thread.
 push_interval_ms = 3000
 push_heartbeat_slots = 25
-push_deviation_bps = 10
+push_poll_ms = 400
+accrual_lag_slots = 32
+accrual_max_cranks_per_tx = 10
+push_min_move_bps = 1
+priority_fee_micro_lamports = 10000
+# Local landed PushAuthMark: 6,596 CU including budget instructions; ~2x.
+push_cu_limit = 14000
+# Source publish age, not landing age. Slow sources (e.g. devnet Pyth
+# fallback, ~13 s) refuse opens unless this is raised for that run.
+open_max_mark_age_ms = 1000
 
 # InitMarket. Values and reasoning: docs/OPERATOR_PLAYBOOK.md section 2.
 [market]
 max_portfolio_assets = 1
-initial_price = 150000000        # mock start; on pyth clusters the live price is used
+initial_price = 150000000        # mock start; live sources use their current price
 h_min = 0
 h_max = 150
 min_nonzero_mm_req = 1000
@@ -88,6 +116,7 @@ liquidation_fee_bps = 50
 liquidation_fee_cap = 10000000000
 min_liquidation_abs = 0
 max_price_move_bps_per_slot = 5
+# The engine caps accrual at 32 slots per crank anyway.
 max_accrual_dt_slots = 64
 max_abs_funding_e9_per_slot = 10000
 min_funding_lifetime_slots = 64
@@ -108,8 +137,15 @@ stale_slots = 9000
 force_close_delay_slots = 20
 
 # Off-chain matcher: LP and trader co-sign TradeNoCpi at mark +- spread.
-# Nothing to configure on chain (no TradeCpi matcher program).
+# Pushes also refresh any configured on-chain TradeCpi matcher contexts.
 [matcher]
+program_id = "8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE"
+# REPORT.md: tickets above $100k carry 2.7–4.8 bps adverse selection.
+max_fill_notional_usd = 100000
+# REPORT.md inventory limit (~line 260), ops/CAPITAL_PLAN.md: 10% of
+# $1M daily volume. No on-chain OI cap at this pin: this IS the OI cap.
+# Keep the engine refusal when AuthMark target != effective mark.
+max_lp_inventory_usd = 100000
 size_q = 10000000                # 10 SOL
 spread_bps = 10
 fee_bps = 12                     # >= trade_fee_base_bps (the wrapper refuses less)

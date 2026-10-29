@@ -145,8 +145,22 @@ Not automated:
 
 The money case holds only with the posted mark within about **400 ms** of
 the market (`research/replay/REPORT.md`). Config: `oracle.lag_target_ms`
-(400), `oracle.push_interval_ms` (the bots tick, 3,000), heartbeat and
-deviation.
+(400). The pusher has its own thread and RPC client, polling every
+`oracle.push_poll_ms` (400); it pushes at `push_min_move_bps` (1) or the
+slot heartbeat. `oracle.push_interval_ms` remains the main bots tick (3,000).
+Pushes and accrual use `priority_fee_micro_lamports` (10,000). Pushes use
+`push_cu_limit` (14,000, about 2× the measured 6,596 CU local landed push);
+accrual requests 1,400,000 CU.
+
+The pusher also checks asset-0 accrual each poll. Devnet bot ticks can take
+40–50 seconds, while the engine advances at most 32 slots per crank and
+`PushAuthMark` never accrues. When the gap exceeds `oracle.accrual_lag_slots`
+(default 32), a separate transaction sends up to `oracle.accrual_max_cranks_per_tx`
+(default 10) Live cranks. Crank failures cannot revert a push; the `accrual`
+role logs and counts them without triggering an abnormal exit. Accrual skips
+preflight and polls processed status with a three-second deadline, including
+one retry at half the crank count on `EngineNonProgress`. Trades refuse
+the tick with `accrual_behind` while the snapshot exceeds `oracle.accrual_lag_slots`.
 
 - **Measured lag** = source price time → push landed (processed, polled
   every 50 ms; the push skips preflight). Mock: the time the price was
@@ -154,35 +168,61 @@ deviation.
   slots). Pyth: the account's `publish_time`, whole seconds, so it reads up
   to 1 s high.
 - The pusher logs `{"event":"mark_lag","ms":…}` per push; the monitor
-  exports it as `percolator_keeper_mark_lag_ms` (it reads the bots log) and
-  `monitor/alerts.yml` alerts `PusherMarkLagHigh` above 400 ms for 5 min.
+  exports `percolator_keeper_mark_lag_ms` and rolling nearest-rank
+  `percolator_keeper_mark_lag_p50_ms` / `percolator_keeper_mark_lag_p95_ms`
+  over the last 300 pushes. `PusherMarkLagHigh` alerts on p95 > 400 ms for 5 min.
   The lag gauge keeps its last value if pushes stop, so the monitor also
   exports `percolator_keeper_mark_push_age_seconds` (from the event's
   `at_ms`), and `PusherMarkStale` fires when no push has landed for 2 min.
   The health check prints p50 and max over 5 pushes; over target it warns
   (`LAUNCH_LAG_STRICT=1` fails).
-- **Price source:** `price_source = "pyth"` (devnet, mainnet) reads the
-  Pyth SOL/USD PriceUpdateV2 account (`oracle.pyth_price_account`) over the
-  same RPC and parses it with the wrapper's own reader (owner, feed id, age
-  `pyth_max_age_s`, confidence `pyth_max_conf_bps`); no new dependency.
-  `"mock"` (local) keeps the seeded walk. Tested locally against devnet's
-  account cloned into the validator; not run on devnet.
-- **That source is too slow for the money case.** Devnet's sponsored
-  SOL/USD account was ~70 s old when checked (2026-10-29). The low-latency
-  path is Hermes (what upstream's `pyth-push-devnet.ts` reads), and Hermes'
-  price endpoint now answers 401 without an API key. Next small PR: a Hermes
-  (with key) or Pyth Lazer source behind `source_price`; mainnet needs it.
-- **Sub-400 ms needs the pusher on its own loop.** One bots tick runs all
-  roles; a faster tick also speeds the matcher, backing and keeper.
+- **Price source:** `price_source = "exchanges"` is the devnet default until
+  a paid Pyth plan exists (about $500/month, a pre-mainnet owner decision).
+  Hermes has required a paid key since 2026-08-26. One reconnecting thread
+  per venue reads public Coinbase Exchange SOL-USD ticker, Kraken v2 SOL/USD
+  trades, and Binance SOLUSDT trades when reachable without a key. Binance
+  USDT is treated as USD, without conversion. No exchange keys are used.
+  `oracle.exchange_max_age_ms` (2,000) rejects stale exchange event timestamps;
+  future timestamps tolerate `exchange_clock_skew_ms` (500 ms). Prices farther than `exchange_max_dev_bps` (50)
+  from the median of all fresh venues are excluded; the remaining median
+  (midpoint for two) needs `exchange_min_venues` (2). Missing quorum skips
+  pushes without counting a push failure; `PusherMarkStale` catches staleness.
+  Dropped venues and reasons log only when the filter state changes.
+  Lag runs from the **newest exchange timestamp among venues used** to push
+  landed, not from local receipt time. It does not represent every venue's age.
+- `"mock"` remains local's seeded walk; mainnet stays `"pyth"`, reading the
+  SOL/USD PriceUpdateV2 account (`oracle.pyth_price_account`) over RPC with
+  owner, feed, age and confidence checks. The sponsored account was ~70 s old
+  when checked (2026-10-29), too slow for the money case.
+  `PriceSource::latest` remains the extension boundary for a later paid Hermes
+  source; no Hermes client is built here.
+- **Check prices without a chain:**
+  `staging/target/release/staging prices launch/sol-perp.toml devnet` prints
+  once per second: price e6, exchange publish time, age in ms, venues used,
+  and their high-low spread in bps relative to the median (or a quorum error).
+  It loads no keys, opens no RPC connection and submits no transactions.
+  Stop with Ctrl-C. Public feed formats:
+  [Coinbase ticker](https://docs.cdp.coinbase.com/exchange/websocket-feed/channels),
+  [Kraken trades](https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/trade),
+  [Binance trades](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams).
 - **The matcher refuses fills while the mark lags; keep it.** The engine
   refuses a risk-increasing trade while an asset's AuthMark target differs
   from its effective price (`trade_preflight_risk_gate`, engine `v16.rs`
   16153, `asset_has_target_effective_lag` 16013). The matcher never works
-  around it: it opens only right after a push and with the asset cranked to
-  the current slot in the same tx, and the mock pusher keeps each step
+  around it: an open requires the last landed push's source publish age to be
+  at most `oracle.open_max_mark_age_ms` (1,000), equal target/effective prices,
+  and the asset cranked to the current slot in the same tx, and the mock pusher keeps each step
   inside `max_price_move_bps_per_slot`. With Pyth a larger move leaves the
   effective price walking behind, and opens are refused until it catches up.
   Do not remove this.
+- **Matcher caps:** `max_fill_notional_usd` and `max_lp_inventory_usd` are
+  both $100,000, valued at max(effective price, target price). The LP co-signs
+  every fill; refusals log `trade=refused(reason)`
+  without counting as failures. Inventory-reducing fills may exceed the inventory
+  cap, but every fill must meet the ticket cap. REPORT.md finds 2.7–4.8 bps adverse
+  selection above $100k; its inventory limit and `ops/CAPITAL_PLAN.md` set inventory
+  at 10% of $1M/day. There is no on-chain OI cap at this pin: this matcher cap
+  is the OI cap for fills it signs.
 
 ## Drill
 
@@ -263,3 +303,32 @@ One server; `deploy/`:
   code). The `drip` binary itself boots its own market on 127.0.0.1:8899 at
   this pin, so it cannot crank an existing market; changing that would change
   the keeper.
+
+**Fallback source on hosts that can't reach the exchanges.** Some networks
+block the exchange endpoints; this one does at the ISP. Set
+`price_source = "pyth"` with `oracle.pyth_rpc` pointing at a mainnet RPC.
+The pusher then reads mainnet's sponsored Pyth SOL/USD account, read-only,
+and pushes it on devnet. It's real Pyth, but about 5–10 s behind (Pyth's
+sponsored update cadence), so it only keeps a devnet market live; it says
+nothing about the 400 ms target. That's what the devnet market ran on
+after the 2026-10-29 relist.
+
+## Key layout (owner decision, 2026-10-29)
+
+One key, one job. Every key lives in the run dir's `keys/` (mode 0600), and no other
+process signs with them.
+
+| Key | Holds | Signs |
+|---|---|---|
+| payer | SOL for fees and rent; test-USDC mint authority on local and devnet | fees, rent, the faucet |
+| launch key (`launch_authority` on mainnet, `admin` on local and devnet) | `marketauth` from create and init until the handover | setup steps 1-5, then the handover |
+| multisig (Squads vault; `multisig.json` stand-in on local and devnet) | `marketauth` after the handover | resolve, policies, close |
+| oracle (`oracle_authority`) | asset 0 oracle role; the matcher's price authority | ONLY the pusher: `PushAuthMark` plus `UpdateRef` in the same tx |
+| bots' LP owner (`lp`) | the bots' LP portfolio (no matcher binding) | the bots' co-signed `TradeNoCpi` fills |
+| matcher LP owner (`matcher_lp_owner`) | the matcher's own LP portfolio, bound to the matcher ctx | `SetMatcherConfig` on that portfolio only |
+| trader (`trader`, local and devnet only) | the bots' test taker | test fills |
+| insurance and backing role keys, asset admin | their asset 0 roles after the handover | their bots, or the owner |
+
+The bots never trade or co-sign on the matcher's LP. A `TradeNoCpi` on it would
+bump its position epoch and revoke the matcher's capability. The hedger nets
+both LPs.

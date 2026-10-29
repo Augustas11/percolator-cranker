@@ -162,3 +162,18 @@ Multi-asset listing (ACTIVATE / RETIRE; asset 0 cannot be retired), the
 market-wide Recovery mode (entered only by the engine), `ForceCloseAbandonedAsset`,
 `CloseSlab` teardown, and Hybrid (direct Pyth) oracles: staging does not
 exercise them.
+
+### Matcher size limits
+
+`launch/sol-perp.toml` caps each co-signed fill at $100,000 and absolute LP
+inventory at $100,000. Both caps value at max(effective price, target price).
+REPORT.md measures 2.7–4.8 bps adverse selection on tickets above $100k; its inventory rule (~line 260)
+and `ops/CAPITAL_PLAN.md` use 10% of daily volume ($100k at $1M/day).
+Inventory reductions remain allowed above the inventory cap, subject to the
+single-fill cap. This is the OI cap at this pin, which has no on-chain OI cap.
+The engine's AuthMark target/effective-price refusal remains in force; opens
+also require the source publish age of the last landed push within
+`oracle.open_max_mark_age_ms` (1,000 ms). Missing exchange quorum skips pushes
+without counting a push failure; `PusherMarkStale` catches staleness. Future
+exchange timestamps tolerate `exchange_clock_skew_ms` (500 ms).
+Refusals appear as `trade=refused(reason)` and are not transaction failures.

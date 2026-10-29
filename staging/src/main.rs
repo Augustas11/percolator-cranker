@@ -5,10 +5,10 @@
 //!
 //! Setup: test USDC mint, market (InitMarket, one asset), permissionless
 //! resolve policy, ConfigureAuthMark, an LP and a trader portfolio with
-//! deposits. Then one tick every `STAGING_TICK_MS`:
+//! deposits. A dedicated price thread runs beside the main bots tick:
 //!
 //! 1. price pusher: `PushAuthMark` of the price source (`mock_sol_usd`) on a
-//!    heartbeat or a deviation;
+//!    heartbeat or a deviation, polling every `oracle.push_poll_ms`;
 //! 2. LP matcher: LP and trader co-sign `TradeNoCpi` at mark +- a fixed
 //!    spread; the trader alternates open and close, so |position| <= one size;
 //! 3. backing manager: keeps domains 0 and 1 funded; before expiry it
@@ -39,7 +39,7 @@ use drip::{
     setup,
     submit::{self, CrankRoute, OutcomeClass},
 };
-use percolator::{BackingBucketStatusV16 as Bucket, MarketModeV16, BOUND_SCALE};
+use percolator::{BackingBucketStatusV16 as Bucket, MarketModeV16, BOUND_SCALE, AssetStateV16, PortfolioLegV16Account, MIN_A_SIDE, ADL_ONE};
 use percolator_prog::{
     ix::Instruction as P,
     processor::ASSET_ACTION_SHUTDOWN,
@@ -59,6 +59,7 @@ use solana_sdk::{
 use std::{env, str::FromStr, time::Duration, time::Instant};
 
 mod launch;
+mod pusher;
 use launch::Config;
 
 /// Params (market, amounts, matcher, oracle): `launch/sol-perp.toml`.
@@ -75,6 +76,28 @@ enum Phase {
     Resolved,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RejectKind {
+    Program,
+    Transport,
+}
+
+/// How a keeper crank outcome counts toward the abnormal exit. Only
+/// Failed-class rejects count: e.g. EngineNonProgress is a HardReject the
+/// keeper classes Idle (nothing to do). The keeper records a HardReject only
+/// for a definitive outcome (preflight rejected, or executed and failed), so
+/// it is a program failure by structure, not by error text, except
+/// "Blockhash not found", a cluster/RPC condition that also arrives as a
+/// rejected preflight.
+fn reject_kind(o: &submit::CrankOutcome) -> Option<RejectKind> {
+    match o {
+        submit::CrankOutcome::HardReject { error, .. } if o.class() == OutcomeClass::Failed => {
+            Some(if error.contains("Blockhash not found") { RejectKind::Transport } else { RejectKind::Program })
+        }
+        _ => None,
+    }
+}
+
 fn env_or<T: FromStr>(key: &str, default: T) -> T {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -88,12 +111,20 @@ fn short(e: &anyhow::Error) -> String {
         .unwrap_or_else(|| msg.chars().take(120).collect())
 }
 
-#[derive(Default)]
+// Keeper records preserve the standard Solana instruction-error text even
+// when a program code is unknown to drip. Blockhash/RPC failures do not.
+fn is_program_error(error: &str) -> bool {
+    error.contains("Error processing Instruction ") || error.contains("InstructionError(")
+        || error.contains("\"InstructionError\"")
+}
+
+#[derive(Default, Clone)]
 struct Role {
     ok: u64,
     fail: u64,
     consec: u64,
     max_consec: u64,
+    transport_errors: u64,
 }
 
 impl Role {
@@ -117,7 +148,7 @@ impl Role {
     }
 
     fn json(&self) -> String {
-        format!("{{\"ok\":{},\"fail\":{},\"max_consec_fail\":{}}}", self.ok, self.fail, self.max_consec)
+        format!("{{\"ok\":{},\"fail\":{},\"max_consec_fail\":{},\"transport_errors\":{}}}", self.ok, self.fail, self.max_consec, self.transport_errors)
     }
 
     fn abnormal(&self, max_consec: u64) -> bool {
@@ -139,8 +170,9 @@ struct Staging {
     oracle_kp: Keypair,
     backing_kp: Option<Keypair>,
     insurance_kp: Option<Keypair>,
-    /// Price source: this Pyth feed (SOL/USD) when set, else the seeded mock.
+    /// Live source configuration; neither set means the seeded local mock.
     pyth_feed: Option<[u8; 32]>,
+    exchanges: Option<pusher::Exchanges>,
     /// Bots mode: also print drip-format crank lines and `mark_lag` events,
     /// which the monitor reads from this log.
     keeper_log: bool,
@@ -160,9 +192,9 @@ struct Staging {
     /// Last price-source reading, and the last mark pushed on-chain.
     feed: u64,
     mark: u64,
-    last_push_slot: u64,
     push_heartbeat_slots: u64,
-    push_deviation_bps: u64,
+    matcher_ctxs: Vec<String>,
+    pushed: Option<std::sync::Arc<std::sync::Mutex<pusher::Shared>>>,
     /// The trader's open size, as the matcher last left it.
     open: Option<i128>,
     /// A backing roll is due: the matcher stays flat until it is done.
@@ -317,6 +349,7 @@ impl Staging {
             insurance_kp: Some(admin.insecure_clone()),
             admin,
             pyth_feed: None,
+            exchanges: None,
             keeper_log: false,
             mint,
             own_mint,
@@ -332,9 +365,9 @@ impl Staging {
             rng: env_or("STAGING_SEED", 42u64),
             feed: cfg.market.initial_price,
             mark: cfg.market.initial_price,
-            last_push_slot: 0,
             push_heartbeat_slots: env_or("STAGING_PUSH_HEARTBEAT_SLOTS", o.push_heartbeat_slots),
-            push_deviation_bps: env_or("STAGING_PUSH_DEVIATION_BPS", o.push_deviation_bps),
+            matcher_ctxs: cfg.cluster.get("local").map(|c| c.matcher_ctxs.clone()).unwrap_or_default(),
+            pushed: None,
             open: None,
             rolling: false,
             tenor: env_or("STAGING_BACKING_TENOR_SLOTS", cfg.amounts.backing_tenor_slots),
@@ -457,7 +490,6 @@ impl Staging {
         }
         if !ixs.is_empty() {
             self.send_admin("ConfigureOracle", &ixs)?;
-            self.last_push_slot = now;
         }
         Ok(())
     }
@@ -465,91 +497,49 @@ impl Staging {
     // ------------------------------------------------------------ roles
 
     /// The pusher's price source: SOL/USD e6 and its timestamp (unix ms).
-    /// Pyth (on-chain price account, `launch::pyth_sol_usd`) when configured;
+    /// Exchanges or Pyth (on-chain account) when configured;
     /// else a seeded mock path, one step of at most `max_bps`, kept within
     /// +-5% of the configured initial price, timestamped when generated.
     fn source_price(&mut self, max_bps: u64) -> Result<(u64, u64)> {
-        if let Some(feed) = &self.pyth_feed {
-            return launch::pyth_sol_usd(&self.rpc, feed, &self.cfg.oracle);
-        }
-        let p0 = self.cfg.market.initial_price;
-        let step = (self.next_rand() % (2 * max_bps + 1)) as i128 - max_bps as i128;
-        let next = self.feed as i128 * (10_000 + step) / 10_000;
-        self.feed = (next as u64).clamp(p0 * 95 / 100, p0 * 105 / 100);
-        Ok((self.feed, launch::now_ms()))
-    }
-
-    /// `force`: the matcher opens this tick; a risk-increasing fill is
-    /// refused (EngineLockActive) unless the mark was pushed just before.
-    fn push_price(&mut self, force: bool) -> Result<Option<String>> {
-        let (_, g, s) = self.read()?;
-        let now = self.rpc.get_slot()?;
-        // The effective price walks at most max_price_move_bps_per_slot
-        // toward the mark; the mock keeps each step inside what it can follow.
-        let max_bps = (g.config.max_price_move_bps_per_slot * now.saturating_sub(self.last_push_slot).max(1)).min(50);
-        let (mark, source_ms) = self.source_price(max_bps)?;
-        // Push rule of Pyth's price_pusher (pattern only): push when the
-        // heartbeat has elapsed or the price moved past the deviation.
-        let moved_bps = mark.abs_diff(self.mark) * 10_000 / self.mark;
-        if !force && now.saturating_sub(self.last_push_slot) < self.push_heartbeat_slots && moved_bps < self.push_deviation_bps {
-            return Ok(None);
-        }
-        // Mirrors v16_svm.rs `push_auth_mark` (upstream test support).
-        let ix = P::PushAuthMark {
-            asset_index: 0,
-            market_id: g.assets[0].market_id,
-            now_slot: now,
-            mark_e6: mark,
-            observation_sequence: s.oracle_observation + 1,
-            authority_epoch: s.authority_epoch,
+        if let Some(source) = &mut self.exchanges { return source.latest().map(|r| (r.price, r.publish_time_ms)); }
+        let mut source = match self.pyth_feed {
+            Some(feed) => pusher::PriceSource::Pyth {
+                rpc: RpcClient::new_with_commitment(launch::pyth_rpc_url(&self.cfg.oracle, &self.rpc.url()), CommitmentConfig::confirmed()),
+                feed, cfg: self.cfg.oracle.clone(),
+            },
+            None => pusher::PriceSource::Mock {
+                price: self.feed, initial: self.cfg.market.initial_price, rng: self.rng, max_bps,
+            },
         };
-        // Mark lag: source price time to the push landing (processed, polled
-        // every 50 ms); then wait for confirmed as the other roles do.
-        // No preflight: one RPC round trip less on the latency path; a
-        // failed push still surfaces through its status below.
-        let tx = self.tx(&[self.prog_ix(ix, self.role_metas(&self.oracle_kp))], &[&self.oracle_kp])?;
-        let no_preflight = RpcSendTransactionConfig { skip_preflight: true, ..Default::default() };
-        let sig = self.rpc.send_transaction_with_config(&tx, no_preflight)?;
-        let mut lag = None;
-        let t0 = Instant::now();
-        loop {
-            let st = self.rpc.get_signature_status_with_commitment(&sig, CommitmentConfig::processed())?;
-            if let Some(r) = st {
-                r?;
-                lag.get_or_insert(launch::now_ms().saturating_sub(source_ms));
-                if self.rpc.confirm_transaction(&sig)? {
-                    break;
-                }
-            }
-            if t0.elapsed() > Duration::from_secs(30) {
-                bail!("PushAuthMark {sig} not confirmed in 30 s");
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        let reading = source.latest()?;
+        if let pusher::PriceSource::Mock { price, rng, .. } = source {
+            self.feed = price;
+            self.rng = rng;
         }
-        let lag = lag.unwrap_or_default();
-        if self.keeper_log {
-            println!(
-                "{{\"event\":\"mark_lag\",\"ms\":{lag},\"target_ms\":{},\"at_ms\":{}}}",
-                self.cfg.oracle.lag_target_ms,
-                launch::now_ms()
-            );
-        }
-        self.mark = mark;
-        self.last_push_slot = now;
-        Ok(Some(format!("ok({lag}ms)")))
+        Ok(reading)
     }
 
-    fn match_trade(&mut self) -> Result<Option<String>> {
+    fn match_trade(&mut self, lifecycle: &std::sync::Mutex<()>) -> Result<Option<String>> {
         if self.trader_pf == Pubkey::default() {
             return Ok(None); // no test trader (mainnet)
         }
-        let (data, g, _) = self.read()?;
+        // Match the pusher's processed confirmation, including the preceding
+        // push, and keep market/LP in one snapshot through trade confirmation.
+        let _in_flight = lifecycle.lock().unwrap();
+        let snapshot = self.rpc.get_multiple_accounts_with_commitment(
+            &[self.market, self.lp_pf], CommitmentConfig::processed(),
+        )?;
+        let data = &snapshot.value[0].as_ref().context("market missing")?.data;
+        let (_, g) = read_market(data).map_err(|e| anyhow!("{e:?}"))?;
         if self.rolling && self.open.is_none() {
             return Ok(None);
         }
         // A bucket just past expiry refuses fills (EngineStale) until the
         // keeper's crank of a claim holder expires it: skip this tick.
         let now = self.rpc.get_slot()?;
+        if now.saturating_sub(g.assets[0].slot_last) > self.cfg.oracle.accrual_lag_slots {
+            return Ok(Some("refused(accrual_behind)".into()));
+        }
         if g.source_backing_buckets[..2].iter().any(|b| b.status == Bucket::Fresh && b.expiry_slot <= now) {
             return Ok(None);
         }
@@ -560,7 +550,20 @@ impl Staging {
             None if coin => self.cfg.matcher.size_q as i128,
             None => -(self.cfg.matcher.size_q as i128),
         };
+        if self.open.is_none() {
+            let fresh = self.pushed.as_ref().is_some_and(|p| {
+                let p = p.lock().unwrap();
+                p.market == self.market && p.published_ms.is_some_and(|at| launch::now_ms().saturating_sub(at) <= self.cfg.oracle.open_max_mark_age_ms)
+            });
+            if !fresh { return Ok(Some("refused(stale_mark)".into())); }
+        }
         let mark = g.assets[0].effective_price;
+        let lp_data = &snapshot.value[1].as_ref().context("LP portfolio missing")?.data;
+        let lp = read_portfolio(lp_data).map_err(|e| anyhow!("{e:?}"))?;
+        let lp_position = net_q(&lp.legs, 0, &g.assets[0])?;
+        if let Err(reason) = fill_allowed(q, mark, g.assets[0].raw_oracle_target_price, lp_position, &self.cfg.matcher) {
+            return Ok(Some(format!("refused({reason})")));
+        }
         let half = mark * self.cfg.matcher.spread_bps / 10_000;
         let price = if q > 0 { mark + half } else { mark - half };
         let tb = binding::portfolio_binding(&self.rpc.get_account_data(&self.trader_pf)?)?;
@@ -587,7 +590,14 @@ impl Staging {
                 AccountMeta::new(self.lp_pf, false),
             ],
         ));
-        self.send(&ixs, &[&self.trader, &self.lp])?;
+        if let Err(error) = self.send(&ixs, &[&self.trader, &self.lp]) {
+            // The snapshot can already have target/effective lag; the engine
+            // still refuses the fill.
+            if short(&error) == "EngineLockActive" {
+                return Ok(Some("refused(target_effective_lag)".into()));
+            }
+            return Err(error);
+        }
         self.open = if self.open.is_some() { None } else { Some(q) };
         Ok(Some(format!("{}{}", if q > 0 { "+" } else { "-" }, q.unsigned_abs())))
     }
@@ -816,7 +826,8 @@ fn real_main() -> Result<()> {
         Some("step") => launch::step_main(&args[1..]),
         Some("bots") => run(launch::bots(&args[1..])?, true),
         Some("roles") => launch::roles_main(&args[1..]),
-        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles] <config> <cluster> <run dir>"),
+        Some("prices") => pusher::prices(&args[1..]),
+        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles | prices] <config> <cluster> <run dir>"),
     }
 }
 
@@ -857,10 +868,14 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         println!("market            = {}", st.market);
     }
 
+    let (pushed, push_lifecycle, pusher_thread) = pusher::start(&st)?;
+    st.pushed = Some(std::sync::Arc::clone(&pushed));
     let budget = CycleBudget::from_env();
     let mut quarantine = Quarantine::new(QuarantineConfig::from_env());
     let mut cu = CuStats::default();
-    let (mut push, mut trade, mut backing, mut insurance) = (Role::default(), Role::default(), Role::default(), Role::default());
+    let mut push;
+    let mut accrual;
+    let (mut trade, mut backing, mut insurance) = (Role::default(), Role::default(), Role::default());
     let mut lifecycle = Role::default();
     // Default: halfway through the run. 0 turns the lifecycle off.
     let lifecycle_tick: u64 = if bots { 0 } else { env_or("STAGING_LIFECYCLE_TICK", (hours * 1_800_000.0 / tick_ms as f64) as u64) };
@@ -872,6 +887,11 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
     while Instant::now() < deadline && !abnormal {
         tick += 1;
         let t0 = Instant::now();
+        let transitioning = st.phase != Phase::Live
+            || (lifecycle_tick != 0 && tick >= lifecycle_tick && !st.relisted);
+        let in_flight = if transitioning { Some(push_lifecycle.lock().unwrap()) } else { None };
+        let mut push_state = pushed.lock().unwrap();
+        st.mark = push_state.mark;
         let l = lifecycle.record(match st.phase {
             // From its tick on, SHUTDOWN is retried until it lands.
             Phase::Live if lifecycle_tick != 0 && tick >= lifecycle_tick && !st.relisted => st.shutdown(),
@@ -880,8 +900,20 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
             Phase::Live => Ok(None),
         });
         let live = st.phase == Phase::Live;
-        let p = if live { push.record(st.push_price(st.open.is_none() && !st.rolling)) } else { "-".into() };
-        let t = if live { trade.record(st.match_trade()) } else { "-".into() };
+        push_state.live = live;
+        push_state.portfolio = st.lp_pf;
+        if push_state.market != st.market {
+            push_state.market = st.market;
+            push_state.mark = st.mark;
+            push_state.landed_ms = None;
+            push_state.published_ms = None;
+        }
+        push = push_state.role.clone();
+        accrual = push_state.accrual.clone();
+        drop(push_state);
+        drop(in_flight);
+        let p = "thread";
+        let t = if live { trade.record(st.match_trade(&push_lifecycle)) } else { "-".into() };
         let b = if live { backing.record(st.manage_backing()) } else { "-".into() };
         let i = if live && tick % insurance_every == 0 { insurance.record(st.top_up_insurance(st.cfg.amounts.insurance_topup)) } else { "-".into() };
 
@@ -898,35 +930,64 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         // Inside the force-close delay after SHUTDOWN, cranks of the
         // shut-down asset are refused (EngineLockActive): the keeper waits
         // for the resolve on the next tick.
-        let k = if st.phase == Phase::Recovery { "-".into() } else { keeper.role.record(
-            cycle::run_one_cycle(&ctx, tick, &budget, &mut quarantine, &mut records, &mut cu).and_then(|s| {
-                keeper.progressed += s.progressed as u64;
-                keeper.idle += s.idle as u64;
-                keeper.failed += s.failed as u64;
-                if st.keeper_log {
-                    launch::print_keeper_lines(&records, &s.line());
+        let k = if st.phase == Phase::Recovery { "-".into() } else {
+            let result = cycle::run_one_cycle(&ctx, tick, &budget, &mut quarantine, &mut records, &mut cu);
+            // Records retain failed txs even when the cycle also made progress.
+            // The keeper only records a HardReject for a DEFINITIVE outcome
+            // (preflight rejected, or the tx executed and failed), so every
+            // one is a program failure, decided by its structure, not by its
+            // error text. The one exception is "Blockhash not found": a
+            // cluster/RPC condition that also arrives as a rejected preflight.
+            let program_failures = records.iter().filter(|r| reject_kind(&r.outcome) == Some(RejectKind::Program)).count();
+            let rejected_transport = records.iter().filter(|r| {
+                let t = reject_kind(&r.outcome) == Some(RejectKind::Transport);
+                if t { if let submit::CrankOutcome::HardReject { error, .. } = &r.outcome { eprintln!("keeper transport: {}", launch::scrub(error)); } }
+                t
+            }).count();
+            let mut transport_errors = rejected_transport;
+            let result = match result {
+                Ok(s) => {
+                    keeper.progressed += s.progressed as u64;
+                    keeper.idle += s.idle as u64;
+                    keeper.failed += program_failures as u64;
+                    let rpc_failures: Vec<_> = s.failures.iter().filter(|(_, e)| e.starts_with("Rpc:")).collect();
+                    transport_errors += s.unconfirmed.len() + s.drain_rpc_errors.len() + rpc_failures.len();
+                    if !s.unconfirmed.is_empty() || !s.drain_rpc_errors.is_empty() || !rpc_failures.is_empty() {
+                        eprintln!("keeper transport: unconfirmed={:?}, rpc={rpc_failures:?}, after_progress={:?}", s.unconfirmed, s.drain_rpc_errors);
+                    }
+                    if st.keeper_log { launch::print_keeper_lines(&records, &s.line()); }
+                    if program_failures > 0 {
+                        Err(anyhow!("{program_failures} failed program txs: {:?}", s.failures))
+                    } else if s.progressed + s.idle == 0 && transport_errors > 0 {
+                        // Transport-only cycle: neither a success nor a failure,
+                        // so it can't reset or dilute the failure accounting.
+                        Ok(None)
+                    } else {
+                        Ok(Some(format!("p{}/i{}", s.progressed, s.idle)))
+                    }
                 }
-                // A failed crank tx or an RPC error inside an attempt that
-                // also progressed is classed Progress by the keeper; staging
-                // still counts it as a keeper failure.
-                let failed_txs = records.iter().filter(|r| r.outcome.class() == OutcomeClass::Failed).count();
-                if s.failed > 0 || failed_txs > 0 || !s.unconfirmed.is_empty() || !s.drain_rpc_errors.is_empty() {
-                    bail!(
-                        "{} failed ({failed_txs} failed txs), {} unconfirmed, rpc after progress {:?}: {:?}",
-                        s.failed,
-                        s.unconfirmed.len(),
-                        s.drain_rpc_errors,
-                        s.failures
-                    );
+                Err(e) => {
+                    if program_failures > 0 || is_program_error(&format!("{e:#}")) {
+                        keeper.failed += program_failures.max(1) as u64;
+                        Err(e)
+                    } else {
+                        transport_errors += 1;
+                        eprintln!("keeper transport: {}", short(&e));
+                        Ok(None)
+                    }
                 }
-                Ok(Some(format!("p{}/i{}", s.progressed, s.idle)))
-            }),
-        ) };
+            };
+            if transport_errors > 0 {
+                keeper.role.transport_errors += transport_errors as u64;
+                eprintln!("keeper: {transport_errors} transport errors (excluded from abnormal exit)");
+            }
+            keeper.role.record(result)
+        };
         let l = if l == "-" { String::new() } else { format!(" lifecycle={l}") };
-        println!("t{tick} SOL={} push={p} trade={t} backing={b} insurance={i} keeper={k}{l}", st.mark);
+        println!("t{tick} SOL={} push={p} accrual={} trade={t} backing={b} insurance={i} keeper={k}{l}", st.mark, accrual.json());
 
-        let roles = [("push", &push), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
-        abnormal = roles.iter().any(|(_, r)| r.abnormal(max_consec)) || keeper.role.abnormal(max_consec);
+        let roles = [("push", &push), ("accrual", &accrual), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
+        abnormal = roles.iter().any(|(name, r)| *name != "accrual" && r.abnormal(max_consec)) || keeper.role.abnormal(max_consec);
         if tick % summary_every == 0 {
             println!("{}", summary(tick, started, &st, &roles, &keeper, false));
         }
@@ -934,7 +995,12 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
             std::thread::sleep(rest);
         }
     }
-    let roles = [("push", &push), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
+    pushed.lock().unwrap().stop = true;
+    pusher_thread.join().map_err(|_| anyhow!("pusher thread panicked"))?;
+    push = pushed.lock().unwrap().role.clone();
+    accrual = pushed.lock().unwrap().accrual.clone();
+    abnormal |= push.abnormal(max_consec);
+    let roles = [("push", &push), ("accrual", &accrual), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
     println!("{}", summary(tick, started, &st, &roles, &keeper, true));
     if abnormal {
         eprintln!("staging: ABNORMAL failure rate, see the summary");
@@ -946,4 +1012,138 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
     }
     println!("staging: OK");
     Ok(())
+}
+
+// Effective signed quantity, copied from hedger/src/chain.rs::net_q.
+fn net_q(legs: &[PortfolioLegV16Account], asset: usize, a: &AssetStateV16) -> Result<i128> {
+    let mut net = 0i128;
+    for l in legs.iter().filter(|l| l.active != 0 && l.asset_index.get() as usize == asset) {
+        let (current_a, epoch, sign) = match l.side {
+            0 => (a.a_long, a.epoch_long, 1),
+            1 => (a.a_short, a.epoch_short, -1),
+            s => bail!("unknown leg side {s}"),
+        };
+        let epoch_snap = l.epoch_snap.get();
+        if epoch_snap < epoch {
+            continue;
+        }
+        if epoch_snap > epoch {
+            bail!("leg epoch {epoch_snap} ahead of asset epoch {epoch}");
+        }
+        let (raw, basis) = (l.basis_pos_q.get().unsigned_abs(), l.a_basis.get());
+        if !(MIN_A_SIDE..=ADL_ONE).contains(&basis) || !(1..=basis).contains(&current_a) {
+            bail!("leg A index out of range");
+        }
+        let prod = raw.checked_mul(current_a).context("effective quantity overflow")?;
+        let eff = prod.div_ceil(basis);
+        net += sign * i128::try_from(eff).context("effective quantity exceeds i128")?;
+    }
+    Ok(net)
+}
+
+/// size_q is the trader delta; the LP takes its opposite. Compare full
+/// products so one atom above a dollar limit cannot disappear in rounding.
+fn fill_allowed(size_q: i128, effective_price: u64, target_price: u64, lp_position_q: i128, cfg: &launch::MatcherCfg) -> Result<(), &'static str> {
+    let mark_e6 = effective_price.max(target_price);
+    let next = lp_position_q.checked_sub(size_q).ok_or("inventory_overflow")?;
+    let notional = size_q.unsigned_abs().checked_mul(mark_e6 as u128).ok_or("notional_overflow")?;
+    if notional > cfg.max_fill_notional_usd as u128 * 1_000_000_000_000 {
+        return Err("max_fill_notional");
+    }
+    if next.unsigned_abs() <= lp_position_q.unsigned_abs() { return Ok(()); }
+    let inventory = next.unsigned_abs().checked_mul(mark_e6 as u128).ok_or("inventory_overflow")?;
+    if inventory > cfg.max_lp_inventory_usd as u128 * 1_000_000_000_000 {
+        return Err("max_lp_inventory");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+    #[test]
+    fn keeper_transport_vs_program_errors() {
+        for error in ["Error processing Instruction 3: custom program error: 0x17",
+            "TransactionError(InstructionError(3, ComputationalBudgetExceeded))",
+            r#"{"InstructionError":[3,{"Custom":23}]}"#] {
+            assert!(is_program_error(error), "{error}");
+        }
+        for error in ["-32002: Transaction simulation failed: Blockhash not found",
+            "request timed out", "error sending request", "unable to confirm transaction"] {
+            assert!(!is_program_error(error), "{error}");
+        }
+        let role = Role { transport_errors: 100, ..Role::default() };
+        assert!(!role.abnormal(5));
+        assert!(role.json().contains("\"transport_errors\":100"));
+    }
+
+    fn cfg() -> launch::MatcherCfg {
+        launch::MatcherCfg { program_id: Pubkey::new_unique().to_string(), size_q: 1, spread_bps: 10, fee_bps: 12, max_fill_notional_usd: 100_000, max_lp_inventory_usd: 100_000 }
+    }
+    #[test]
+    fn cap_uses_higher_price() {
+        assert_eq!(fill_allowed(1_000_000_000, 100_000_000, 100_000_001, 0, &cfg()), Err("max_fill_notional"));
+        assert_eq!(fill_allowed(1_000_000_000, 100_000_001, 100_000_000, 0, &cfg()), Err("max_fill_notional"));
+        assert_eq!(fill_allowed(-1, 100_000_000, 100_000_001, 999_999_999, &cfg()), Err("max_lp_inventory"));
+    }
+    #[test]
+    fn scaled_and_reset_inventory() {
+        use percolator::{V16PodI128, V16PodU128, V16PodU32, V16PodU64};
+        let mut a = AssetStateV16::default();
+        a.a_long = ADL_ONE / 2;
+        a.epoch_long = 2;
+        a.a_short = ADL_ONE;
+        a.epoch_short = 3;
+        let leg = PortfolioLegV16Account {
+            active: 1, asset_index: V16PodU32::new(0), side: 0,
+            basis_pos_q: V16PodI128::new(5), a_basis: V16PodU128::new(ADL_ONE),
+            epoch_snap: V16PodU64::new(2), ..Default::default()
+        };
+        let mut reset = leg;
+        reset.side = 1;
+        assert_eq!(net_q(&[leg, reset], 0, &a).unwrap(), 3); // ceil(5 / 2), reset short contributes zero
+        reset.epoch_snap = V16PodU64::new(3);
+        assert_eq!(net_q(&[leg, reset], 0, &a).unwrap(), -2);
+    }
+    #[test]
+    fn fill_limit_exact_and_one_atom_over() {
+        assert_eq!(fill_allowed(1_000_000_000, 100_000_000, 100_000_000, 0, &cfg()), Ok(()));
+        assert_eq!(fill_allowed(1_000_000_001, 100_000_000, 100_000_000, 0, &cfg()), Err("max_fill_notional"));
+    }
+    #[test]
+    fn inventory_limit_and_reduction() {
+        assert_eq!(fill_allowed(-1, 100_000_000, 100_000_000, 999_999_999, &cfg()), Ok(()));
+        assert_eq!(fill_allowed(-1, 100_000_000, 100_000_000, 1_000_000_000, &cfg()), Err("max_lp_inventory"));
+        assert_eq!(fill_allowed(1, 100_000_000, 100_000_000, 2_000_000_000, &cfg()), Ok(()));
+        assert_eq!(fill_allowed(-1, 100_000_000, 100_000_000, -2_000_000_000, &cfg()), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod reject_kind_tests {
+    use super::*;
+
+    fn hr(error: &str, name: Option<&'static str>) -> submit::CrankOutcome {
+        submit::CrankOutcome::HardReject { error: error.into(), error_name: name.map(Into::into), program_cu: None, tx_cu: None }
+    }
+
+    #[test]
+    fn idle_rejects_do_not_count() {
+        // EngineNonProgress is the keeper's normal idle answer, not a failure.
+        let o = hr("custom program error: 0x16", Some("EngineNonProgress"));
+        assert_eq!(o.class(), OutcomeClass::Idle);
+        assert_eq!(reject_kind(&o), None);
+    }
+
+    #[test]
+    fn definitive_rejects_are_program_failures_without_marker_text() {
+        // A structured preflight failure whose text has no program-error marker.
+        assert_eq!(reject_kind(&hr("RPC response error -32002: Transaction simulation failed", None)), Some(RejectKind::Program));
+        assert_eq!(reject_kind(&hr("custom program error: 0x13", Some("EngineStale"))), Some(RejectKind::Program));
+    }
+
+    #[test]
+    fn blockhash_not_found_is_transport() {
+        assert_eq!(reject_kind(&hr("RPC response error -32002: Transaction simulation failed: Blockhash not found", None)), Some(RejectKind::Transport));
+    }
 }

@@ -18,6 +18,7 @@ pub struct KeeperLog {
     pub first_seen_slot: Option<u64>,
     /// Pusher: source price timestamp to push landing, ms (staging `mark_lag` event).
     mark_lag_ms: Option<u64>,
+    mark_lags: VecDeque<u64>,
     /// Unix ms when that push landed: a stopped pusher shows as a growing age.
     mark_lag_at_ms: Option<u64>,
     /// Unix ms when this log was first read: before any push lands, the push
@@ -40,6 +41,15 @@ pub fn cu_stats(values: &VecDeque<u64>) -> (u64, u64) {
     } else {
         (sorted[(sorted.len() - 1) / 2], *sorted.last().unwrap())
     }
+}
+
+/// Nearest-rank percentiles over the most recent 300 landed pushes.
+fn lag_percentiles(values: &VecDeque<u64>) -> (Option<u64>, Option<u64>) {
+    let mut sorted: Vec<_> = values.iter().copied().collect();
+    sorted.sort_unstable();
+    if sorted.is_empty() { return (None, None); }
+    (Some(sorted[(sorted.len() * 50 + 99) / 100 - 1]),
+     Some(sorted[(sorted.len() * 95 + 99) / 100 - 1]))
 }
 
 impl KeeperLog {
@@ -105,6 +115,10 @@ impl KeeperLog {
                     Some("mark_lag") => {
                         self.mark_lag_ms = v["ms"].as_u64();
                         self.mark_lag_at_ms = v["at_ms"].as_u64();
+                        if let Some(lag) = self.mark_lag_ms {
+                            if self.mark_lags.len() == 300 { self.mark_lags.pop_front(); }
+                            self.mark_lags.push_back(lag);
+                        }
                     }
                     Some("unconfirmed" | "idle_with_pending_work") => {
                         self.events.insert(v["event"].as_str().unwrap().into(), v);
@@ -199,7 +213,8 @@ impl KeeperLog {
                 q
             })
             .collect();
-        json!({"log_ok":ok,"log_age_seconds":age,"log_error":error,"last_cycle":self.last_cycle,
+        let (lag_p50, lag_p95) = lag_percentiles(&self.mark_lags);
+        json!({"mark_lag_p50_ms":lag_p50,"mark_lag_p95_ms":lag_p95,"log_ok":ok,"log_age_seconds":age,"log_error":error,"last_cycle":self.last_cycle,
             "last_cycle_summary":self.summary,"last_cycle_attempts":last,"last_cycle_cu":self.summary.get("cu").copied().unwrap_or(0),
             "attempts_total":outcomes(self.attempts),"cycles_total":outcomes(self.cycles),"crank_cu":{"p50":p50,"max":max},
             "quarantined_accounts":rows,"last_success_signature":self.signature,"last_success_slot":self.last_success_slot,
@@ -216,6 +231,18 @@ impl KeeperLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rolling_lag_percentiles() {
+        let mut k = KeeperLog::default();
+        assert_eq!(lag_percentiles(&k.mark_lags), (None, None));
+        k.line(r#"{"event":"mark_lag","ms":9999,"at_ms":1}"#);
+        assert_eq!(lag_percentiles(&k.mark_lags), (Some(9999), Some(9999)));
+        for ms in (1..=300).rev() {
+            k.line(&format!("{{\"event\":\"mark_lag\",\"ms\":{ms},\"at_ms\":1}}"));
+        }
+        assert_eq!(k.mark_lags.len(), 300);
+        assert_eq!(lag_percentiles(&k.mark_lags), (Some(150), Some(285)));
+    }
     const SUMMARY: &str="cycle 7 summary: progressed=2 idle=3 failed=1 unconfirmed=0 quarantined_skipped=4 deferred=5 new_quarantine=1 idle_pending_stuck=0 txs=6 cu=100 max_attempt_cu=50";
     #[test]
     fn literal_logs_totals_quarantine_and_progress() {
