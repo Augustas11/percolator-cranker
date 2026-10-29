@@ -332,3 +332,34 @@ process signs with them.
 The bots never trade or co-sign on the matcher's LP. A `TradeNoCpi` on it would
 bump its position epoch and revoke the matcher's capability. The hedger nets
 both LPs.
+
+**Matcher reference age.** `[cluster.<name>].matcher_max_ref_age_slots` records the
+value. It must stay at or above the pusher's landed-push gap p95, or the matcher refuses
+fills as STALE.
+- **Devnet: 80 slots.** The measured gap is p50 31 / p95 67 slots, because the pusher reads
+  mainnet Pyth's sponsored account, which updates about every 10 s. Applied on 2026-10-29.
+- **Mainnet target: 5 slots,** reachable only with a sub-second source. A fill priced off
+  a stale reference is what latency arbitrage picks off (research/replay/REPORT.md).
+
+Apply it by hand with the matcher LP owner key. **Known race:** the matcher's
+`SetParams` rewrites every parameter, inventory included, and has no age-only
+form. So a `TradeCpi` fill that lands between the read and the write is erased from
+the matcher's inventory accounting. Pausing the frontend does NOT prevent this:
+any client can send `TradeCpi` directly, and only the on-chain `paused` flag
+stops fills. Setting that flag itself goes through `SetParams`. Treat this as a
+devnet-only manual step, run when no taker is active, and re-check inventory
+against the LP portfolio's position afterwards. An age-only (or
+compare-and-set) matcher instruction would remove the race; that's a
+matcher-program change for later. Read the current values first, and pass
+them back unchanged except `--age`:
+
+```bash
+matcher_ops show --matcher <program> --ctx <ctx>
+matcher_ops set-params --matcher <program> --payer <run>/keys/payer.json \
+  --lp-owner <run>/keys/matcher_lp_owner.json --ctx <ctx> --fill <max_fill_abs> \
+  --cap <max_inventory_abs> --age <new age> --deviation <max_mark_dev_bps> \
+  --authority <price_authority> --paused <paused> --inventory <inventory>
+```
+
+`matcher_ops` targets devnet; it rejects mainnet URLs. An age-only matcher
+instruction would remove the race; that's a matcher-program change for later.

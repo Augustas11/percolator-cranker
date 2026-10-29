@@ -25,6 +25,8 @@ program_id = ""
 collateral_mint = "create"
 price_source = "mock"
 matcher_ctxs = []
+# Matcher max reference age (slots): no matcher locally. Applied by hand (docs/LAUNCH.md, "Matcher reference age").
+matcher_max_ref_age_slots = 5
 
 [cluster.devnet]
 rpc = "https://api.devnet.solana.com"
@@ -34,6 +36,8 @@ collateral_mint = "create"
 price_source = "exchanges"
 # Matcher owns LP 6wH2d4CARhEWeGC2deBDb9pVT1a7Tgd48VUiFmkTNAHY; bots never trade on that LP.
 matcher_ctxs = ["GMXktcTjqh8z3h2oCgUnodcLbh6hH4W6YUfL4hZMaXe7"]
+# Matcher max reference age (slots): measured push gap p95 67 slots (devnet pusher reads mainnet Pyth, ~10 s cadence) + margin; 2026-10-29. Applied by hand (docs/LAUNCH.md, "Matcher reference age").
+matcher_max_ref_age_slots = 80
 
 [cluster.mainnet]
 rpc = ""                # the paid RPC endpoint
@@ -41,6 +45,8 @@ program_id = ""         # the official program id, set on Day 0
 collateral_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
 price_source = "pyth"
 matcher_ctxs = []
+# Matcher max reference age (slots): needs the sub-second source: a fill priced off a stale ref is what latency arb picks off (research/replay/REPORT.md). Applied by hand (docs/LAUNCH.md, "Matcher reference age").
+matcher_max_ref_age_slots = 5
 # Squads vault (2-of-3, ops/KEYS.md): marketauth after the handover. Until
 # then a fresh launch key (keys/launch_authority.json) holds it.
 multisig_vault = ""
