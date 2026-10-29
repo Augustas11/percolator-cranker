@@ -24,6 +24,16 @@ which is the source for the real client's account layouts later on. Contributors
   - `anza-xyz/wallet-adapter` (Apache-2.0) is the standard for the real Connect button.
   - `tradingview/lightweight-charts` (Apache-2.0) if we ever need a chart.
 
+**Real client (`src/chain/`, 2026-10-29):** written fresh against upstream
+`percolator-prog` `5cb331dd`. `dcccrypto/percolator-sdk` was the reference for its
+shape: little-endian helpers, vault and matcher PDA helpers. No code was copied, so
+no Apache-2.0 header is needed. The offsets and fixtures come from the pinned Rust
+crate (`client/src/bin/ts_fixtures.rs`, the same `offset_of!` source as upstream
+`examples/dump_layout.rs`). Upstream's `dump_layout.rs` does not compile at
+`5cb331dd`: it names the removed field
+`_reserved_insurance_withdraw_deposit_remaining`. No wallet-adapter library is
+used: Phantom and Solflare are reached through their injected providers.
+
 **What this skeleton does:**
 - Plain React with a typed `MarketClient` and a mock behind it.
 - The data shapes use v16 engine terms: portfolio, leg, mark, funding, health.

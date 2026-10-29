@@ -5,6 +5,7 @@ import "./App.css";
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const number = new Intl.NumberFormat("en-US", { maximumFractionDigits: 4 });
 const percent = new Intl.NumberFormat("en-US", { style: "percent", maximumFractionDigits: 4 });
+const dollars = (value: number) => Number.isFinite(value) ? usd.format(value) : "—";
 
 export function useSnapshot(client: MarketClient) {
   const subscribe = useCallback((notify: () => void) => client.subscribe(notify), [client]);
@@ -36,7 +37,7 @@ export default function App({ client }: { client: MarketClient }) {
     <main>
       <header>
         <h1>{market.symbol}</h1>
-        <button title="placeholder, no wallet library yet" disabled={pending || !!portfolio.owner} onClick={() => void call(() => client.connect())}>
+        <button title="Connect wallet" disabled={pending || !!portfolio.owner} onClick={() => void call(() => client.connect())}>
           {portfolio.owner ? `${portfolio.owner.slice(0, 7)}…${portfolio.owner.slice(-4)}` : "Connect wallet"}
         </button>
       </header>
@@ -45,7 +46,7 @@ export default function App({ client }: { client: MarketClient }) {
         <section aria-labelledby="market-heading">
           <h2 id="market-heading">Market</h2>
           <dl>
-            <dt>Mark price</dt><dd>{usd.format(mark.price)}</dd>
+            <dt>Mark price</dt><dd>{dollars(mark.price)}</dd>
             <dt>Funding</dt><dd>{percent.format(funding.rate)} per hour</dd>
             <dt>Next funding</dt><dd>{new Date(funding.nextFundingTs).toLocaleTimeString()}</dd>
           </dl>
@@ -55,10 +56,10 @@ export default function App({ client }: { client: MarketClient }) {
           {leg ? <dl>
             <dt>Side</dt><dd>{leg.side}</dd>
             <dt>Size</dt><dd>{number.format(leg.size)} SOL</dd>
-            <dt>Entry price</dt><dd>{usd.format(leg.entryPrice)}</dd>
-            <dt>Unrealized PnL</dt><dd>{usd.format(leg.unrealizedPnl)}</dd>
+            <dt>Entry price</dt><dd>{dollars(leg.entryPrice)}</dd>
+            <dt>Unrealized PnL</dt><dd>{dollars(leg.unrealizedPnl)}</dd>
           </dl> : <p>No open position</p>}
-          <p>Realized PnL: {usd.format(portfolio.realizedPnl)}</p>
+          <p>Realized PnL: {dollars(portfolio.realizedPnl)}</p>
         </section>
         <section aria-labelledby="health-heading">
           <h2 id="health-heading">Margin &amp; health</h2>
@@ -85,6 +86,7 @@ export default function App({ client }: { client: MarketClient }) {
         </section>
         <section aria-labelledby="trade-heading">
           <h2 id="trade-heading">Trade</h2>
+          {client.tradingReady === false && <p>Trading: matcher pending</p>}
           <fieldset disabled={pending}>
             <div className="actions" role="group" aria-label="Position side">
               <button aria-pressed={side === "long"} onClick={() => setSide("long")}>Long</button>
@@ -95,8 +97,8 @@ export default function App({ client }: { client: MarketClient }) {
             <label htmlFor="leverage">Leverage (1–{market.maxLeverage})</label>
             <input id="leverage" type="number" min="1" max={market.maxLeverage} step="any" value={leverage} onChange={e => setLeverage(e.target.value)} />
             <div className="actions">
-              <button onClick={() => void call(() => client.openPosition(side, Number(size), Number(leverage)))}>Open</button>
-              <button onClick={() => void call(() => client.closePosition())}>Close position</button>
+              <button disabled={client.tradingReady === false} onClick={() => void call(() => client.openPosition(side, Number(size), Number(leverage)))}>Open</button>
+              <button disabled={client.tradingReady === false} onClick={() => void call(() => client.closePosition())}>Close position</button>
             </div>
           </fieldset>
         </section>

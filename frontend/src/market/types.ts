@@ -28,6 +28,7 @@ export interface MarketSnapshot {
   fills: Fill[]; // newest first, max 20
 }
 export interface MarketClient {
+  readonly tradingReady?: boolean;
   getSnapshot(): MarketSnapshot;
   subscribe(listener: (s: MarketSnapshot) => void): () => void;
   connect(): Promise<string>;

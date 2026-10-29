@@ -58,3 +58,28 @@ test("connects, deposits, opens a long, and keeps rendering after a tick", async
     container.remove();
   }
 });
+
+test("shows unknown prices honestly and disables trading while the matcher is pending", async () => {
+  const client = Object.assign(new MockMarketClient({ autoTick: false }), { tradingReady: false });
+  await client.connect();
+  await client.deposit(1000);
+  await client.openPosition("long", 1, 5);
+  const snapshot = client.getSnapshot();
+  const unknown = { ...snapshot, portfolio: { ...snapshot.portfolio,
+    legs: snapshot.portfolio.legs.map(leg => ({ ...leg, entryPrice: NaN, unrealizedPnl: NaN })),
+  } };
+  client.getSnapshot = () => unknown;
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(<App client={client} />); });
+    expect(container.textContent).toContain("Trading: matcher pending");
+    expect(container.querySelector('[aria-labelledby="position-heading"]')!.textContent).toContain("Entry price—Unrealized PnL—");
+    for (const label of ["Open", "Close position"]) {
+      expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === label)!.disabled).toBe(true);
+    }
+  } finally {
+    await act(async () => { root.unmount(); });
+    client.dispose();
+  }
+});
