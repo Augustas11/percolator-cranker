@@ -27,7 +27,6 @@ Refresh the `.bin` account dumps first with
 
 `npm run roundtrip` runs a real devnet round trip. It creates a portfolio,
 deposits, opens, closes and withdraws, and prints the signatures. It needs a
-funded throwaway wallet (`TESTER_KEYPAIR`). Until the matcher is live, the trades
-use `TradeNoCpi` co-signed by the LP key file (`LP_KEYPAIR`). That LP key stays
-on the operator machine; the browser never sees it.
+funded throwaway wallet (`TESTER_KEYPAIR`). Its trades take the same `TradeCpi`
+path as the browser.
 Test tokens only, no real funds.
