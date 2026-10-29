@@ -182,6 +182,7 @@ the tick with `accrual_behind` while the snapshot exceeds `oracle.accrual_lag_sl
   per venue reads public Coinbase Exchange SOL-USD ticker, Kraken v2 SOL/USD
   trades, and Binance SOLUSDT trades when reachable without a key. Binance
   USDT is treated as USD, without conversion. No exchange keys are used.
+  The Binance websocket URL is `oracle.exchange_binance_url`.
   `oracle.exchange_max_age_ms` (2,000) rejects stale exchange event timestamps;
   future timestamps tolerate `exchange_clock_skew_ms` (500 ms). Prices farther than `exchange_max_dev_bps` (50)
   from the median of all fresh venues are excluded; the remaining median

@@ -82,6 +82,8 @@ pub struct ClusterCfg {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct OracleCfg {
+    #[serde(default = "default_exchange_binance_url")]
+    pub exchange_binance_url: String,
     #[serde(default = "default_exchange_clock_skew")]
     pub exchange_clock_skew_ms: u64,
     #[serde(default = "default_exchange_max_age")]
@@ -118,6 +120,7 @@ pub struct OracleCfg {
     pub open_max_mark_age_ms: u64,
 }
 
+fn default_exchange_binance_url() -> String { "wss://stream.binance.com:9443/ws/solusdt@trade".into() }
 fn default_exchange_clock_skew() -> u64 { 500 }
 fn default_exchange_max_age() -> u64 { 2000 }
 fn default_exchange_max_dev() -> u64 { 50 }
@@ -790,5 +793,6 @@ mod config_tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../launch/sol-perp.toml");
         let cfg = super::load(path).expect("launch/sol-perp.toml loads");
         assert_eq!(cfg.cluster["devnet"].matcher_max_ref_age_slots, 80);
+        assert_eq!(cfg.oracle.exchange_binance_url, "wss://stream.binance.com:9443/ws/solusdt@trade");
     }
 }
