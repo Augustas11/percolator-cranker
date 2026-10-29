@@ -39,3 +39,7 @@ Thumbs.db
 # --- Day-0 launch runs (scripts/launch_market.sh, day0_drill.sh): state, generated keys, logs ---
 /launch-runs/
 /deploy/.env
+
+# Private indexer databases
+indexer/*.sqlite*
+/indexer.sqlite*
