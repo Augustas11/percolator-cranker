@@ -12,17 +12,17 @@ export interface DevnetConfig {
 
 const env = import.meta.env ?? {};
 function matcher(program: string, context: string) {
-  return program === "none" || context === "none"
+  return !program || !context || program === "none" || context === "none"
     ? {} : { matcherProgram: new PublicKey(program), matcherContext: new PublicKey(context) };
 }
 export const devnetConfig: DevnetConfig = {
   rpcUrl: env.VITE_RPC_URL || "https://api.devnet.solana.com",
   programId: new PublicKey(env.VITE_PROGRAM_ID || "GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS"),
-  market: new PublicKey(env.VITE_MARKET || "7p8DtcMHSjdCsM9xWvBwF6TebGBSL18wKvfM7BS1zyHq"),
+  market: new PublicKey(env.VITE_MARKET || "HyMKxfct1S9aFtq21GG3FUYUViQkmpZdk5pwGRtAz48C"),
   mint: new PublicKey(env.VITE_MINT || "Ev8AkZC9pT2QCncYFut8GyGB2ffWN1yvnoVbiUTz77q7"),
-  lpPortfolio: new PublicKey(env.VITE_LP_PORTFOLIO || "GKJHRYBKwtswFHK5oyGknpcXxYEMjh7rDDR9f1KU9T5P"),
-  // Our LP's devnet matcher (matcher/ on branch claude/onchain-matcher). Set both to
-  // "none" to run with trading disabled.
+  lpPortfolio: new PublicKey(env.VITE_LP_PORTFOLIO || "GUvzajrrfWpizSGj38iCC7TfB7rbbWxTgCszPAh1VRyh"),
+  // Our LP's devnet matcher (matcher/). Trading stays disabled until both are set;
+  // "none" disables it explicitly.
   ...matcher(env.VITE_MATCHER_PROGRAM || "8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE",
-    env.VITE_MATCHER_CONTEXT || "BHsZrk4cck5xBUhFkE59G9ZJtDLvSZLEtAmpn3wNbDTK"),
+    env.VITE_MATCHER_CONTEXT || ""),
 };

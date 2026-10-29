@@ -2,7 +2,7 @@ import { Connection, SendTransactionError, Transaction } from "@solana/web3.js";
 import type { Keypair, PublicKey, TransactionInstruction } from "@solana/web3.js";
 import type { Fill, MarketClient, MarketSnapshot, Side } from "./types";
 import type { DevnetConfig } from "../chain/config";
-import { parseMarket, parsePortfolio } from "../chain/accounts";
+import { effectiveAbsQ, parseMarket, parsePortfolio } from "../chain/accounts";
 import { createAtaIdempotentIx } from "../chain/pda";
 import { buildCreatePortfolio, buildDeposit, buildTrade, buildWithdraw, findPortfolio } from "../chain/tx";
 import { getWallet } from "../chain/wallet";
@@ -22,9 +22,8 @@ export class DevnetMarketClient implements MarketClient {
   private wallet?: Wallet;
   private portfolio?: PublicKey;
   private listeners = new Set<(s: MarketSnapshot) => void>();
-  private timer: ReturnType<typeof setInterval>;
+  private timer?: ReturnType<typeof setTimeout>;
   private disposed = false;
-  private refreshId = 0;
   private snapshot: MarketSnapshot = {
     market: { symbol: "SOL-PERP", collateral: "USDC", maxLeverage: 1, maintenanceMarginRatio: 0 },
     mark: { price: NaN, ts: Date.now() },
@@ -40,8 +39,7 @@ export class DevnetMarketClient implements MarketClient {
     this.conn = new Connection(cfg.rpcUrl, "confirmed");
     this.tradingReady = !!(cfg.matcherProgram && cfg.matcherContext);
     // A failed poll keeps the last snapshot; wallet actions report RPC errors to the UI.
-    this.timer = setInterval(() => { void this.refresh().catch(() => {}); }, 2000);
-    void this.refresh().catch(() => {});
+    void this.poll();
   }
 
   getSnapshot = () => this.snapshot;
@@ -50,8 +48,14 @@ export class DevnetMarketClient implements MarketClient {
     return () => { this.listeners.delete(listener); };
   };
 
+  private async poll() {
+    try { await this.refresh(); } catch {}
+    finally {
+      if (!this.disposed) this.timer = setTimeout(() => { void this.poll(); }, 2000);
+    }
+  }
+
   private async refresh() {
-    const id = ++this.refreshId;
     const accounts = await this.conn.getMultipleAccountsInfo([this.cfg.market, ...(this.portfolio ? [this.portfolio] : [])]);
     if (!accounts[0]) throw new Error("Market account not found");
     const market = parseMarket(accounts[0].data);
@@ -59,14 +63,14 @@ export class DevnetMarketClient implements MarketClient {
     const pf = accounts[1] ? parsePortfolio(accounts[1].data) : null;
     const price = Number(market.asset0.effectivePrice) / 1e6;
     const leg = pf?.legs.find(leg => leg.assetIndex === 0 && leg.marketId === market.asset0.marketId);
-    const q = leg ? leg.basisPosQ * (leg.side === "long" ? market.asset0.aLong : market.asset0.aShort) / leg.aBasis : 0n;
-    const size = Number(q < 0n ? -q : q) / 1e6;
-    const collateral = pf ? Number(pf.capital + pf.pnl) / 1e6 : 0;
+    const size = Number(leg ? effectiveAbsQ(market, leg) : 0n) / 1e6;
+    // The engine counts only realizable positive PnL (v16.rs:12353-12378).
+    const collateral = pf ? Number(pf.capital + (pf.pnl < 0n ? pf.pnl : 0n)) / 1e6 : 0;
     const mmRatio = Number(market.maintenanceMarginBps) / 10000;
     const maintenanceMargin = size * price * mmRatio;
     const initialMarginUsed = size * price * Number(market.initialMarginBps) / 10000;
     const ratio = size ? collateral / maintenanceMargin : Infinity;
-    if (this.disposed || id !== this.refreshId) return;
+    if (this.disposed) return;
     const now = Date.now();
     this.snapshot = {
       market: { symbol: "SOL-PERP", collateral: "USDC", maxLeverage: 10000 / Number(market.initialMarginBps), maintenanceMarginRatio: mmRatio },
@@ -86,7 +90,9 @@ export class DevnetMarketClient implements MarketClient {
 
   async connect() {
     this.wallet = await getWallet();
-    this.portfolio = await findPortfolio(this.conn, this.cfg.programId, this.wallet.publicKey) ?? undefined;
+    const account = await this.conn.getAccountInfo(this.cfg.market);
+    if (!account) throw new Error("Market account not found");
+    this.portfolio = await findPortfolio(this.conn, this.cfg.programId, parseMarket(account.data), this.wallet.publicKey) ?? undefined;
     await this.refresh();
     return this.wallet.publicKey.toBase58();
   }
@@ -101,7 +107,7 @@ export class DevnetMarketClient implements MarketClient {
     return this.portfolio;
   }
 
-  private async send(ixs: TransactionInstruction[], signers: Keypair[] = [], fill?: Pick<Fill, "side" | "size">) {
+  private async send(ixs: TransactionInstruction[], signers: Keypair[] = [], fill?: Pick<Fill, "side" | "size">, onConfirmed?: () => void) {
     const wallet = this.connected();
     const price = this.snapshot.mark.price;
     let signature: string;
@@ -123,10 +129,11 @@ export class DevnetMarketClient implements MarketClient {
       }
       throw err;
     }
+    onConfirmed?.();
     if (fill) this.snapshot = { ...this.snapshot, fills: [
       { ...fill, id: signature, price, ts: Date.now(), mine: true }, ...this.snapshot.fills,
     ].slice(0, 20) };
-    await this.refresh();
+    await this.refresh().catch(() => {});
     return signature;
   }
 
@@ -134,11 +141,10 @@ export class DevnetMarketClient implements MarketClient {
     const wallet = this.connected();
     const amount = atoms(usd, "amount");
     if (!this.portfolio) {
-      const created = await buildCreatePortfolio(this.conn, this.cfg, wallet.publicKey);
-      await this.send(created.ixs, [created.portfolio]);
-      this.portfolio = created.portfolio.publicKey;
+      const created = await buildCreatePortfolio(this.cfg, wallet.publicKey);
+      await this.send(created.ixs, [created.portfolio], undefined, () => { this.portfolio = created.portfolio.publicKey; });
     }
-    const ixs = await buildDeposit(this.conn, this.cfg, wallet.publicKey, this.portfolio, amount);
+    const ixs = await buildDeposit(this.conn, this.cfg, wallet.publicKey, this.requirePortfolio(), amount);
     await this.send([createAtaIdempotentIx(wallet.publicKey, wallet.publicKey, this.cfg.mint), ...ixs]);
   }
 
@@ -177,8 +183,7 @@ export class DevnetMarketClient implements MarketClient {
     const market = parseMarket(accounts[0].data), pf = parsePortfolio(accounts[1].data);
     const leg = pf.legs.find(leg => leg.assetIndex === 0 && leg.marketId === market.asset0.marketId);
     if (!leg) throw new Error("no open position");
-    const q = leg.basisPosQ * (leg.side === "long" ? market.asset0.aLong : market.asset0.aShort) / leg.aBasis;
-    const magnitude = q < 0n ? -q : q;
+    const magnitude = effectiveAbsQ(market, leg);
     if (!magnitude) throw new Error("no open position");
     await this.refresh();
     await this.trade(leg.side === "long" ? -magnitude : magnitude);
@@ -186,7 +191,7 @@ export class DevnetMarketClient implements MarketClient {
 
   dispose() {
     this.disposed = true;
-    clearInterval(this.timer);
+    clearTimeout(this.timer);
     this.listeners.clear();
   }
 }

@@ -16,6 +16,7 @@
   "cfg.collateral_mint": 32,
   "cfg.trade_fee_base_bps": 128,
   "cfg.oracle_mode": 193,
+  "group.market_group_id": 0,
   "group.config": 32,
   "group.vault": 285,
   "group.insurance": 301,
@@ -31,6 +32,9 @@
   "asset.slot_last": 41,
   "asset.a_long": 49,
   "asset.a_short": 65,
+  "asset.epoch_long": 497,
+  "asset.epoch_short": 505,
+  "pf.provenance_header": 0,
   "pf.owner": 100,
   "pf.capital": 132,
   "pf.pnl": 148,
@@ -43,5 +47,6 @@
   "leg.market_id": 5,
   "leg.side": 13,
   "leg.basis_pos_q": 14,
-  "leg.a_basis": 30
+  "leg.a_basis": 30,
+  "leg.epoch_snap": 86
 }

@@ -30,9 +30,11 @@ async function trade(label: string, portfolio: PublicKey, sizeQ: bigint) {
   await send(label, await buildTrade(conn, cfg, tester.publicKey, portfolio, sizeQ, limit, 12n));
 }
 
-let portfolio = await findPortfolio(conn, cfg.programId, tester.publicKey);
+const marketAccount = await conn.getAccountInfo(cfg.market);
+if (!marketAccount) throw new Error("Market account not found");
+let portfolio = await findPortfolio(conn, cfg.programId, parseMarket(marketAccount.data), tester.publicKey);
 if (!portfolio) {
-  const created = await buildCreatePortfolio(conn, cfg, tester.publicKey);
+  const created = await buildCreatePortfolio(cfg, tester.publicKey);
   await send("create_portfolio", created.ixs, [created.portfolio]);
   portfolio = created.portfolio.publicKey;
 }

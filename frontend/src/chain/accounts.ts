@@ -33,6 +33,7 @@ export function parseMarket(data: Uint8Array) {
   const asset = l.ASSET0_SLOT_OFF + l.ASSET_ORACLE_WRAPPER_LEN + l["slot.asset"];
   return {
     config: parseWrapperConfig(data),
+    marketGroupId: data.subarray(group + l["group.market_group_id"], group + l["group.market_group_id"] + 32),
     maintenanceMarginBps: u64(data, config + l["config.maintenance_margin_bps"]),
     initialMarginBps: u64(data, config + l["config.initial_margin_bps"]),
     vault: u128(data, group + l["group.vault"]),
@@ -45,6 +46,8 @@ export function parseMarket(data: Uint8Array) {
       slotLast: u64(data, asset + l["asset.slot_last"]),
       aLong: u128(data, asset + l["asset.a_long"]),
       aShort: u128(data, asset + l["asset.a_short"]),
+      epochLong: u64(data, asset + l["asset.epoch_long"]),
+      epochShort: u64(data, asset + l["asset.epoch_short"]),
       lifecycle: u8(data, asset + l["asset.lifecycle"]),
     },
   };
@@ -53,7 +56,7 @@ export function parseMarket(data: Uint8Array) {
 export function parsePortfolio(data: Uint8Array) {
   checkHeader(data, 2, l.PORTFOLIO_ACCOUNT_LEN);
   const base = l.HEADER_LEN;
-  const legs: { assetIndex: number; marketId: bigint; side: "long" | "short"; basisPosQ: bigint; aBasis: bigint }[] = [];
+  const legs: { assetIndex: number; marketId: bigint; side: "long" | "short"; basisPosQ: bigint; aBasis: bigint; epochSnap: bigint }[] = [];
   for (let i = 0; i < l.LEG_COUNT; i++) {
     const leg = base + l["pf.legs"] + i * l.LEG_LEN;
     if (u8(data, leg + l["leg.active"]) === 0) continue;
@@ -65,9 +68,11 @@ export function parsePortfolio(data: Uint8Array) {
       side: side === 0 ? "long" : "short",
       basisPosQ: i128(data, leg + l["leg.basis_pos_q"]),
       aBasis: u128(data, leg + l["leg.a_basis"]),
+      epochSnap: u64(data, leg + l["leg.epoch_snap"]),
     });
   }
   return {
+    marketGroupId: data.subarray(base + l["pf.provenance_header"], base + l["pf.provenance_header"] + 32),
     owner: new PublicKey(data.subarray(base + l["pf.owner"], base + l["pf.owner"] + 32)),
     portfolioId: u64(data, l.PORTFOLIO_ID_OFF),
     sequence: u64(data, l.PORTFOLIO_MATCHER_SEQUENCE_OFF),
@@ -76,4 +81,12 @@ export function parsePortfolio(data: Uint8Array) {
     pnl: i128(data, base + l["pf.pnl"]),
     legs,
   };
+}
+
+export function effectiveAbsQ(market: ReturnType<typeof parseMarket>, leg: ReturnType<typeof parsePortfolio>["legs"][number]): bigint {
+  const asset = market.asset0;
+  if (leg.epochSnap !== (leg.side === "long" ? asset.epochLong : asset.epochShort)) return 0n;
+  const raw = leg.basisPosQ < 0n ? -leg.basisPosQ : leg.basisPosQ;
+  const aSide = leg.side === "long" ? asset.aLong : asset.aShort;
+  return (raw * aSide + leg.aBasis - 1n) / leg.aBasis;
 }

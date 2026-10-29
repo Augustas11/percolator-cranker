@@ -1,3 +1,4 @@
+import { Buffer } from "buffer";
 import { Connection, Keypair, PublicKey, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import type { TransactionInstruction } from "@solana/web3.js";
 import type { DevnetConfig } from "./config";
@@ -6,9 +7,10 @@ import { layout } from "./layout";
 import { computeBudgetIxs, crankIx, createPortfolioIxs, depositIx, tradeCpiIx, withdrawIx } from "./instructions";
 import { ata, matcherDelegate, vault, vaultAuthority } from "./pda";
 
-export async function findPortfolio(conn: Connection, programId: PublicKey, owner: PublicKey): Promise<PublicKey | null> {
+export async function findPortfolio(conn: Connection, programId: PublicKey, market: { marketGroupId: Uint8Array }, owner: PublicKey): Promise<PublicKey | null> {
   const accounts = await conn.getProgramAccounts(programId, { filters: [
     { dataSize: layout.PORTFOLIO_ACCOUNT_LEN },
+    { memcmp: { offset: layout.HEADER_LEN + layout["pf.provenance_header"], bytes: new PublicKey(market.marketGroupId).toBase58() } },
     { memcmp: { offset: layout.HEADER_LEN + layout["pf.owner"], bytes: owner.toBase58() } },
   ] });
   return accounts[0]?.pubkey ?? null;
@@ -16,8 +18,8 @@ export async function findPortfolio(conn: Connection, programId: PublicKey, owne
 
 export async function withFreshCrank(
   conn: Connection, payer: PublicKey, programId: PublicKey, market: PublicKey,
-  portfolios: PublicKey[], ix: TransactionInstruction[],
-): Promise<TransactionInstruction[]> {
+  portfolios: PublicKey[], readAccounts: PublicKey[],
+): Promise<{ ixs: TransactionInstruction[]; accounts: Uint8Array[] }> {
   const kept: TransactionInstruction[] = [];
   const budget = computeBudgetIxs();
   const nowSlot = await conn.getSlot();
@@ -32,7 +34,28 @@ export async function withFreshCrank(
     const result = await conn.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true });
     if (!result.value.err) kept.push(crank);
   }
-  return [...budget, ...kept, ...ix];
+  const ixs = [...budget, ...kept];
+  if (!kept.length) {
+    const accounts = await conn.getMultipleAccountsInfo(readAccounts);
+    return { ixs, accounts: accounts.map(account => {
+      if (!account) throw new Error("Crank account not found");
+      return account.data;
+    }) };
+  }
+  const tx = new VersionedTransaction(new TransactionMessage({
+    payerKey: payer, recentBlockhash: blockhash, instructions: ixs,
+  }).compileToV0Message());
+  const result = await conn.simulateTransaction(tx, {
+    sigVerify: false, replaceRecentBlockhash: true,
+    accounts: { encoding: "base64", addresses: readAccounts.map(key => key.toBase58()) },
+  });
+  if (result.value.err) throw new Error(`Crank simulation failed: ${JSON.stringify(result.value.err)}`);
+  const accounts = result.value.accounts;
+  if (!accounts || accounts.length !== readAccounts.length) throw new Error("Crank accounts missing");
+  return { ixs, accounts: accounts.map(account => {
+    if (!account) throw new Error("Crank account not found");
+    return Buffer.from(account.data[0], "base64");
+  }) };
 }
 
 async function readPortfolio(conn: Connection, portfolio: PublicKey) {
@@ -49,9 +72,9 @@ export async function buildDeposit(conn: Connection, cfg: DevnetConfig, owner: P
 }
 
 export async function buildWithdraw(conn: Connection, cfg: DevnetConfig, owner: PublicKey, portfolio: PublicKey, amountAtoms: bigint) {
-  const cranks = await withFreshCrank(conn, owner, cfg.programId, cfg.market, [portfolio], []);
-  const pf = await readPortfolio(conn, portfolio);
-  return [...cranks, withdrawIx(cfg.programId, owner, cfg.market, portfolio,
+  const { ixs, accounts } = await withFreshCrank(conn, owner, cfg.programId, cfg.market, [portfolio], [portfolio]);
+  const pf = parsePortfolio(accounts[0]);
+  return [...ixs, withdrawIx(cfg.programId, owner, cfg.market, portfolio,
     ata(owner, cfg.mint), vault(cfg.programId, cfg.market, cfg.mint), vaultAuthority(cfg.programId, cfg.market),
     { portfolioId: pf.portfolioId, expectedSequence: pf.sequence, amount: amountAtoms })];
 }
@@ -61,13 +84,12 @@ export async function buildTrade(
   sizeQ: bigint, limitPrice: bigint, feeBps: bigint,
 ) {
   if (!cfg.matcherProgram || !cfg.matcherContext) throw new Error("Trading is waiting on the matcher program (devnet PoC)");
-  const cranks = await withFreshCrank(conn, owner, cfg.programId, cfg.market, [portfolio, cfg.lpPortfolio], []);
-  const accounts = await conn.getMultipleAccountsInfo([portfolio, cfg.lpPortfolio, cfg.market]);
-  if (accounts.some(account => !account)) throw new Error("Trade account not found");
-  const a = parsePortfolio(accounts[0]!.data), b = parsePortfolio(accounts[1]!.data);
-  const market = parseMarket(accounts[2]!.data);
+  const { ixs, accounts } = await withFreshCrank(conn, owner, cfg.programId, cfg.market,
+    [portfolio, cfg.lpPortfolio], [portfolio, cfg.lpPortfolio, cfg.market]);
+  const a = parsePortfolio(accounts[0]), b = parsePortfolio(accounts[1]);
+  const market = parseMarket(accounts[2]);
   const delegate = matcherDelegate(cfg.programId, cfg.market, cfg.lpPortfolio, b.owner, cfg.matcherProgram, cfg.matcherContext);
-  return [...cranks, tradeCpiIx(cfg.programId, owner, cfg.market, portfolio, cfg.lpPortfolio,
+  return [...ixs, tradeCpiIx(cfg.programId, owner, cfg.market, portfolio, cfg.lpPortfolio,
     cfg.matcherProgram, cfg.matcherContext, delegate, {
       accountAPortfolioId: a.portfolioId, accountAPositionEpoch: a.positionEpoch,
       accountBPortfolioId: b.portfolioId, accountBPositionEpoch: b.positionEpoch, accountBMatcherSequence: b.sequence,
@@ -75,8 +97,8 @@ export async function buildTrade(
     })];
 }
 
-export async function buildCreatePortfolio(conn: Connection, cfg: DevnetConfig, owner: PublicKey) {
+export async function buildCreatePortfolio(cfg: DevnetConfig, owner: PublicKey) {
   const portfolio = Keypair.generate();
-  const ixs = await createPortfolioIxs(conn, cfg.programId, owner, cfg.market, portfolio.publicKey);
+  const ixs = await createPortfolioIxs(cfg.programId, owner, cfg.market, portfolio.publicKey);
   return { ixs: [...computeBudgetIxs(), ...ixs], portfolio };
 }

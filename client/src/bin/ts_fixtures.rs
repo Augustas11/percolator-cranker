@@ -91,6 +91,7 @@ fn layout() -> String {
         ("cfg.trade_fee_base_bps", offset_of!(WrapperConfigV16, trade_fee_base_bps)),
         ("cfg.oracle_mode", offset_of!(WrapperConfigV16, oracle_mode)),
         // MarketGroupV16HeaderAccount, from MARKET_GROUP_OFF.
+        ("group.market_group_id", offset_of!(MarketGroupV16HeaderAccount, market_group_id)),
         ("group.config", offset_of!(MarketGroupV16HeaderAccount, config)),
         ("group.vault", offset_of!(MarketGroupV16HeaderAccount, vault)),
         ("group.insurance", offset_of!(MarketGroupV16HeaderAccount, insurance)),
@@ -109,7 +110,11 @@ fn layout() -> String {
         ("asset.slot_last", offset_of!(AssetStateV16Account, slot_last)),
         ("asset.a_long", offset_of!(AssetStateV16Account, a_long)),
         ("asset.a_short", offset_of!(AssetStateV16Account, a_short)),
+        ("asset.epoch_long", offset_of!(AssetStateV16Account, epoch_long)),
+        ("asset.epoch_short", offset_of!(AssetStateV16Account, epoch_short)),
         // PortfolioAccountV16Account, from HEADER_LEN.
+        // provenance_header.market_group_id is the header's first field.
+        ("pf.provenance_header", offset_of!(PortfolioAccountV16Account, provenance_header)),
         ("pf.owner", offset_of!(PortfolioAccountV16Account, owner)),
         ("pf.capital", offset_of!(PortfolioAccountV16Account, capital)),
         ("pf.pnl", offset_of!(PortfolioAccountV16Account, pnl)),
@@ -124,6 +129,7 @@ fn layout() -> String {
         ("leg.side", offset_of!(PortfolioLegV16Account, side)),
         ("leg.basis_pos_q", offset_of!(PortfolioLegV16Account, basis_pos_q)),
         ("leg.a_basis", offset_of!(PortfolioLegV16Account, a_basis)),
+        ("leg.epoch_snap", offset_of!(PortfolioLegV16Account, epoch_snap)),
     ];
     let body: Vec<String> = fields.iter().map(|(k, v)| format!("  \"{k}\": {v}")).collect();
     format!("{{\n{}\n}}\n", body.join(",\n"))
@@ -209,7 +215,8 @@ fn market(data: &[u8]) -> String {
         "{{\"marketauth\": \"{}\", \"collateralMint\": \"{}\", \"tradeFeeBaseBps\": \"{}\", \"oracleMode\": {}, \
          \"maintenanceMarginBps\": \"{}\", \"initialMarginBps\": \"{}\", \"vault\": \"{}\", \"insurance\": \"{}\", \
          \"currentSlot\": \"{}\", \"mode\": {}, \"asset0\": {{\"marketId\": \"{}\", \"effectivePrice\": \"{}\", \
-         \"slotLast\": \"{}\", \"aLong\": \"{}\", \"aShort\": \"{}\"}}}}",
+         \"slotLast\": \"{}\", \"aLong\": \"{}\", \"aShort\": \"{}\", \"epochLong\": \"{}\", \"epochShort\": \"{}\"}}, \
+         \"marketGroupId\": \"{}\"}}",
         hex(&cfg.marketauth),
         hex(&cfg.collateral_mint),
         cfg.trade_fee_base_bps,
@@ -225,6 +232,9 @@ fn market(data: &[u8]) -> String {
         a.slot_last,
         a.a_long,
         a.a_short,
+        a.epoch_long,
+        a.epoch_short,
+        hex(&g.market_group_id),
     )
 }
 
@@ -236,20 +246,21 @@ fn portfolio(data: &[u8]) -> String {
         .filter(|l| l.active != 0)
         .map(|l| {
             format!(
-                "{{\"assetIndex\": {}, \"marketId\": \"{}\", \"side\": {}, \"basisPosQ\": \"{}\", \"aBasis\": \"{}\"}}",
-                l.asset_index.get(), l.market_id.get(), l.side, l.basis_pos_q.get(), l.a_basis.get()
+                "{{\"assetIndex\": {}, \"marketId\": \"{}\", \"side\": {}, \"basisPosQ\": \"{}\", \"aBasis\": \"{}\", \"epochSnap\": \"{}\"}}",
+                l.asset_index.get(), l.market_id.get(), l.side, l.basis_pos_q.get(), l.a_basis.get(), l.epoch_snap.get()
             )
         })
         .collect();
     format!(
         "{{\"owner\": \"{}\", \"portfolioId\": \"{}\", \"sequence\": \"{}\", \"positionEpoch\": \"{}\", \
-         \"capital\": \"{}\", \"pnl\": \"{}\", \"legs\": [{}]}}",
+         \"capital\": \"{}\", \"pnl\": \"{}\", \"marketGroupId\": \"{}\", \"legs\": [{}]}}",
         hex(&p.owner),
         state::read_portfolio_id(data).unwrap(),
         state::read_portfolio_matcher_sequence(data).unwrap(),
         state::read_portfolio_position_epoch(data).unwrap(),
         p.capital.get(),
         p.pnl.get(),
+        hex(&p.provenance_header.market_group_id),
         legs.join(", "),
     )
 }

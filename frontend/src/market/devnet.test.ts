@@ -21,8 +21,7 @@ beforeEach(() => {
   vi.spyOn(Connection.prototype, "getMultipleAccountsInfo").mockImplementation(async keys => keys.map(key =>
     account(key.equals(devnetConfig.market) ? market : key.equals(devnetConfig.lpPortfolio) ? lp : data)));
   vi.spyOn(Connection.prototype, "getProgramAccounts").mockResolvedValue([{ pubkey: portfolio, account: account(data) }]);
-  vi.spyOn(Connection.prototype, "getAccountInfo").mockImplementation(async () => account(data));
-  vi.spyOn(Connection.prototype, "getMinimumBalanceForRentExemption").mockResolvedValue(1000);
+  vi.spyOn(Connection.prototype, "getAccountInfo").mockImplementation(async key => account(key.equals(devnetConfig.market) ? market : data));
   vi.spyOn(Connection.prototype, "getLatestBlockhash").mockResolvedValue({ blockhash: devnetConfig.market.toBase58(), lastValidBlockHeight: 1234 });
   vi.spyOn(Connection.prototype, "getSlot").mockResolvedValue(123);
   vi.spyOn(Connection.prototype, "simulateTransaction").mockResolvedValue({ context: { slot: 123 }, value: { err: "InvalidArgument", logs: [] } });
@@ -91,4 +90,42 @@ it.each(["long", "short"] as const)("closes a %s using exact bigint size and sur
   send.mockRejectedValue(new SendTransactionError({ action: "send", signature: "", transactionMessage: "simulation failed", logs: ["first", "matcher rejected"] }));
   await expect(client.openPosition("long", 1, 2)).rejects.toThrow(/matcher rejected/);
   expect(client.getSnapshot().fills).toHaveLength(1);
+});
+
+it("ignores positive PnL when computing health", async () => {
+  data.writeBigInt64LE(1_000_000n, layout.HEADER_LEN + layout["pf.pnl"]);
+  client = new DevnetMarketClient(devnetConfig);
+  await client.connect();
+  expect(client.getSnapshot().portfolio.health.equity).toBe(29982.010738);
+});
+
+it("keeps a confirmed new portfolio and resolves deposits when refresh fails", async () => {
+  vi.mocked(Connection.prototype.getProgramAccounts).mockResolvedValue([]);
+  client = new DevnetMarketClient(devnetConfig);
+  await client.connect();
+  vi.mocked(Connection.prototype.getMultipleAccountsInfo).mockRejectedValue(new Error("RPC unavailable"));
+  vi.mocked(Connection.prototype.getAccountInfo).mockResolvedValue(account(data));
+  await expect(client.deposit(1)).resolves.toBeUndefined();
+  await expect(client.deposit(1)).resolves.toBeUndefined();
+  const txs = vi.mocked(Connection.prototype.sendRawTransaction).mock.calls.map(call => Transaction.from(call[0]));
+  expect(txs).toHaveLength(3);
+  expect(txs[0].signatures).toHaveLength(2);
+  expect(txs[1].instructions.at(-1)!.keys[2].pubkey).toEqual(txs[0].instructions.at(-1)!.keys[2].pubkey);
+  expect(txs[2].signatures).toHaveLength(1);
+});
+
+it("waits for a slow poll to finish before scheduling another", async () => {
+  let finish!: (accounts: ReturnType<typeof account>[]) => void;
+  const reads = vi.mocked(Connection.prototype.getMultipleAccountsInfo);
+  reads.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  client = new DevnetMarketClient(devnetConfig);
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(reads).toHaveBeenCalledTimes(1);
+  finish([account(market)]);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(client.getSnapshot().mark.price).toBe(99.938164);
+  await vi.advanceTimersByTimeAsync(1999);
+  expect(reads).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(reads).toHaveBeenCalledTimes(2);
 });

@@ -23,7 +23,8 @@ tests match byte for byte the fixtures that the Rust `client/` crate emits from 
 pinned program crate. Regenerate them from the repository root with
 `cargo run --manifest-path client/Cargo.toml --bin ts_fixtures -- frontend/src/chain/fixtures`.
 Refresh the `.bin` account dumps first with
-`solana account -u devnet <key> --output json-compact`.
+`solana account -u devnet <key> --output-file frontend/src/chain/fixtures/<name>.bin`
+(`market.bin` = market, `portfolio.bin` = a trader portfolio, `lp_portfolio.bin` = the LP portfolio).
 
 `npm run roundtrip` runs a real devnet round trip. It creates a portfolio,
 deposits, opens, closes and withdraws, and prints the signatures. It needs a

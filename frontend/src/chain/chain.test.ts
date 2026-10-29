@@ -1,12 +1,12 @@
 // @vitest-environment node
 import { readFileSync } from "node:fs";
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, SystemInstruction } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import instructions from "./fixtures/instructions.json";
 import accounts from "./fixtures/accounts.json";
 import pdas from "./fixtures/pdas.json";
 import { vaultAuthority, vault, matcherDelegate } from "./pda";
-import { parseMarket, parsePortfolio, parseWrapperConfig, POSITION_EPOCH_MAX } from "./accounts";
+import { effectiveAbsQ, parseMarket, parsePortfolio, parseWrapperConfig, POSITION_EPOCH_MAX } from "./accounts";
 import { Writer, u8, u16, u32, u64, u128, i128 } from "./bytes";
 import * as ix from "./instructions";
 import { layout } from "./layout";
@@ -35,6 +35,7 @@ it("matches Rust vault and matcher PDAs", () => {
 // Normalize only at the assertion boundary to compare with the Rust JSON output.
 function jsonValue(value: unknown): unknown {
   if (value instanceof PublicKey) return Buffer.from(value.toBytes()).toString("hex");
+  if (value instanceof Uint8Array) return Buffer.from(value).toString("hex");
   if (typeof value === "bigint") return value.toString();
   if (Array.isArray(value)) return value.map(jsonValue);
   if (value !== null && typeof value === "object") {
@@ -173,4 +174,23 @@ describe("instruction account metas", () => {
     expect(ix.crankIx(program, owner, market, portfolio, crank).keys).toHaveLength(3);
     expect(ix.closeResolvedIx(program, owner, market, portfolio, ownerAta, vault, authority, true, { feeRatePerSlot: 0n }).keys[0]).toEqual({ pubkey: owner, isSigner: true, isWritable: false });
   });
+});
+
+it.each(["long", "short"] as const)("rounds effective %s size up and ignores reset epochs", side => {
+  const market = parseMarket(marketBytes);
+  market.asset0.aLong = market.asset0.aShort = 5n;
+  market.asset0.epochLong = 7n;
+  market.asset0.epochShort = 8n;
+  const leg = { assetIndex: 0, marketId: 1n, side, basisPosQ: side === "long" ? 3n : -3n,
+    aBasis: 10n, epochSnap: side === "long" ? 7n : 8n };
+  expect(effectiveAbsQ(market, leg)).toBe(2n);
+  expect(effectiveAbsQ(market, { ...leg, epochSnap: 6n })).toBe(0n);
+});
+
+it("funds portfolio rent from the standard two-year minimum", () => {
+  const key = new PublicKey(new Uint8Array(32).fill(1));
+  const [create] = ix.createPortfolioIxs(key, key, key, key);
+  const args = SystemInstruction.decodeCreateAccount(create);
+  expect(args.space).toBe(layout.PORTFOLIO_ACCOUNT_LEN);
+  expect(args.lamports).toBe((layout.PORTFOLIO_ACCOUNT_LEN + 128) * 6960);
 });

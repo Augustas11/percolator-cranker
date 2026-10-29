@@ -1,5 +1,5 @@
 import { Buffer } from "buffer";
-import { ComputeBudgetProgram, Connection, PublicKey, SystemProgram, TransactionInstruction } from "@solana/web3.js";
+import { ComputeBudgetProgram, PublicKey, SystemProgram, TransactionInstruction } from "@solana/web3.js";
 import type { AccountMeta } from "@solana/web3.js";
 import { Writer } from "./bytes";
 import type { Integer } from "./bytes";
@@ -78,11 +78,12 @@ export function initPortfolioIx(programId: PublicKey, owner: PublicKey, market: 
 }
 
 /** The caller must also sign the transaction with the new portfolio keypair. */
-export async function createPortfolioIxs(
-  connection: Connection, programId: PublicKey, owner: PublicKey, market: PublicKey, portfolio: PublicKey,
-): Promise<[TransactionInstruction, TransactionInstruction]> {
+export function createPortfolioIxs(
+  programId: PublicKey, owner: PublicKey, market: PublicKey, portfolio: PublicKey,
+): [TransactionInstruction, TransactionInstruction] {
   const space = layout.PORTFOLIO_ACCOUNT_LEN;
-  const lamports = await connection.getMinimumBalanceForRentExemption(space);
+  // Standard rent: 3480 lamports/byte-year * 2 years, including 128 bytes of overhead.
+  const lamports = (space + 128) * 6960;
   return [
     SystemProgram.createAccount({ fromPubkey: owner, newAccountPubkey: portfolio, space, lamports, programId }),
     initPortfolioIx(programId, owner, market, portfolio),
