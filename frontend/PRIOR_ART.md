@@ -28,3 +28,9 @@ which is the source for the real client's account layouts later on. Contributors
 - Plain React with a typed `MarketClient` and a mock behind it.
 - The data shapes use v16 engine terms: portfolio, leg, mark, funding, health.
 - No code was copied from any repo above.
+
+**On-chain matcher (`matcher/`, private):** forked from `aeyakovenko/percolator-match`
+(Apache-2.0, `60aac3a`, ABI v3). We kept its matcher-call parser and return writer and its
+licence. We dropped the vAMM, the passive quoter and the batch call, and added our own
+init, caps and reference-price check. The changes are listed in the header of
+`matcher/program/src/lib.rs`.

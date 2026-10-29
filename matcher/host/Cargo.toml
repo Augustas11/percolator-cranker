@@ -1,0 +1,18 @@
+[package]
+name = "drip-matcher-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+solana-sdk = "1.18"
+solana-client = "1.18"
+percolator-prog = { path = "../../repo-prog", features = ["no-entrypoint"], default-features = false }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "4db11a8cb0053815e23a35d3a7d3edc265d8d866" }
+spl-token = { version = "4.0", features = ["no-entrypoint"] }
+anyhow = "1"
+
+[dev-dependencies]
+litesvm = "0.1"

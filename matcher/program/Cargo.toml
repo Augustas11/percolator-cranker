@@ -1,0 +1,19 @@
+[package]
+name = "drip-matcher"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+
+[dependencies]
+solana-program = "2.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }
