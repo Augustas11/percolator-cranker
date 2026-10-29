@@ -67,13 +67,13 @@ own owner key signs init-ctx, init-lp, set-matcher-config and set-params for tha
 fill is signed by a throwaway tester wallet only. Never sign with another role's or bot's key.
 
 Devnet (2026-10-29): program `8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE`, context
-`8WhyZi5UFUiiUyHxJ2aWhkGGWTkX2eXfZztBiUiuiv1` on market `HyMKxfct…` for the matcher's own LP
-portfolio `3WiggjhmtYdL53CBjTG4PPMghNPDb4Y9GVPEaMk9XWFj` (delegate `FZiAMd6x…`, $5k test USDC).
-The re-pin session is moving this LP to its own owner key and will hand over the final LP and
-context; the bots' LP owner key must not sign for it. Retired contexts: `BHsZrk4c…` (old market `7p8DtcMH…`), `3WPsoVhi…` (the bots' LP `GUvzajrr…`).
-Limits: fill 10 SOL, inventory 100 SOL, age 25 slots, deviation 10 bps; price authority = the
-run's oracle key. Keys live in `~/.config/drip-devnet/`. `init-lp --portfolio-keypair KEYPAIR
---lp-owner KEYPAIR --deposit ATOMS` creates and funds such a portfolio (faucet-funded owner).
+`GMXktcTjqh8z3h2oCgUnodcLbh6hH4W6YUfL4hZMaXe7` on market `HyMKxfct…` for the matcher's own LP
+portfolio `6wH2d4CARhEWeGC2deBDb9pVT1a7Tgd48VUiFmkTNAHY` (owner `TVA9xtfv…`, its own key held by the
+re-pin run). Limits: fill 10 SOL, inventory 100 SOL, deviation 10 bps, price authority = the
+pusher's oracle key. Max reference age is 150 slots on devnet, where pushes land every 40-90
+slots; mainnet wants it near the 400 ms lag target. First TradeCpi fill, signed by the taker
+only: `4biJBxUbhkEXpr1Zb43CYmEFU74rqBH12p6qjeGM7JfuWNy4Vf4wLMkLEtPHLiQNoq7xgjjSi9iAvKjHJnhemaZt`.
+Retired contexts: `BHsZrk4c…`, `3WPsoVhi…`, `8WhyZi5U…`.
 
 **Operating rule: one LP portfolio per fill path.** Any non-matcher position change on an LP
 (for example a co-signed `TradeNoCpi`) bumps its position epoch and clears its matcher

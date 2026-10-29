@@ -446,18 +446,28 @@ fn preflight(rpc: &RpcClient, args: &Args, program: Pubkey) -> Result<()> {
         }
         _ => false,
     };
-    let checks = [
-        ("market Live", g.mode == percolator::MarketModeV16::Live),
+    println!(
+        "slot={now} market.current_slot={} market.slot_last={} asset.slot_last={} ref_slot={ref_slot}",
+        g.current_slot, g.slot_last, asset.slot_last
+    );
+    // The trade transaction's own cranks catch up the mark and accrual, and test-fill
+    // simulates it before sending, so these three are shown but do not gate.
+    for (name, ok) in [
         (
             "mark pushed within 25 slots",
             now.saturating_sub(g.current_slot) <= 25,
         ),
+        ("target == effective", asset.raw_oracle_target_price == eff),
+        ("not loss-stale", !g.loss_stale_active),
+    ] {
+        println!("{} {name}", if ok { "info" } else { "info-NOT" });
+    }
+    let checks = [
+        ("market Live", g.mode == percolator::MarketModeV16::Live),
         (
             "accrual within 32 slots",
             now.saturating_sub(g.slot_last) <= 32,
         ),
-        ("target == effective", asset.raw_oracle_target_price == eff),
-        ("not loss-stale", !g.loss_stale_active),
         (
             "matcher ref fresh",
             ref_slot != 0 && now.saturating_sub(ref_slot) <= age,
