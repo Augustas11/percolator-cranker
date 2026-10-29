@@ -3,6 +3,7 @@ name = "percolator-m1-bringup"
 version = "0.1.0"
 edition = "2021"
 publish = false
+default-run = "m1_bringup"
 
 [[bin]]
 name = "m1_bringup"

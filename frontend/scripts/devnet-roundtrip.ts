@@ -8,7 +8,7 @@
 // rebuild and retry up to 9 times, 3 s apart (simulation is free); failed transactions are never sent.
 //
 //   TESTER_KEYPAIR=... VITE_MATCHER_PROGRAM=... VITE_MATCHER_CONTEXT=... npm run roundtrip
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { ComputeBudgetProgram, Connection, Keypair, Transaction, VersionedTransaction, sendAndConfirmTransaction } from "@solana/web3.js";
 import type { PublicKey, SimulatedTransactionResponse, TransactionInstruction } from "@solana/web3.js";
 import { devnetConfig as cfg } from "../src/chain/config";
@@ -35,15 +35,21 @@ function checkSimulation(label: string, result: SimulatedTransactionResponse) {
 
 async function simulate(label: string, build: () => Promise<TransactionInstruction[]>) {
   for (let attempt = 0; ; attempt++) {
-    const ixs = await build();
-    const tx = new Transaction({ feePayer: tester.publicKey, ...(await conn.getLatestBlockhash()) }).add(...ixs);
-    const simulation = await conn.simulateTransaction(new VersionedTransaction(tx.compileMessage()), { sigVerify: false });
-    if (simulation.value.err && attempt < 9) {
-      await new Promise(resolve => setTimeout(resolve, 3_000));
-      continue;
+    try {
+      const ixs = await build();
+      const tx = new Transaction({ feePayer: tester.publicKey, ...(await conn.getLatestBlockhash()) }).add(...ixs);
+      const simulation = await conn.simulateTransaction(new VersionedTransaction(tx.compileMessage()), { sigVerify: false });
+      if (!simulation.value.err || attempt >= 9) {
+        checkSimulation(label, simulation.value);
+        return tx;
+      }
+    } catch (error) {
+      if (attempt >= 9) {
+        console.error(label, error);
+        process.exit(1);
+      }
     }
-    checkSimulation(label, simulation.value);
-    return tx;
+    await new Promise(resolve => setTimeout(resolve, 3_000));
   }
 }
 
@@ -73,8 +79,7 @@ if (!portfolio) {
 }
 
 function saveResult() {
-  mkdirSync(".roundtrip", { recursive: true });
-  writeFileSync(".roundtrip/result.json", JSON.stringify({ tester: tester.publicKey.toBase58(), portfolio: portfolio!.toBase58(), sigs }, null, 2));
+  writeFileSync("roundtrip-result.json", JSON.stringify({ tester: tester.publicKey.toBase58(), portfolio: portfolio!.toBase58(), sigs }, null, 2));
 }
 saveResult();
 
