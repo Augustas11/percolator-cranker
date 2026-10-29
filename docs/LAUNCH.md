@@ -145,8 +145,12 @@ Not automated:
 
 The money case holds only with the posted mark within about **400 ms** of
 the market (`research/replay/REPORT.md`). Config: `oracle.lag_target_ms`
-(400), `oracle.push_interval_ms` (the bots tick, 3,000), heartbeat and
-deviation.
+(400). The pusher has its own thread and RPC client, polling every
+`oracle.push_poll_ms` (400); it pushes at `push_min_move_bps` (1) or the
+slot heartbeat. `oracle.push_interval_ms` remains the main bots tick (3,000).
+Pushes alone use `priority_fee_micro_lamports` (10,000) and `push_cu_limit`
+(14,000, about 2× the measured 6,596 CU local landed push); other roles
+retain their existing compute budget.
 
 - **Measured lag** = source price time → push landed (processed, polled
   every 50 ms; the push skips preflight). Mock: the time the price was
@@ -154,8 +158,9 @@ deviation.
   slots). Pyth: the account's `publish_time`, whole seconds, so it reads up
   to 1 s high.
 - The pusher logs `{"event":"mark_lag","ms":…}` per push; the monitor
-  exports it as `percolator_keeper_mark_lag_ms` (it reads the bots log) and
-  `monitor/alerts.yml` alerts `PusherMarkLagHigh` above 400 ms for 5 min.
+  exports `percolator_keeper_mark_lag_ms` and rolling nearest-rank
+  `percolator_keeper_mark_lag_p50_ms` / `percolator_keeper_mark_lag_p95_ms`
+  over the last 300 pushes. `PusherMarkLagHigh` alerts on p95 > 400 ms for 5 min.
   The lag gauge keeps its last value if pushes stop, so the monitor also
   exports `percolator_keeper_mark_push_age_seconds` (from the event's
   `at_ms`), and `PusherMarkStale` fires when no push has landed for 2 min.
@@ -170,19 +175,26 @@ deviation.
 - **That source is too slow for the money case.** Devnet's sponsored
   SOL/USD account was ~70 s old when checked (2026-10-29). The low-latency
   path is Hermes (what upstream's `pyth-push-devnet.ts` reads), and Hermes'
-  price endpoint now answers 401 without an API key. Next small PR: a Hermes
-  (with key) or Pyth Lazer source behind `source_price`; mainnet needs it.
-- **Sub-400 ms needs the pusher on its own loop.** One bots tick runs all
-  roles; a faster tick also speeds the matcher, backing and keeper.
+  price endpoint requires a paid API key since the Pyth Core upgrade
+  (2026-08-26). A fast streaming source is pending an owner decision;
+  `PriceSource::latest` is the extension boundary. No Hermes client is built here.
 - **The matcher refuses fills while the mark lags; keep it.** The engine
   refuses a risk-increasing trade while an asset's AuthMark target differs
   from its effective price (`trade_preflight_risk_gate`, engine `v16.rs`
   16153, `asset_has_target_effective_lag` 16013). The matcher never works
-  around it: it opens only right after a push and with the asset cranked to
-  the current slot in the same tx, and the mock pusher keeps each step
+  around it: an open requires a landed push no older than
+  `oracle.open_max_mark_age_ms` (1,000), equal target/effective prices,
+  and the asset cranked to the current slot in the same tx, and the mock pusher keeps each step
   inside `max_price_move_bps_per_slot`. With Pyth a larger move leaves the
   effective price walking behind, and opens are refused until it catches up.
   Do not remove this.
+- **Matcher caps:** `max_fill_notional_usd` and `max_lp_inventory_usd` are
+  both $100,000. The LP co-signs every fill; refusals log `trade=refused(reason)`
+  without counting as failures. Inventory-reducing fills may exceed the inventory
+  cap, but every fill must meet the ticket cap. REPORT.md finds 2.7–4.8 bps adverse
+  selection above $100k; its inventory limit and `ops/CAPITAL_PLAN.md` set inventory
+  at 10% of $1M/day. There is no on-chain OI cap at this pin: this matcher cap
+  is the OI cap for fills it signs.
 
 ## Drill
 

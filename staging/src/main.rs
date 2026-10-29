@@ -5,10 +5,10 @@
 //!
 //! Setup: test USDC mint, market (InitMarket, one asset), permissionless
 //! resolve policy, ConfigureAuthMark, an LP and a trader portfolio with
-//! deposits. Then one tick every `STAGING_TICK_MS`:
+//! deposits. A dedicated price thread runs beside the main bots tick:
 //!
 //! 1. price pusher: `PushAuthMark` of the price source (`mock_sol_usd`) on a
-//!    heartbeat or a deviation;
+//!    heartbeat or a deviation, polling every `oracle.push_poll_ms`;
 //! 2. LP matcher: LP and trader co-sign `TradeNoCpi` at mark +- a fixed
 //!    spread; the trader alternates open and close, so |position| <= one size;
 //! 3. backing manager: keeps domains 0 and 1 funded; before expiry it
@@ -59,6 +59,7 @@ use solana_sdk::{
 use std::{env, str::FromStr, time::Duration, time::Instant};
 
 mod launch;
+mod pusher;
 use launch::Config;
 
 /// Params (market, amounts, matcher, oracle): `launch/sol-perp.toml`.
@@ -88,7 +89,7 @@ fn short(e: &anyhow::Error) -> String {
         .unwrap_or_else(|| msg.chars().take(120).collect())
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Role {
     ok: u64,
     fail: u64,
@@ -160,9 +161,8 @@ struct Staging {
     /// Last price-source reading, and the last mark pushed on-chain.
     feed: u64,
     mark: u64,
-    last_push_slot: u64,
     push_heartbeat_slots: u64,
-    push_deviation_bps: u64,
+    pushed: Option<std::sync::Arc<std::sync::Mutex<pusher::Shared>>>,
     /// The trader's open size, as the matcher last left it.
     open: Option<i128>,
     /// A backing roll is due: the matcher stays flat until it is done.
@@ -332,9 +332,8 @@ impl Staging {
             rng: env_or("STAGING_SEED", 42u64),
             feed: cfg.market.initial_price,
             mark: cfg.market.initial_price,
-            last_push_slot: 0,
             push_heartbeat_slots: env_or("STAGING_PUSH_HEARTBEAT_SLOTS", o.push_heartbeat_slots),
-            push_deviation_bps: env_or("STAGING_PUSH_DEVIATION_BPS", o.push_deviation_bps),
+            pushed: None,
             open: None,
             rolling: false,
             tenor: env_or("STAGING_BACKING_TENOR_SLOTS", cfg.amounts.backing_tenor_slots),
@@ -457,7 +456,6 @@ impl Staging {
         }
         if !ixs.is_empty() {
             self.send_admin("ConfigureOracle", &ixs)?;
-            self.last_push_slot = now;
         }
         Ok(())
     }
@@ -469,74 +467,21 @@ impl Staging {
     /// else a seeded mock path, one step of at most `max_bps`, kept within
     /// +-5% of the configured initial price, timestamped when generated.
     fn source_price(&mut self, max_bps: u64) -> Result<(u64, u64)> {
-        if let Some(feed) = &self.pyth_feed {
-            return launch::pyth_sol_usd(&self.rpc, feed, &self.cfg.oracle);
-        }
-        let p0 = self.cfg.market.initial_price;
-        let step = (self.next_rand() % (2 * max_bps + 1)) as i128 - max_bps as i128;
-        let next = self.feed as i128 * (10_000 + step) / 10_000;
-        self.feed = (next as u64).clamp(p0 * 95 / 100, p0 * 105 / 100);
-        Ok((self.feed, launch::now_ms()))
-    }
-
-    /// `force`: the matcher opens this tick; a risk-increasing fill is
-    /// refused (EngineLockActive) unless the mark was pushed just before.
-    fn push_price(&mut self, force: bool) -> Result<Option<String>> {
-        let (_, g, s) = self.read()?;
-        let now = self.rpc.get_slot()?;
-        // The effective price walks at most max_price_move_bps_per_slot
-        // toward the mark; the mock keeps each step inside what it can follow.
-        let max_bps = (g.config.max_price_move_bps_per_slot * now.saturating_sub(self.last_push_slot).max(1)).min(50);
-        let (mark, source_ms) = self.source_price(max_bps)?;
-        // Push rule of Pyth's price_pusher (pattern only): push when the
-        // heartbeat has elapsed or the price moved past the deviation.
-        let moved_bps = mark.abs_diff(self.mark) * 10_000 / self.mark;
-        if !force && now.saturating_sub(self.last_push_slot) < self.push_heartbeat_slots && moved_bps < self.push_deviation_bps {
-            return Ok(None);
-        }
-        // Mirrors v16_svm.rs `push_auth_mark` (upstream test support).
-        let ix = P::PushAuthMark {
-            asset_index: 0,
-            market_id: g.assets[0].market_id,
-            now_slot: now,
-            mark_e6: mark,
-            observation_sequence: s.oracle_observation + 1,
-            authority_epoch: s.authority_epoch,
+        let mut source = match self.pyth_feed {
+            Some(feed) => pusher::PriceSource::Pyth {
+                rpc: RpcClient::new_with_commitment(self.rpc.url(), CommitmentConfig::confirmed()),
+                feed, cfg: self.cfg.oracle.clone(),
+            },
+            None => pusher::PriceSource::Mock {
+                price: self.feed, initial: self.cfg.market.initial_price, rng: self.rng, max_bps,
+            },
         };
-        // Mark lag: source price time to the push landing (processed, polled
-        // every 50 ms); then wait for confirmed as the other roles do.
-        // No preflight: one RPC round trip less on the latency path; a
-        // failed push still surfaces through its status below.
-        let tx = self.tx(&[self.prog_ix(ix, self.role_metas(&self.oracle_kp))], &[&self.oracle_kp])?;
-        let no_preflight = RpcSendTransactionConfig { skip_preflight: true, ..Default::default() };
-        let sig = self.rpc.send_transaction_with_config(&tx, no_preflight)?;
-        let mut lag = None;
-        let t0 = Instant::now();
-        loop {
-            let st = self.rpc.get_signature_status_with_commitment(&sig, CommitmentConfig::processed())?;
-            if let Some(r) = st {
-                r?;
-                lag.get_or_insert(launch::now_ms().saturating_sub(source_ms));
-                if self.rpc.confirm_transaction(&sig)? {
-                    break;
-                }
-            }
-            if t0.elapsed() > Duration::from_secs(30) {
-                bail!("PushAuthMark {sig} not confirmed in 30 s");
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        let reading = source.latest()?;
+        if let pusher::PriceSource::Mock { price, rng, .. } = source {
+            self.feed = price;
+            self.rng = rng;
         }
-        let lag = lag.unwrap_or_default();
-        if self.keeper_log {
-            println!(
-                "{{\"event\":\"mark_lag\",\"ms\":{lag},\"target_ms\":{},\"at_ms\":{}}}",
-                self.cfg.oracle.lag_target_ms,
-                launch::now_ms()
-            );
-        }
-        self.mark = mark;
-        self.last_push_slot = now;
-        Ok(Some(format!("ok({lag}ms)")))
+        Ok(reading)
     }
 
     fn match_trade(&mut self) -> Result<Option<String>> {
@@ -560,7 +505,21 @@ impl Staging {
             None if coin => self.cfg.matcher.size_q as i128,
             None => -(self.cfg.matcher.size_q as i128),
         };
+        if self.open.is_none() {
+            let fresh = self.pushed.as_ref().is_some_and(|p| {
+                let p = p.lock().unwrap();
+                p.market == self.market && p.landed_ms.is_some_and(|at| launch::now_ms().saturating_sub(at) <= self.cfg.oracle.open_max_mark_age_ms)
+            });
+            if !fresh { return Ok(Some("refused(stale_mark)".into())); }
+        }
         let mark = g.assets[0].effective_price;
+        let lp_data = self.rpc.get_account_data(&self.lp_pf)?;
+        let lp = read_portfolio(&lp_data).map_err(|e| anyhow!("{e:?}"))?;
+        let lp_position = lp.legs.iter().filter(|l| l.active != 0 && l.asset_index.get() == 0)
+            .map(|l| l.basis_pos_q.get()).sum();
+        if let Err(reason) = fill_allowed(q, mark, lp_position, &self.cfg.matcher) {
+            return Ok(Some(format!("refused({reason})")));
+        }
         let half = mark * self.cfg.matcher.spread_bps / 10_000;
         let price = if q > 0 { mark + half } else { mark - half };
         let tb = binding::portfolio_binding(&self.rpc.get_account_data(&self.trader_pf)?)?;
@@ -587,7 +546,14 @@ impl Staging {
                 AccountMeta::new(self.lp_pf, false),
             ],
         ));
-        self.send(&ixs, &[&self.trader, &self.lp])?;
+        if let Err(error) = self.send(&ixs, &[&self.trader, &self.lp]) {
+            // A concurrent push can expose target/effective lag after the
+            // cranks were prepared. The engine still refuses the fill.
+            if short(&error) == "EngineLockActive" {
+                return Ok(Some("refused(target_effective_lag)".into()));
+            }
+            return Err(error);
+        }
         self.open = if self.open.is_some() { None } else { Some(q) };
         Ok(Some(format!("{}{}", if q > 0 { "+" } else { "-" }, q.unsigned_abs())))
     }
@@ -857,10 +823,13 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         println!("market            = {}", st.market);
     }
 
+    let (pushed, push_lifecycle, pusher_thread) = pusher::start(&st);
+    st.pushed = Some(std::sync::Arc::clone(&pushed));
     let budget = CycleBudget::from_env();
     let mut quarantine = Quarantine::new(QuarantineConfig::from_env());
     let mut cu = CuStats::default();
-    let (mut push, mut trade, mut backing, mut insurance) = (Role::default(), Role::default(), Role::default(), Role::default());
+    let mut push;
+    let (mut trade, mut backing, mut insurance) = (Role::default(), Role::default(), Role::default());
     let mut lifecycle = Role::default();
     // Default: halfway through the run. 0 turns the lifecycle off.
     let lifecycle_tick: u64 = if bots { 0 } else { env_or("STAGING_LIFECYCLE_TICK", (hours * 1_800_000.0 / tick_ms as f64) as u64) };
@@ -872,6 +841,11 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
     while Instant::now() < deadline && !abnormal {
         tick += 1;
         let t0 = Instant::now();
+        let transitioning = st.phase != Phase::Live
+            || (lifecycle_tick != 0 && tick >= lifecycle_tick && !st.relisted);
+        let in_flight = if transitioning { Some(push_lifecycle.lock().unwrap()) } else { None };
+        let mut push_state = pushed.lock().unwrap();
+        st.mark = push_state.mark;
         let l = lifecycle.record(match st.phase {
             // From its tick on, SHUTDOWN is retried until it lands.
             Phase::Live if lifecycle_tick != 0 && tick >= lifecycle_tick && !st.relisted => st.shutdown(),
@@ -880,7 +854,16 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
             Phase::Live => Ok(None),
         });
         let live = st.phase == Phase::Live;
-        let p = if live { push.record(st.push_price(st.open.is_none() && !st.rolling)) } else { "-".into() };
+        push_state.live = live;
+        if push_state.market != st.market {
+            push_state.market = st.market;
+            push_state.mark = st.mark;
+            push_state.landed_ms = None;
+        }
+        push = push_state.role.clone();
+        drop(push_state);
+        drop(in_flight);
+        let p = "thread";
         let t = if live { trade.record(st.match_trade()) } else { "-".into() };
         let b = if live { backing.record(st.manage_backing()) } else { "-".into() };
         let i = if live && tick % insurance_every == 0 { insurance.record(st.top_up_insurance(st.cfg.amounts.insurance_topup)) } else { "-".into() };
@@ -934,6 +917,10 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
             std::thread::sleep(rest);
         }
     }
+    pushed.lock().unwrap().stop = true;
+    pusher_thread.join().map_err(|_| anyhow!("pusher thread panicked"))?;
+    push = pushed.lock().unwrap().role.clone();
+    abnormal |= push.abnormal(max_consec);
     let roles = [("push", &push), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
     println!("{}", summary(tick, started, &st, &roles, &keeper, true));
     if abnormal {
@@ -946,4 +933,40 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
     }
     println!("staging: OK");
     Ok(())
+}
+
+/// size_q is the trader delta; the LP takes its opposite. Compare full
+/// products so one atom above a dollar limit cannot disappear in rounding.
+fn fill_allowed(size_q: i128, mark_e6: u64, lp_position_q: i128, cfg: &launch::MatcherCfg) -> Result<(), &'static str> {
+    let next = lp_position_q.checked_sub(size_q).ok_or("inventory_overflow")?;
+    let notional = size_q.unsigned_abs().checked_mul(mark_e6 as u128).ok_or("notional_overflow")?;
+    if notional > cfg.max_fill_notional_usd as u128 * 1_000_000_000_000 {
+        return Err("max_fill_notional");
+    }
+    if next.unsigned_abs() <= lp_position_q.unsigned_abs() { return Ok(()); }
+    let inventory = next.unsigned_abs().checked_mul(mark_e6 as u128).ok_or("inventory_overflow")?;
+    if inventory > cfg.max_lp_inventory_usd as u128 * 1_000_000_000_000 {
+        return Err("max_lp_inventory");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+    fn cfg() -> launch::MatcherCfg {
+        launch::MatcherCfg { size_q: 1, spread_bps: 10, fee_bps: 12, max_fill_notional_usd: 100_000, max_lp_inventory_usd: 100_000 }
+    }
+    #[test]
+    fn fill_limit_exact_and_one_atom_over() {
+        assert_eq!(fill_allowed(1_000_000_000, 100_000_000, 0, &cfg()), Ok(()));
+        assert_eq!(fill_allowed(1_000_000_001, 100_000_000, 0, &cfg()), Err("max_fill_notional"));
+    }
+    #[test]
+    fn inventory_limit_and_reduction() {
+        assert_eq!(fill_allowed(-1, 100_000_000, 999_999_999, &cfg()), Ok(()));
+        assert_eq!(fill_allowed(-1, 100_000_000, 1_000_000_000, &cfg()), Err("max_lp_inventory"));
+        assert_eq!(fill_allowed(1, 100_000_000, 2_000_000_000, &cfg()), Ok(()));
+        assert_eq!(fill_allowed(-1, 100_000_000, -2_000_000_000, &cfg()), Ok(()));
+    }
 }

@@ -83,8 +83,23 @@ pub struct OracleCfg {
     pub lag_target_ms: u64,
     pub push_interval_ms: u64,
     pub push_heartbeat_slots: u64,
-    pub push_deviation_bps: u64,
+    #[serde(default = "default_push_poll_ms")]
+    pub push_poll_ms: u64,
+    #[serde(default = "default_push_min_move_bps")]
+    pub push_min_move_bps: u64,
+    #[serde(default = "default_priority_fee")]
+    pub priority_fee_micro_lamports: u64,
+    #[serde(default = "default_push_cu_limit")]
+    pub push_cu_limit: u32,
+    #[serde(default = "default_open_mark_age")]
+    pub open_max_mark_age_ms: u64,
 }
+
+fn default_push_poll_ms() -> u64 { 400 }
+fn default_push_min_move_bps() -> u64 { 1 }
+fn default_priority_fee() -> u64 { 10_000 }
+fn default_push_cu_limit() -> u32 { 14_000 }
+fn default_open_mark_age() -> u64 { 1000 }
 
 /// InitMarket, field for field (`initial_price` is the mock start). TOML
 /// integers are i64, so u128 fields are read as u64.
@@ -127,6 +142,8 @@ pub struct ResolveCfg {
 #[serde(deny_unknown_fields)]
 pub struct MatcherCfg {
     pub size_q: i64,
+    pub max_fill_notional_usd: u64,
+    pub max_lp_inventory_usd: u64,
     pub spread_bps: u64,
     pub fee_bps: u64,
 }

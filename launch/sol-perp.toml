@@ -63,11 +63,15 @@ pyth_max_conf_bps = 100
 # (research/replay/REPORT.md, "Recommended start"). Lag = source price time
 # to push landed; the pusher logs it, the health check and monitor alert on it.
 lag_target_ms = 400
-# One bots tick: the pusher reads the source, then the matcher, backing,
-# insurance and keeper run. Sub-400 ms needs the pusher on its own loop.
+# Main bots tick; the pusher has its own RPC and thread.
 push_interval_ms = 3000
 push_heartbeat_slots = 25
-push_deviation_bps = 10
+push_poll_ms = 400
+push_min_move_bps = 1
+priority_fee_micro_lamports = 10000
+# Local landed PushAuthMark: 6,596 CU including budget instructions; ~2x.
+push_cu_limit = 14000
+open_max_mark_age_ms = 1000
 
 # InitMarket. Values and reasoning: docs/OPERATOR_PLAYBOOK.md section 2.
 [market]
@@ -110,6 +114,12 @@ force_close_delay_slots = 20
 # Off-chain matcher: LP and trader co-sign TradeNoCpi at mark +- spread.
 # Nothing to configure on chain (no TradeCpi matcher program).
 [matcher]
+# REPORT.md: tickets above $100k carry 2.7–4.8 bps adverse selection.
+max_fill_notional_usd = 100000
+# REPORT.md inventory limit (~line 260), ops/CAPITAL_PLAN.md: 10% of
+# $1M daily volume. No on-chain OI cap at this pin: this IS the OI cap.
+# Keep the engine refusal when AuthMark target != effective mark.
+max_lp_inventory_usd = 100000
 size_q = 10000000                # 10 SOL
 spread_bps = 10
 fee_bps = 12                     # >= trade_fee_base_bps (the wrapper refuses less)
