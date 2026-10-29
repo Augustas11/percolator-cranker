@@ -1,0 +1,44 @@
+# SOL-PERP LP hedger (README.md). Dry-run unless started with --live.
+# Policy is the replay's "tight" setting (research/replay/REPORT.md):
+# hedge the whole net once |LP + hedge| exceeds 1% of daily volume.
+
+[chain]
+rpc = "https://api.devnet.solana.com"
+# Our devnet deployment (program GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS).
+market = "7p8DtcMHSjdCsM9xWvBwF6TebGBSL18wKvfM7BS1zyHq"
+lp_portfolio = "GKJHRYBKwtswFHK5oyGknpcXxYEMjh7rDDR9f1KU9T5P"
+asset = 0
+
+[venue]
+# Devnet/local markets can only pair with testnet (enforced from the RPC
+# genesis hash at startup); mainnet needs a mainnet-beta market.
+network = "testnet"
+coin = "SOL"
+# Base tier (tier 0) perp taker, as the replay assumed. Check yours in the
+# Hyperliquid fee page before going live (staking/volume tiers lower it).
+taker_fee_bps = 4.5
+# IOC limit: the worst level the book walk touches, moved this far against us.
+limit_slippage_bps = 10
+
+[policy]
+# 1% of daily volume at $1M/day.
+threshold_usd = 10000
+# ~$10k at $100/SOL per order; ~$50k total (2.5x on the $20k margin).
+max_order_sol = 100
+max_hedge_sol = 500
+cooldown_ms = 2000
+min_order_usd = 10
+
+[safety]
+# Stop ordering once residual P&L minus hedge costs passes -$2k (the
+# replay's worst hedged day at 12 bps was -$2.8k, all causes).
+max_loss_usd = 2000
+# `touch` this to stop all orders at once; delete it to resume.
+kill_file = "/tmp/percolator-hedger.KILL"
+# Hold when our mark and the venue mid differ by more (0 = off).
+max_mark_gap_bps = 200
+
+[run]
+tick_ms = 2000
+funding_every_ms = 60000
+metrics_listen = "127.0.0.1:9185"
