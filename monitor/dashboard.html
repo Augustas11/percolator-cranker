@@ -15,7 +15,7 @@
 <section><h2>Resolved claims</h2><div id="resolved"></div></section></div>
 <script>
 'use strict';
-const QUARANTINE_SLOTS=1500, DRIFT_ATOMS_PER_HOUR=1000, NO_SUCCESS_SLOTS=750, LOG_STALE_SECONDS=120, SNAPSHOT_STALE_SECONDS=60;
+const QUARANTINE_SLOTS=1500, DRIFT_ATOMS_PER_HOUR=1000, NO_SUCCESS_SLOTS=750, LOG_STALE_SECONDS=120, SNAPSHOT_STALE_SECONDS=60, MARK_LAG_MS=400, MARK_STALE_SECONDS=120;
 const POLL_MS=5000, HOUR_SECONDS=3600;
 let history=[],lastMarket;
 function text(value){return value===null||value===undefined?'—':String(value);}
@@ -35,6 +35,8 @@ function render(s){
   if(b?.expiring_with_liens>0)alerts.push(`BackingBucketExpiringWithLiens: ${b.expiring_with_liens}`);
   if(s.mode==='live'&&k?.slots_since_last_success>NO_SUCCESS_SLOTS)alerts.push(`KeeperNoSuccessfulCrank: ${k.slots_since_last_success} slots`);
   if(k&&(k.log_age_seconds>LOG_STALE_SECONDS||!k.log_ok))alerts.push('KeeperLogStale');
+  if(k?.mark_lag_ms>MARK_LAG_MS)alerts.push(`PusherMarkLagHigh: ${k.mark_lag_ms} ms`);
+  if(k?.mark_push_age_seconds>MARK_STALE_SECONDS)alerts.push(`PusherMarkStale: ${k.mark_push_age_seconds} s since last push`);
   if(s.chain_read_ok===0)alerts.push('MonitorChainReadFailing (fires after 5m)');
   if(Date.now()/1000-s.snapshot_unix_seconds>SNAPSHOT_STALE_SECONDS)alerts.push('MonitorSnapshotStale');
   if(lastMarket!==s.market){history=[];lastMarket=s.market;}
@@ -52,7 +54,7 @@ function render(s){
   const list=document.getElementById('alerts');list.replaceChildren();
   for(const message of alerts.length?alerts:['No threshold conditions observed']){const li=document.createElement('li');li.textContent=message;list.append(li);}
   table('accounts',['Metric','Value'],[['Portfolios (engine)',s.accounts?.total],['Portfolios discovered',s.accounts?.discovered],['Decode errors',s.accounts?.decode_errors],...pairs(s.accounts?.out_of_date)]);
-  table('keeper',['Metric','Value'],k?[['Log OK',k.log_ok],['Last cycle',k.last_cycle],...pairs(k.last_cycle_attempts).map(([a,v])=>[`Last ${a}`,v]),...pairs(k.attempts_total).map(([a,v])=>[`Total ${a}`,v]),...pairs(k.cycles_total).map(([a,v])=>[`Cycles ${a}`,v]),['Cycle CU',k.last_cycle_cu],['CU p50',k.crank_cu?.p50],['CU max',k.crank_cu?.max],['Last landed crank slot',k.last_success_slot],['Slots since landed crank',k.slots_since_last_success]]:[['Keeper log','Not configured']]);
+  table('keeper',['Metric','Value'],k?[['Log OK',k.log_ok],['Last cycle',k.last_cycle],...pairs(k.last_cycle_attempts).map(([a,v])=>[`Last ${a}`,v]),...pairs(k.attempts_total).map(([a,v])=>[`Total ${a}`,v]),...pairs(k.cycles_total).map(([a,v])=>[`Cycles ${a}`,v]),['Cycle CU',k.last_cycle_cu],['CU p50',k.crank_cu?.p50],['CU max',k.crank_cu?.max],['Last landed crank slot',k.last_success_slot],['Slots since landed crank',k.slots_since_last_success],['Mark lag (ms)',k.mark_lag_ms],['Mark push age (s)',k.mark_push_age_seconds]]:[['Keeper log','Not configured']]);
   table('quarantine',['Account','Error','Strike','Slots'],(k?.quarantined_accounts||[]).map(q=>[q.account,q.error,q.strike,q.slots]));
   table('buckets',['Asset / side','Status','Expiry','Slots left','Lien numerator'],[
     ...pairs(b?.counts).map(([name,n])=>['All',name,n,'','']),

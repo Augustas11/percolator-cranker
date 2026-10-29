@@ -94,6 +94,6 @@ if ! solana program show --url "$LOCAL_RPC" "$PROG_ID" >/dev/null 2>&1; then
 fi
 
 echo "==> running client/m1_bringup"
-( cd "$BRINGUP_DIR" && cargo run --release --quiet )
+( cd "$BRINGUP_DIR" && cargo run --release --quiet --bin m1_bringup )
 
 echo "==> M1 bringup complete"
