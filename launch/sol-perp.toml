@@ -68,6 +68,11 @@ exchange_min_venues = 2
 pyth_feed_id = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
 pyth_price_account = "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE"
 pyth_max_age_s = 120
+# Optional read-only RPC for the Pyth price account. Devnet's own copy is
+# minutes stale; mainnet's sponsored SOL/USD account is ~5-10 s fresh, so a
+# devnet pusher with price_source = "pyth" can read it from mainnet (reads
+# only; nothing is ever sent there). Empty = the cluster's own RPC.
+# pyth_rpc = "https://api.mainnet-beta.solana.com"
 pyth_max_conf_bps = 100
 # The money case holds only with the mark within ~400 ms of the market
 # (research/replay/REPORT.md, "Recommended start"). Lag = source price time

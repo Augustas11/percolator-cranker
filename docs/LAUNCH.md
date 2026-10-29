@@ -292,3 +292,12 @@ One server; `deploy/`:
   code). The `drip` binary itself boots its own market on 127.0.0.1:8899 at
   this pin, so it cannot crank an existing market; changing that would change
   the keeper.
+
+**Fallback source on hosts that can't reach the exchanges.** Some networks
+block the exchange endpoints; this one does at the ISP. Set
+`price_source = "pyth"` with `oracle.pyth_rpc` pointing at a mainnet RPC.
+The pusher then reads mainnet's sponsored Pyth SOL/USD account, read-only,
+and pushes it on devnet. It's real Pyth, but about 5–10 s behind (Pyth's
+sponsored update cadence), so it only keeps a devnet market live; it says
+nothing about the 400 ms target. That's what the devnet market ran on
+after the 2026-10-29 relist.

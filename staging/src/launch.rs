@@ -84,6 +84,11 @@ pub struct OracleCfg {
     pub exchange_min_venues: usize,
     pub pyth_feed_id: String,
     pub pyth_price_account: String,
+    /// Read-only RPC the Pyth price account is read from, when it is not the
+    /// cluster's own (e.g. devnet pushing marks read from mainnet's sponsored
+    /// SOL/USD account, which Pyth keeps fresh only on mainnet). Never sends.
+    #[serde(default)]
+    pub pyth_rpc: String,
     pub pyth_max_age_s: u64,
     pub pyth_max_conf_bps: u16,
     pub lag_target_ms: u64,
@@ -752,4 +757,10 @@ pub fn is_mainnet(rpc: &RpcClient) -> Result<bool> {
 /// Error text with every URL cut to its host (the keeper's own scrubber).
 pub fn scrub(msg: &str) -> String {
     drip::submit::scrub_urls(msg)
+}
+
+/// The RPC to read the Pyth price account from: `oracle.pyth_rpc` when set
+/// (read-only), else the cluster's.
+pub fn pyth_rpc_url(o: &OracleCfg, cluster_rpc: &str) -> String {
+    if o.pyth_rpc.is_empty() { cluster_rpc.to_string() } else { o.pyth_rpc.clone() }
 }

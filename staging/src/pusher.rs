@@ -54,7 +54,7 @@ pub fn start(st: &Staging) -> (Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::
         PriceSource::Exchanges(source.clone())
     } else { match st.pyth_feed {
         Some(feed) => PriceSource::Pyth {
-            rpc: RpcClient::new_with_commitment(st.rpc.url(), CommitmentConfig::confirmed()),
+            rpc: RpcClient::new_with_commitment(launch::pyth_rpc_url(&st.cfg.oracle, &st.rpc.url()), CommitmentConfig::confirmed()),
             feed, cfg: st.cfg.oracle.clone(),
         },
         None => PriceSource::Mock {

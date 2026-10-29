@@ -472,7 +472,7 @@ impl Staging {
         if let Some(source) = &mut self.exchanges { return source.latest().map(|r| (r.price, r.publish_time_ms)); }
         let mut source = match self.pyth_feed {
             Some(feed) => pusher::PriceSource::Pyth {
-                rpc: RpcClient::new_with_commitment(self.rpc.url(), CommitmentConfig::confirmed()),
+                rpc: RpcClient::new_with_commitment(launch::pyth_rpc_url(&self.cfg.oracle, &self.rpc.url()), CommitmentConfig::confirmed()),
                 feed, cfg: self.cfg.oracle.clone(),
             },
             None => pusher::PriceSource::Mock {
