@@ -59,11 +59,17 @@ Test-fill option --price-authority KEYPAIR pushes the reference (plus the mark w
 the trade (rehearsal while the pusher is paused); the trade itself is signed by the taker only.
 
 Devnet (2026-10-29): program `8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE`, context
-`3WPsoVhij9XCZkJJ12zcev1DwqCouXXEFvnYKUnH1WMi` for the relisted market `HyMKxfct…`, LP portfolio
-`GUvzajrr…`, delegate `DfrgfJRy…`. (Context `BHsZrk4c…` is bound to the retired market `7p8DtcMH…`.)
+`8WhyZi5UFUiiUyHxJ2aWhkGGWTkX2eXfZztBiUiuiv1` on market `HyMKxfct…` for the matcher's own LP
+portfolio `3WiggjhmtYdL53CBjTG4PPMghNPDb4Y9GVPEaMk9XWFj` (delegate `FZiAMd6x…`, $5k test USDC).
+Retired contexts: `BHsZrk4c…` (old market `7p8DtcMH…`), `3WPsoVhi…` (the bots' LP `GUvzajrr…`).
 Limits: fill 10 SOL, inventory 100 SOL, age 25 slots, deviation 10 bps; price authority = the
-run's oracle key. Keys live in `~/.config/drip-devnet/`.
+run's oracle key. Keys live in `~/.config/drip-devnet/`. `init-lp --portfolio-keypair KEYPAIR
+--lp-owner KEYPAIR --deposit ATOMS` creates and funds such a portfolio.
 
-Any non-matcher position change on the LP (for example a co-signed `TradeNoCpi`) clears the
-LP's matcher capability at this wrapper pin (`v16_program.rs:1180-1203`, `:8251-8256`), so the
-LP must sign SetMatcherConfig again. Do not co-sign TradeNoCpi on the matcher's LP portfolio.
+**Operating rule: one LP portfolio per fill path.** Any non-matcher position change on an LP
+(for example a co-signed `TradeNoCpi`) bumps its position epoch and clears its matcher
+capability at this wrapper pin (`v16_program.rs:1180-1203`, `:8251-8256`). Bots never trade or
+co-sign on the matcher's LP; monitoring and the hedge count both LPs.
+
+Trades must crank every portfolio that holds a position on the asset first (`test-fill --crank
+PF1,PF2`); otherwise the wrapper refuses with EngineLockActive while the market is loss-stale.

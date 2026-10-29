@@ -224,6 +224,21 @@ fn main() -> Result<()> {
             };
             send(&rpc, &payer, &[ix], &[&owner])?;
         }
+        "init-lp" => {
+            // The matcher's own LP portfolio: one LP portfolio per fill path, because a
+            // non-matcher fill on the LP clears its matcher capability (README).
+            let pf = args.key("portfolio-keypair")?;
+            funded_portfolio(
+                &rpc,
+                &payer,
+                args.value("wrapper")?,
+                args.value("market")?,
+                &args.key("lp-owner")?,
+                &pf,
+                args.value("deposit")?,
+            )?;
+            println!("lp_portfolio={}", pf.pubkey());
+        }
         "test-fill" => test_fill(&rpc, &payer, &args, program)?,
         _ => bail!("unknown command {command}"),
     }
@@ -237,104 +252,42 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
     let ctx: Pubkey = args.value("ctx")?;
     let taker = Keypair::new();
     let pf = Keypair::new();
-    let token = Keypair::new();
-    let market_data = rpc.get_account_data(&market)?;
-    let (cfg, group) = state::read_market(&market_data)?;
-    let mint = Pubkey::new_from_array(cfg.collateral_mint);
-    let mint_account = rpc.get_account(&mint)?;
-    if mint_account.owner != spl_token::ID {
-        bail!("test-fill requires an SPL Token test mint");
-    }
-    let mint_state = spl_token::state::Mint::unpack(&mint_account.data)?;
-    if mint_state.mint_authority != solana_sdk::program_option::COption::Some(payer.pubkey()) {
-        bail!("payer must be the test mint authority");
-    }
-    let amount: u64 = args.value("deposit")?;
-    if amount == 0 {
-        bail!("deposit must be positive");
-    }
-    let len =
-        state::portfolio_account_len_for_market_slots(group.config.max_portfolio_assets as usize)?;
-    let setup = vec![
-        system_instruction::transfer(&payer.pubkey(), &taker.pubkey(), 1_000_000),
-        system_instruction::create_account(
+    send(
+        rpc,
+        payer,
+        &[system_instruction::transfer(
             &payer.pubkey(),
-            &pf.pubkey(),
-            rpc.get_minimum_balance_for_rent_exemption(len)?,
-            len as u64,
-            &wrapper,
-        ),
-        wrapper_ix(
-            wrapper,
-            P::InitPortfolio,
-            vec![
-                M::new(taker.pubkey(), true),
-                M::new(market, false),
-                M::new(pf.pubkey(), false),
-            ],
-        ),
-        system_instruction::create_account(
-            &payer.pubkey(),
-            &token.pubkey(),
-            rpc.get_minimum_balance_for_rent_exemption(TokenAccount::LEN)?,
-            TokenAccount::LEN as u64,
-            &spl_token::ID,
-        ),
-        spl_token::instruction::initialize_account3(
-            &spl_token::ID,
-            &token.pubkey(),
-            &mint,
             &taker.pubkey(),
-        )?,
-        spl_token::instruction::mint_to(
-            &spl_token::ID,
-            &mint,
-            &token.pubkey(),
-            &payer.pubkey(),
-            &[],
-            amount,
-        )?,
-    ];
-    send(rpc, payer, &setup, &[&taker, &pf, &token])?;
-    println!(
-        "throwaway_taker={} portfolio={} token={}",
-        taker.pubkey(),
-        pf.pubkey(),
-        token.pubkey()
-    );
-    let pf_data = rpc.get_account_data(&pf.pubkey())?;
-    let vault_authority = Pubkey::find_program_address(&[b"vault", market.as_ref()], &wrapper).0;
-    let ata: Pubkey = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL".parse()?;
-    let vault = Pubkey::find_program_address(
-        &[
-            vault_authority.as_ref(),
-            spl_token::ID.as_ref(),
-            mint.as_ref(),
-        ],
-        &ata,
-    )
-    .0;
-    let deposit = wrapper_ix(
+            1_000_000,
+        )],
+        &[],
+    )?;
+    funded_portfolio(
+        rpc,
+        payer,
         wrapper,
-        P::Deposit {
-            portfolio_id: state::read_portfolio_id(&pf_data)?,
-            expected_sequence: state::read_portfolio_matcher_sequence(&pf_data)?,
-            amount: amount as u128,
-        },
-        vec![
-            M::new(taker.pubkey(), true),
-            M::new(market, false),
-            M::new(pf.pubkey(), false),
-            M::new(token.pubkey(), false),
-            M::new(vault, false),
-            M::new_readonly(spl_token::ID, false),
-        ],
+        market,
+        &taker,
+        &pf,
+        args.value("deposit")?,
+    )?;
+    println!(
+        "throwaway_taker={} portfolio={}",
+        taker.pubkey(),
+        pf.pubkey()
     );
-    send(rpc, payer, &[deposit], &[&taker])?;
     // Keep only cranks that simulate successfully, as in staging's fresh_cranks.
     let mut ixs = Vec::new();
     let now = rpc.get_slot()?;
-    for portfolio in [lp_pf, pf.pubkey()] {
+    // --crank PF1,PF2: other position holders; the trade's engine gate needs the whole
+    // market's accrual current in this slot, not only the two trading portfolios.
+    let mut crank_pfs = vec![lp_pf, pf.pubkey()];
+    if let Ok(list) = args.get("crank") {
+        for key in list.split(',').filter(|k| !k.is_empty()) {
+            crank_pfs.push(key.parse()?);
+        }
+    }
+    for portfolio in crank_pfs {
         let crank = wrapper_ix(
             wrapper,
             P::PermissionlessCrank {
@@ -379,7 +332,14 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
         // pusher would collide with it on the observation sequence.
         let mut refresh = Vec::new();
         if args.flag("push-auth-mark") {
-            refresh.push(push_mark(wrapper, market, authority.pubkey(), &data, fast.get_slot()?, price)?);
+            refresh.push(push_mark(
+                wrapper,
+                market,
+                authority.pubkey(),
+                &data,
+                fast.get_slot()?,
+                price,
+            )?);
         }
         refresh.push(update_ref(program, authority.pubkey(), ctx, price));
         let tx = Transaction::new_signed_with_payer(
@@ -388,14 +348,18 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
             &[payer, &authority],
             fast.get_latest_blockhash()?,
         );
+        let ref_slot = |f: &RpcClient| -> Result<u64> {
+            let d = f.get_account_data(&ctx)?;
+            Ok(u64::from_le_bytes(
+                d[REF_SLOT_OFF..REF_SLOT_OFF + 8].try_into()?,
+            ))
+        };
+        let before = ref_slot(&fast)?;
         let sig = fast.send_transaction(&tx)?;
-        // Poll "processed" ourselves: send_and_confirm waits for more than the age.
+        // Watch the context itself: public devnet reports signature statuses later
+        // than max_ref_age_slots, while the account read is current.
         let t0 = std::time::Instant::now();
-        loop {
-            if let Some(status) = fast.get_signature_status(&sig)? {
-                status?;
-                break;
-            }
+        while ref_slot(&fast)? == before {
             if t0.elapsed() > std::time::Duration::from_secs(30) {
                 bail!("reference refresh {sig} not processed in 30 s");
             }
@@ -418,6 +382,106 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
     )?);
     // Final trade transaction has only the taker as signer and fee payer.
     send(&fast, &taker, &ixs, &[])
+}
+
+/// New wrapper portfolio for `owner` on `market`, funded with `amount` test-USDC atoms
+/// minted by the payer (the test mint authority).
+fn funded_portfolio(
+    rpc: &RpcClient,
+    payer: &Keypair,
+    wrapper: Pubkey,
+    market: Pubkey,
+    owner: &Keypair,
+    pf: &Keypair,
+    amount: u64,
+) -> Result<()> {
+    let token = Keypair::new();
+    let market_data = rpc.get_account_data(&market)?;
+    let (cfg, group) = state::read_market(&market_data)?;
+    let mint = Pubkey::new_from_array(cfg.collateral_mint);
+    let mint_account = rpc.get_account(&mint)?;
+    if mint_account.owner != spl_token::ID {
+        bail!("the test mint must be an SPL Token test mint");
+    }
+    let mint_state = spl_token::state::Mint::unpack(&mint_account.data)?;
+    if mint_state.mint_authority != solana_sdk::program_option::COption::Some(payer.pubkey()) {
+        bail!("payer must be the test mint authority");
+    }
+    if amount == 0 {
+        bail!("deposit must be positive");
+    }
+    let len =
+        state::portfolio_account_len_for_market_slots(group.config.max_portfolio_assets as usize)?;
+    let setup = vec![
+        system_instruction::create_account(
+            &payer.pubkey(),
+            &pf.pubkey(),
+            rpc.get_minimum_balance_for_rent_exemption(len)?,
+            len as u64,
+            &wrapper,
+        ),
+        wrapper_ix(
+            wrapper,
+            P::InitPortfolio,
+            vec![
+                M::new(owner.pubkey(), true),
+                M::new(market, false),
+                M::new(pf.pubkey(), false),
+            ],
+        ),
+        system_instruction::create_account(
+            &payer.pubkey(),
+            &token.pubkey(),
+            rpc.get_minimum_balance_for_rent_exemption(TokenAccount::LEN)?,
+            TokenAccount::LEN as u64,
+            &spl_token::ID,
+        ),
+        spl_token::instruction::initialize_account3(
+            &spl_token::ID,
+            &token.pubkey(),
+            &mint,
+            &owner.pubkey(),
+        )?,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &mint,
+            &token.pubkey(),
+            &payer.pubkey(),
+            &[],
+            amount,
+        )?,
+    ];
+    send(rpc, payer, &setup, &[owner, pf, &token])?;
+    let pf_data = rpc.get_account_data(&pf.pubkey())?;
+    let vault_authority = Pubkey::find_program_address(&[b"vault", market.as_ref()], &wrapper).0;
+    let ata: Pubkey = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL".parse()?;
+    let vault = Pubkey::find_program_address(
+        &[
+            vault_authority.as_ref(),
+            spl_token::ID.as_ref(),
+            mint.as_ref(),
+        ],
+        &ata,
+    )
+    .0;
+    let deposit = wrapper_ix(
+        wrapper,
+        P::Deposit {
+            portfolio_id: state::read_portfolio_id(&pf_data)?,
+            expected_sequence: state::read_portfolio_matcher_sequence(&pf_data)?,
+            amount: amount as u128,
+        },
+        vec![
+            M::new(owner.pubkey(), true),
+            M::new(market, false),
+            M::new(pf.pubkey(), false),
+            M::new(token.pubkey(), false),
+            M::new(vault, false),
+            M::new_readonly(spl_token::ID, false),
+        ],
+    );
+    send(rpc, payer, &[deposit], &[owner])?;
+    Ok(())
 }
 
 fn show_context(data: &[u8]) -> Result<()> {
