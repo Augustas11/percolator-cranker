@@ -95,6 +95,10 @@ max_account_b_settlement_chunks = 4
 max_bankrupt_close_chunks = 4
 max_bankrupt_close_lifetime_slots = 1500
 public_b_chunk_atoms = "max"     # MAX_VAULT_TVL
+# 0 keeps the market Meta reward- and donation-compatible: percolator-meta's
+# reward epochs reject a nonzero maintenance fee (residual-distributor
+# lib.rs:2100-2113). The permissionless asset-init fee stays 0 (InitMarket
+# default, never raised here): listing closed, as donation requires.
 maintenance_fee_per_slot = 0
 
 # ConfigurePermissionlessResolve: SHUTDOWN needs a force-close delay; stale

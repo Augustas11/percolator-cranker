@@ -30,7 +30,7 @@ def args():
     a("--backed-share", type=float, default=0.05,
       help="new backed lien paid by OUTSIDE accounts / volume; our LP's payments are internal (TO VERIFY)")
     a("--backing-fee-bps", type=float, default=10.0)
-    a("--maint-atoms-per-slot", type=float, default=1.0)
+    a("--maint-atoms-per-slot", type=float, default=0.0)  # 0: Meta-compatible (MONEY_MODEL.md)
     a("--portfolios-per-100k", type=float, default=20.0, help="open portfolios per $100k/day (TO VERIFY)")
     a("--listing-fee-usd", type=float, default=0.0, help="permissionless asset-create fee; 0 = listing closed")
     a("--listings-per-month", type=float, default=0.0)
