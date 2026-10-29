@@ -31,7 +31,7 @@ impl Config {
         for (key, default) in [
             ("rpc-url", "https://api.devnet.solana.com"),
             ("program-id", "GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS"),
-            ("market", "7p8DtcMHSjdCsM9xWvBwF6TebGBSL18wKvfM7BS1zyHq"),
+            ("market", "HyMKxfct1S9aFtq21GG3FUYUViQkmpZdk5pwGRtAz48C"),
             ("db", "indexer.sqlite"),
             ("bind", "127.0.0.1:8090"),
             (

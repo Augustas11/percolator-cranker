@@ -29,7 +29,7 @@ Flags override environment variables. All flags take a separate value.
 | --- | --- | --- |
 | `--rpc-url` | `INDEXER_RPC_URL` | `https://api.devnet.solana.com` |
 | `--program-id` | `INDEXER_PROGRAM_ID` | `GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS` |
-| `--market` | `INDEXER_MARKET` | `7p8DtcMHSjdCsM9xWvBwF6TebGBSL18wKvfM7BS1zyHq` |
+| `--market` | `INDEXER_MARKET` | `HyMKxfct1S9aFtq21GG3FUYUViQkmpZdk5pwGRtAz48C` |
 | `--db` | `INDEXER_DB` | `indexer.sqlite` |
 | `--bind` | `INDEXER_BIND` | `127.0.0.1:8090` |
 | `--cors-origins` | `INDEXER_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` |
