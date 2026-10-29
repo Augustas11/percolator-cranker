@@ -332,3 +332,13 @@ process signs with them.
 The bots never trade or co-sign on the matcher's LP. A `TradeNoCpi` on it would
 bump its position epoch and revoke the matcher's capability. The hedger nets
 both LPs.
+
+**Matcher reference age.** `[cluster.<name>].matcher_max_ref_age_slots`, applied
+with the matcher LP owner key by `scripts/matcher_set_age.sh <config> <cluster>
+<run dir> --yes`. The script reads every other parameter, inventory included,
+from the ctx and writes it back unchanged. It must stay at or above the
+pusher's landed-push gap p95, or the matcher refuses fills as STALE.
+- **Devnet: 80 slots.** The measured gap is p50 31 / p95 67 slots, because the pusher reads
+  mainnet Pyth's sponsored account, which updates about every 10 s.
+- **Mainnet target: 5 slots,** reachable only with a sub-second source. A fill priced off
+  a stale reference is what latency arbitrage picks off (research/replay/REPORT.md).
