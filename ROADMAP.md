@@ -20,10 +20,16 @@ established yet.
   ~40 accounts, `PermissionlessCrank` hit an account that no crank could
   refresh within 30 minutes (engine `5f2a7151`, percolator #226). A cranker
   must assume more such cases exist.
-- **No public cranker for the current engine and wrapper is known.** The
-  reference spot is open.
-- **Upstream does not build frontends or run markets.** It ships the engine
-  and wrapper; operating, interfaces and keepers are left to others.
+- **Upstream has a minimal keeper, not a maintained one.** `percolator-cli`
+  carries a one-market cron crank script (since 2026-05-25), silent since
+  2026-06-23. `drip` is the most complete, actively maintained public v16
+  keeper; it is not the first.
+- **Upstream ran markets only as bounties.** Mainnet bounty markets (rounds
+  2–7, STOXX/SOL, never SOL-PERP) and a scratch devnet program; all upstream
+  deployments are ~1,700 commits behind our pin. Upstream does not build
+  frontends.
+- **Competition:** dcccrypto runs a launcher, TS SDK and indexer on its own
+  fork, live on devnet only (its mainnet markets are closed and empty).
 
 ## Done (2026-10-28)
 
@@ -63,19 +69,27 @@ The replay turned two engineering numbers into the business: **fee ≥ 12 bps**
 (set in the launch config) and **mark lag ≤ ~400 ms**. The local drill
 measured 525 ms. These tracks follow from it:
 
-1. **Fast pusher on real Pyth.** Replace the mock price with Pyth SOL/USD
-   (Hermes streaming), push every slot with priority fees, measure mark lag
-   continuously on devnet against mainnet Pyth. Matcher keeps refusing fills
-   while the mark lags.
+1. **Fast pusher.** Hermes now needs a paid key (~$500/month), so the
+   pusher uses the **median of free exchange feeds** (Coinbase, Kraken,
+   Binance if keyless) behind a swappable source; a paid Pyth plan is a
+   pre-mainnet decision. Push every slot when the price moved, with priority
+   fees; measure mark lag continuously (alert above 400 ms). The matcher
+   keeps refusing fills while the mark lags.
 2. **Order-size cap and tight OI caps.** Large whole tickets cut the edge
    (break-even ~$133k → ~$550k/day); the LP co-signs fills, so refuse
    oversized ones.
 3. **Hedging bot.** The profit assumes a hedged LP. Keep net SOL near zero on
    a liquid external venue. Owner: open the venue account (~$20k margin per
    the capital plan).
-4. **TS client for the frontend.** Fresh v16 client (~4–6 days) so the
-   frontend trades on devnet. Small retail tickets are the profitable flow
-   profile, so the frontend is the volume plan.
+4. **TS client for the frontend.** Fresh v16 client so the frontend trades
+   on devnet via **`TradeCpi`**, with the tester as the only signer. Small
+   retail tickets are the profitable flow profile, so the frontend is the
+   volume plan.
+4b. **On-chain matcher program** (fork of upstream `percolator-match`,
+   Apache-2.0): enforces our market only, size and inventory caps, no fills
+   on a stale mark, fee ≥ 12 bps; deployed on devnet for `TradeCpi`.
+4c. **Monitor on devnet** and an **indexer** (fills, positions, crank and
+   uptime stats) for the frontend and for honest public numbers.
 5. **Devnet live 24/7** with `drip`, the bots and the monitor; publish crank
    and uptime numbers only (bot volume is not traction).
 6. **Re-run the replay on real Pyth data** once the devnet pusher has logged
@@ -173,9 +187,9 @@ open, close, withdraw) with test USDC from a faucet.
 3. Decision: if 1–5 pass, item 4 (mainnet) goes on the table through its
    gates; if not, we have the data and repros to say why.
 
-**Guardrails:** devnet and test tokens only, invite-only testers, a clear
-"demo, no real funds" label, and no real-money path before the legal
-review in item 4.
+**Guardrails:** devnet and test tokens only, invite-only testers, and a
+clear "demo, no real funds" label. (Owner decision 2026-10-28: builder mode,
+no company and no legal review.)
 
 ### Cross-cutting decision: posting upstream
 
@@ -206,7 +220,14 @@ Being the operator means filling every role ourselves:
 | Keeper | cranker |
 | Watching | monitor |
 
-**Economics, to verify before committing capital:**
+**Economics** (measured in `ops/MONEY_MODEL.md` and
+`research/replay/REPORT.md`):
+- Fills book at the oracle mark; a matcher spread captures no PnL at our
+  pin, so the fee is the edge (≥ 12 bps).
+- Maintenance fee is 0 (percolator-meta compatibility); that raises the
+  ops-model break-even from ~$437k to ~$536k/day as sole LP.
+
+Earlier notes, kept for the record:
 - Trading fees and asset-creation fees go into insurance; a share is
   redirected to asset-0 insurance.
 - Live insurance withdrawal is gated: the market must be flat or healthy, or
@@ -222,8 +243,6 @@ Being the operator means filling every role ourselves:
 - an official program ID, or a decision to deploy our own instance (we then
   carry its security);
 - the audit status;
-- **legal review** of operating a perps market (jurisdiction, access
-  restrictions);
 - a capital budget for insurance, LP inventory and backing;
 - key custody for `marketauth`.
 
@@ -277,6 +296,11 @@ the hedge live. 4b only when other operators exist.
 - Upstream API churn could make each release cost a re-pin. Mitigate by
   pinning to the wrapper's `main` and keeping the re-pin path scripted.
 
+## $DRIP token
+
+A pure meme token, fair-launched on pump.fun, timed to an attention moment.
+Waits on the owner's designer assets.
+
 ## Signals that change this plan
 
 - prog #456 merge;
@@ -284,4 +308,7 @@ the hedge live. 4b only when other operators exist.
 - the keeper-reward decision;
 - fee-share defaults;
 - how backing providers are paid;
-- another public v16 cranker appearing.
+- another public v16 cranker appearing;
+- dcccrypto moving onto the upstream program or opening a funded mainnet
+  market;
+- `percolator-meta` (token + DAO controller) moving towards deployment.
