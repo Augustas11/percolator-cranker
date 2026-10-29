@@ -55,7 +55,7 @@ At this pin fills book at AuthMark; returned price only feeds the taker's limit 
 The wrapper rejects target/effective mismatch and fees below the 12 bps base fee.
 SetMatcherConfig uses a 12 bps cap; TradeCpi charges the LP exactly the base fee.
 Return flags are VALID only: backing-fee cap bits are zero, so the LP pays no backing fee.
-Test-fill option --price-authority KEYPAIR pushes the mark and the reference just before
+Test-fill option --price-authority KEYPAIR pushes the reference (plus the mark with --push-auth-mark) just before
 the trade (rehearsal while the pusher is paused); the trade itself is signed by the taker only.
 
 Devnet (2026-10-29): program `8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE`, context

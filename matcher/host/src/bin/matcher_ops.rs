@@ -47,7 +47,7 @@ impl Args {
         read_keypair_file(self.get(name)?).map_err(|_| anyhow!("cannot read --{name} keypair"))
     }
     fn flag(&self, name: &str) -> bool {
-        self.0.get(name).is_some_and(|v| v == "true")
+        self.get(name).is_ok_and(|v| v == "true" || v == "1")
     }
 }
 fn send(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction], signers: &[&Keypair]) -> Result<()> {
@@ -106,6 +106,10 @@ fn main() -> Result<()> {
         bail!("mainnet RPC URLs are forbidden");
     }
     let rpc = RpcClient::new_with_commitment(url, CommitmentConfig::confirmed());
+    // Devnet only: the URL check above is advisory; the genesis hash is not.
+    if rpc.get_genesis_hash()?.to_string() != "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG" {
+        bail!("not devnet (genesis hash mismatch)");
+    }
     let program: Pubkey = args.value("matcher")?;
     if command == "show" {
         let ctx: Pubkey = args.value("ctx")?;
@@ -367,24 +371,33 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
     let fast = RpcClient::new_with_commitment(rpc.url(), CommitmentConfig::processed());
     // Rehearsal while the pusher is paused: refresh the mark and the matcher
     // reference just before the trade so it lands inside max_ref_age_slots.
-    if args.0.contains_key("price-authority") {
+    if args.get("price-authority").is_ok() {
         let authority = args.key("price-authority")?;
         let data = fast.get_account_data(&market)?;
         let price = state::read_market(&data)?.1.assets[0].effective_price;
-        let push = push_mark(wrapper, market, authority.pubkey(), &data, fast.get_slot()?, price)?;
-        let refresh = update_ref(program, authority.pubkey(), ctx, price);
+        // Push the mark too only with --push-auth-mark (bots stopped); a running
+        // pusher would collide with it on the observation sequence.
+        let mut refresh = Vec::new();
+        if args.flag("push-auth-mark") {
+            refresh.push(push_mark(wrapper, market, authority.pubkey(), &data, fast.get_slot()?, price)?);
+        }
+        refresh.push(update_ref(program, authority.pubkey(), ctx, price));
         let tx = Transaction::new_signed_with_payer(
-            &[push, refresh],
+            &refresh,
             Some(&payer.pubkey()),
             &[payer, &authority],
             fast.get_latest_blockhash()?,
         );
         let sig = fast.send_transaction(&tx)?;
         // Poll "processed" ourselves: send_and_confirm waits for more than the age.
+        let t0 = std::time::Instant::now();
         loop {
             if let Some(status) = fast.get_signature_status(&sig)? {
                 status?;
                 break;
+            }
+            if t0.elapsed() > std::time::Duration::from_secs(30) {
+                bail!("reference refresh {sig} not processed in 30 s");
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
