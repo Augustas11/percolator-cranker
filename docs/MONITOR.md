@@ -20,6 +20,40 @@ monitor/target/release/monitor --program "$PERCOLATOR_PROGRAM_ID" \
   --market <MARKET> --json
 ```
 
+### Devnet
+
+One command, from the checkout whose `launch-runs/devnet/` holds the launch
+(`state.json` and `bots.log` from `scripts/launch_market.sh <config> devnet`). Read-only:
+no keys.
+
+```bash
+R=launch-runs/devnet; monitor/target/release/monitor --rpc https://api.devnet.solana.com \
+  --program "$(jq -r .program_id $R/state.json)" --market "$(jq -r .market $R/state.json)" \
+  --keeper-log $R/bots.log --listen 127.0.0.1:9184 --interval-ms 10000 --expiry-warn-slots 15000
+```
+
+Open `http://127.0.0.1:9184/` for the static dashboard (it reads
+`/snapshot.json`), or `curl -s 127.0.0.1:9184/metrics`. Without the bots
+log, drop `--keeper-log` and only chain metrics remain. Pick a free port if
+`launch_market.sh` already runs its own monitor on 9184.
+
+- **Rate limits.** One poll makes three chain reads: `getSlot`,
+  `getAccountInfo` on the market, and `getProgramAccounts` (full data, about
+  9.5 KB per portfolio). A `getSignatureStatuses` lookup is added only until
+  a new crank signature resolves. 10 s keeps that far below the public
+  endpoint's per-IP limits. A 429 or timeout on a chain read is a nonfatal
+  `chain_error`, and MonitorChainReadFailing waits 5 min. A failed signature
+  lookup is just retried on the next poll.
+- **Slot time.** Devnet measured ~240 ms/slot (`getRecentPerformanceSamples`,
+  2026-10-29), not 400. The slot thresholds fire sooner in wall time:
+  750 slots ≈ 3 min, 1500 ≈ 6 min. That is the safe direction, so they
+  stay. `--expiry-warn-slots 15000` keeps the bucket warning at about an hour.
+- **Paging.** The market is read on its own. `getProgramAccounts` (filtered
+  to portfolio accounts, then to this market locally) returns all of our
+  program's portfolios in one unpaged response, so no paging is needed on
+  devnet. On upstream's shared devnet program id it would also return other
+  markets' portfolios.
+
 `--program` defaults to `PERCOLATOR_PROGRAM_ID`. Supply `--market` or a
 `--keeper-log` containing a boot line `market            = <pubkey>`; the last
 complete matching line wins. Defaults: `--rpc http://127.0.0.1:8899`,
@@ -182,6 +216,8 @@ the scrape job `percolator-monitor`: MonitorDown matches `up{job="percolator-mon
 | BackingBucketExpiringWithLiens | expiring with liens > 0 | 1m / warning |
 | KeeperNoSuccessfulCrank | slots since last landed crank > 750, Live mode only | 1m / warning |
 | KeeperLogStale | log age > 120s or log read fails | 1m / critical |
+| PusherMarkLagHigh | last `mark_lag` > 400 ms | 5m / warning |
+| PusherMarkStale | no push landed for > 120 s (`keeper_mark_push_age_seconds`) | 2m / critical |
 | MonitorChainReadFailing | chain read fails | 5m / critical |
 | MonitorDown | scrape `up == 0` or monitor metrics absent | 5m / critical |
 | MonitorSnapshotStale | snapshot older than 60 s (hung poll loop) | 2m / critical |
@@ -293,6 +329,31 @@ stayed false.
 stayed at their trivial values on this bootstrap market. They are covered by
 unit tests only. Running the monitor against the SOL-PERP staging market is a
 follow-up once that market lands.
+
+### Devnet run (2026-10-29)
+
+The SOL-PERP market `7p8DtcMH…zyHq` on program `GaXu3DXK…HKSHS`, monitored
+with the devnet command above. The bots were paused, so the price feed was stale. Every
+chain metric was checked against an independent decode of the raw
+`getAccountInfo` / `getProgramAccounts` bytes, at offsets from `offset_of!` on
+the pinned engine types. The two decodes matched:
+
+| Metric | Value | On-chain source |
+|---|---|---|
+| accounts total / discovered | 2 / 2, then 4 / 4 after another session opened two portfolios | header `materialized_portfolio_count`; unfiltered `getProgramAccounts`, minus the market |
+| out of date (stale cert / b_stale / kf_stale) | 0 / 0 / 0 | header counters; asset-0 long/short stale counts |
+| asset mode | Live, asset 0 Active | header `mode` = 0; slot lifecycle = 2 |
+| backing buckets | 2 Fresh, expiry 516282841, no liens; stored Fresh after expiry (no crank) | asset-0 `backing_long/short` |
+| insurance | 45,978,524 atoms | header `insurance` |
+| unowned collateral | 0 (vault 84,010,000,000 = c_tot 63,964,021,476 + insurance + fresh 20,000,000,000) | six header terms |
+| resolved claimants | 0 (Live) | per-portfolio capital/PnL, no receipts |
+
+Alerts with the bots paused (threshold conditions, by hand from `/metrics`):
+KeeperNoSuccessfulCrank (8,554 slots since the last landed crank > 750,
+Live), KeeperLogStale (log age 2,059 s), PusherMarkStale (2,087 s since the
+last push), PusherMarkLagHigh (last lag 110,610 ms: Pyth's devnet account
+was ~2 min old). BackingBucketExpiringWithLiens and MonitorChainReadFailing
+stayed false. Before this change the dashboard showed only the first two.
 
 Unit tests: `cargo test --release --manifest-path monitor/Cargo.toml` has 13
 passing (10 monitor, 3 fault-proxy).
