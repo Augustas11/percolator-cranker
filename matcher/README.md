@@ -45,9 +45,9 @@ Set-config: --lp-owner KEYPAIR --wrapper PUBKEY --market PUBKEY --portfolio PUBK
 --ctx PUBKEY --expiry-slots N. Set-params: --lp-owner KEYPAIR --ctx PUBKEY
 --fill N --cap N --age N --deviation BPS --authority PUBKEY --paused 0 --inventory N.
 Test-fill: --wrapper PUBKEY --market PUBKEY --portfolio LP_PUBKEY --ctx PUBKEY
---size SIGNED_BASE_UNITS --taker-keypair KEYPAIR --taker-portfolio-keypair KEYPAIR; the first run
-creates that portfolio and deposits --deposit TOKEN_ATOMS: minted when --payer holds the test mint,
-otherwise taken from the taker's token account, funded by `scripts/staging_usdc_faucet.sh`.
+--size SIGNED_BASE_UNITS --taker-keypair KEYPAIR --taker-portfolio-keypair KEYPAIR --deposit ATOMS.
+Setup is idempotent: the portfolio is created once, and --deposit moves from the owner's token
+account while it still holds that much, funded by `scripts/staging_usdc_faucet.sh` (init-lp too).
 
 The pusher must add UpdateRef to its PushAuthMark transaction, signed by the same
 oracle key. The matcher cannot read the market through the wrapper's CPI tail.
@@ -73,7 +73,7 @@ The re-pin session is moving this LP to its own owner key and will hand over the
 context; the bots' LP owner key must not sign for it. Retired contexts: `BHsZrk4c…` (old market `7p8DtcMH…`), `3WPsoVhi…` (the bots' LP `GUvzajrr…`).
 Limits: fill 10 SOL, inventory 100 SOL, age 25 slots, deviation 10 bps; price authority = the
 run's oracle key. Keys live in `~/.config/drip-devnet/`. `init-lp --portfolio-keypair KEYPAIR
---lp-owner KEYPAIR --deposit ATOMS` creates and funds such a portfolio.
+--lp-owner KEYPAIR --deposit ATOMS` creates and funds such a portfolio (faucet-funded owner).
 
 **Operating rule: one LP portfolio per fill path.** Any non-matcher position change on an LP
 (for example a co-signed `TradeNoCpi`) bumps its position epoch and clears its matcher
