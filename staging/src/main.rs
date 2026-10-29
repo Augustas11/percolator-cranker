@@ -37,7 +37,7 @@ use drip::{
     quarantine::{Quarantine, QuarantineConfig},
     scheduler::CycleBudget,
     setup,
-    submit::{self, CrankRoute, OutcomeClass},
+    submit::{self, CrankRoute},
 };
 use percolator::{BackingBucketStatusV16 as Bucket, MarketModeV16, BOUND_SCALE, AssetStateV16, PortfolioLegV16Account, MIN_A_SIDE, ADL_ONE};
 use percolator_prog::{
@@ -911,17 +911,21 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         let k = if st.phase == Phase::Recovery { "-".into() } else {
             let result = cycle::run_one_cycle(&ctx, tick, &budget, &mut quarantine, &mut records, &mut cu);
             // Records retain failed txs even when the cycle also made progress.
+            // The keeper only records a HardReject for a DEFINITIVE outcome
+            // (preflight rejected, or the tx executed and failed), so every
+            // one is a program failure, decided by its structure, not by its
+            // error text. The one exception is "Blockhash not found": a
+            // cluster/RPC condition that also arrives as a rejected preflight.
+            let blockhash = |e: &str| e.contains("Blockhash not found");
             let program_failures = records.iter().filter(|r| match &r.outcome {
-                submit::CrankOutcome::HardReject { error, error_name, .. } =>
-                    r.outcome.class() == OutcomeClass::Failed && (error_name.is_some() || is_program_error(error)),
+                submit::CrankOutcome::HardReject { error, .. } => !blockhash(error),
                 _ => false,
             }).count();
             let rejected_transport = records.iter().filter(|r| match &r.outcome {
-                submit::CrankOutcome::HardReject { error, error_name, .. } =>
-                    if error_name.is_none() && !is_program_error(error) {
-                        eprintln!("keeper transport: {}", launch::scrub(error));
-                        true
-                    } else { false },
+                submit::CrankOutcome::HardReject { error, .. } if blockhash(error) => {
+                    eprintln!("keeper transport: {}", launch::scrub(error));
+                    true
+                }
                 _ => false,
             }).count();
             let mut transport_errors = rejected_transport;
@@ -938,6 +942,10 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
                     if st.keeper_log { launch::print_keeper_lines(&records, &s.line()); }
                     if program_failures > 0 {
                         Err(anyhow!("{program_failures} failed program txs: {:?}", s.failures))
+                    } else if s.progressed + s.idle == 0 && transport_errors > 0 {
+                        // Transport-only cycle: neither a success nor a failure,
+                        // so it can't reset or dilute the failure accounting.
+                        Ok(None)
                     } else {
                         Ok(Some(format!("p{}/i{}", s.progressed, s.idle)))
                     }
