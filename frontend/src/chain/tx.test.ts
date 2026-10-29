@@ -82,6 +82,15 @@ it("cranks a third positioned portfolio once when building a trade", async () =>
     .toEqual([portfolio, cfg.lpPortfolio, third]);
 });
 
+it("rejects a trade needing nine cranks before simulation", async () => {
+  const simulate = mockCranks();
+  const portfolios = [portfolio, cfg.lpPortfolio, ...Array.from({ length: 7 }, (_, i) => new PublicKey(new Uint8Array(32).fill(i + 5)))];
+  vi.mocked(conn.getProgramAccounts).mockResolvedValue(portfolios.map(pubkey => ({ pubkey, account: account(data) })));
+  await expect(buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n))
+    .rejects.toThrow("9 portfolios need a crank; more than 8 fit in one transaction");
+  expect(simulate).not.toHaveBeenCalled();
+});
+
 it("cranks other positioned portfolios once when building a withdraw", async () => {
   mockCranks([data]);
   const third = new PublicKey(new Uint8Array(32).fill(5));
