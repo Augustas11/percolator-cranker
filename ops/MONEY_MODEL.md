@@ -114,6 +114,7 @@ Budgets go to `insurance_authority` only once every portfolio is closed and
 | SOL tx + priority fees | 0.5 SOL/day × $150 *to verify* | Cranker plus pusher. The staging budget was ~1 SOL/day worst case for the cranker (`docs/STAGING.md` on the R2 branch). On mainnet, priority fees dominate; measure them. |
 | SOL rent | one-time, ~0.5 SOL | Market (1 asset) 0.022 SOL, each portfolio 0.067 SOL, ATAs 0.002 SOL. No program deploy: the official program is upstream's. |
 | RPC | $300/month *to verify* | A paid plan with staked/priority send. |
+| Price data (Pyth plan) | **$0 now; ~$500/month from mainnet** (pre-mainnet decision, not in the daily model) | Since the Pyth Core upgrade (2026-08-26) every Hermes endpoint needs a paid API key (data plans from ~$500/month, Pyth Terminal). Until then the pusher uses the median of public exchange websockets on devnet (owner decision 2026-10-29). Before mainnet, decide on a Pyth plan (Hermes, or Lazer for lower latency); the replay ties the money case to a mark within ~400 ms of the market. |
 | Servers | $100/month | Two small VMs (primary + standby). |
 | Legal | one-time, outside the daily model | See `LEGAL_QUESTIONS.md`. |
 
