@@ -5,7 +5,7 @@ cranker + service operator** (see `prep.md`). This file orders the work. It
 records facts as of 2026-10-28, and items marked *to verify* are not
 established yet.
 
-## Situation (2026-10-28)
+## Situation (2026-10-29)
 
 - **Upstream is preparing to launch.** The ~20 PRs merged into the engine
   `master` on 2026-10-27 (`68859b94`) are what the wrapper re-pin PR
@@ -36,10 +36,50 @@ established yet.
 - **Item 1 shipped:** `drip` v0.1.0 at `Augustas11/drip` (plain keeper,
   Apache-2.0). The load test and findings stay private, on
   `claude/live-shaped-scenario`.
+- **Item 2 (R2):** SOL-PERP staging market, 6-hour unattended run with zero
+  failures and the full lifecycle (PR #7).
+- **Item 3 (R3):** liveness and solvency monitor, both injected faults caught
+  (PR #8).
+- **Ops half of the Day-0 kit** (PR #9) and **tech half** (PR #11): one
+  config, one-command launch (fresh launch key, then handover to the
+  multisig), timed drill ~27–33 s locally.
+- **Money case** (PR #10, `research/replay/REPORT.md`): 90 days of real SOL
+  flow through our matcher. **5 bps loses** to latency arbitrage. **12 bps,
+  hedged, with the posted mark within ~400 ms of the market, makes money**:
+  break-even ~$133k/day with small tickets, ~$550k/day with whole large
+  tickets. Measured adverse selection 2.2–2.4 bps. Jupiter/JLP keeps
+  17–23 bps.
+- **Devnet:** unmodified upstream wrapper at `5cb331dd` deployed as
+  `GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS` (2026-10-29). Upstream's own
+  deployments are ~1,700 commits behind.
+- **Upstream inventory:** six repos (`percolator`, `-prog`, `-cli`, `-match`,
+  `-stress-test`, `-meta`). `percolator-meta` (token + DAO market controller)
+  is undeployed and parked; it cannot take a market without its owner's
+  signature. We keep maintenance fee 0 and listing closed to stay compatible.
 
-## In flight
+## In flight (money-critical, from the replay)
 
-- **Item 2 as a single SOL-PERP market** (see below).
+The replay turned two engineering numbers into the business: **fee ≥ 12 bps**
+(set in the launch config) and **mark lag ≤ ~400 ms**. The local drill
+measured 525 ms. These tracks follow from it:
+
+1. **Fast pusher on real Pyth.** Replace the mock price with Pyth SOL/USD
+   (Hermes streaming), push every slot with priority fees, measure mark lag
+   continuously on devnet against mainnet Pyth. Matcher keeps refusing fills
+   while the mark lags.
+2. **Order-size cap and tight OI caps.** Large whole tickets cut the edge
+   (break-even ~$133k → ~$550k/day); the LP co-signs fills, so refuse
+   oversized ones.
+3. **Hedging bot.** The profit assumes a hedged LP. Keep net SOL near zero on
+   a liquid external venue. Owner: open the venue account (~$20k margin per
+   the capital plan).
+4. **TS client for the frontend.** Fresh v16 client (~4–6 days) so the
+   frontend trades on devnet. Small retail tickets are the profitable flow
+   profile, so the frontend is the volume plan.
+5. **Devnet live 24/7** with `drip`, the bots and the monitor; publish crank
+   and uptime numbers only (bot volume is not traction).
+6. **Re-run the replay on real Pyth data** once the devnet pusher has logged
+   enough of it (the current run uses Binance spot as the oracle stand-in).
 
 ## Immediate (next 2–4 weeks)
 
@@ -223,11 +263,11 @@ competition. Hold until launch and real flow.
 
 ## Order
 
-1 (done) → 2 (SOL-PERP operator rehearsal) → 3 → **PoC beta** phase 1
-(devnet, bots only). Then the SDK (5) and matcher kit, which the beta's
-trading frontend and our own market need anyway → PoC beta phase 2 (frontend
-and testers). Decide 4 (mainnet market) from the PoC results once its gates
-clear; 4b only when other operators exist.
+1, 2, 3 and the Day-0 kit are done. Now, in parallel: fast Pyth pusher +
+size caps (on devnet), hedging bot, TS client → **PoC beta** phase 1 (devnet
+24/7, bots) → phase 2 (frontend + invited testers). Mainnet SOL-PERP only on
+the official program ID, with fee ≥ 12 bps, measured mark lag ≤ ~400 ms and
+the hedge live. 4b only when other operators exist.
 
 ## Risks
 
