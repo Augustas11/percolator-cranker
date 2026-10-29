@@ -1,14 +1,20 @@
 use super::*;
 use std::sync::{Arc, Mutex};
 
-/// Replaceable source boundary; no network transport beyond the existing RPC.
+mod exchanges;
+pub use exchanges::Exchanges;
+
+/// Replaceable source boundary, with independent public websocket readers.
+// Later: paid pyth.dourolabs.app/hermes source, Authorization: Bearer from env.
 pub enum PriceSource {
+    Exchanges(Exchanges),
     Mock { price: u64, initial: u64, rng: u64, max_bps: u64 },
     Pyth { rpc: RpcClient, feed: [u8; 32], cfg: launch::OracleCfg },
 }
 impl PriceSource {
     pub fn latest(&mut self) -> Result<(u64, u64)> {
         match self {
+            Self::Exchanges(source) => source.latest().map(|r| (r.price, r.publish_time_ms)),
             Self::Pyth { rpc, feed, cfg } => launch::pyth_sol_usd(rpc, feed, cfg),
             Self::Mock { price, initial, rng, max_bps } => {
                 *rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -44,7 +50,9 @@ pub fn start(st: &Staging) -> (Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::
     // Read the same commitment at which pushes are observed landed, so the
     // next sequence and slot cannot come from an older confirmed snapshot.
     let rpc = RpcClient::new_with_commitment(st.rpc.url(), CommitmentConfig::processed());
-    let mut source = match st.pyth_feed {
+    let mut source = if let Some(source) = &st.exchanges {
+        PriceSource::Exchanges(source.clone())
+    } else { match st.pyth_feed {
         Some(feed) => PriceSource::Pyth {
             rpc: RpcClient::new_with_commitment(st.rpc.url(), CommitmentConfig::confirmed()),
             feed, cfg: st.cfg.oracle.clone(),
@@ -52,7 +60,7 @@ pub fn start(st: &Staging) -> (Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::
         None => PriceSource::Mock {
             price: st.feed, initial: st.cfg.market.initial_price, rng: st.rng, max_bps: 0,
         },
-    };
+    }};
     let cfg = st.cfg.oracle.clone();
     let heartbeat = st.push_heartbeat_slots;
     let payer = st.payer.insecure_clone();
@@ -139,4 +147,24 @@ pub fn start(st: &Staging) -> (Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::thread::
         }
     });
     (shared, lifecycle, handle)
+}
+
+/// Public prices only: no RPC, keys, market setup or transaction submission.
+pub fn prices(args: &[String]) -> Result<()> {
+    if args.len() != 2 { bail!("usage: staging prices <config> <cluster>"); }
+    let cfg = launch::load(&args[0])?;
+    let cluster = cfg.cluster.get(&args[1]).context("unknown cluster")?;
+    if cluster.price_source != "exchanges" { bail!("prices requires price_source = exchanges (no chain access)"); }
+    let mut source = Exchanges::new(&cfg.oracle)?;
+    loop {
+        match source.latest() {
+            Ok(r) => println!("{}", serde_json::json!({
+                "price_e6": r.price, "publish_time_ms": r.publish_time_ms,
+                "age_ms": launch::now_ms().saturating_sub(r.publish_time_ms),
+                "venues": r.venues, "spread_bps": r.spread_bps,
+            })),
+            Err(e) => println!("{}", serde_json::json!({"error": e.to_string()})),
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }

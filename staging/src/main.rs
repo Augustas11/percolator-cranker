@@ -140,8 +140,9 @@ struct Staging {
     oracle_kp: Keypair,
     backing_kp: Option<Keypair>,
     insurance_kp: Option<Keypair>,
-    /// Price source: this Pyth feed (SOL/USD) when set, else the seeded mock.
+    /// Live source configuration; neither set means the seeded local mock.
     pyth_feed: Option<[u8; 32]>,
+    exchanges: Option<pusher::Exchanges>,
     /// Bots mode: also print drip-format crank lines and `mark_lag` events,
     /// which the monitor reads from this log.
     keeper_log: bool,
@@ -317,6 +318,7 @@ impl Staging {
             insurance_kp: Some(admin.insecure_clone()),
             admin,
             pyth_feed: None,
+            exchanges: None,
             keeper_log: false,
             mint,
             own_mint,
@@ -463,10 +465,11 @@ impl Staging {
     // ------------------------------------------------------------ roles
 
     /// The pusher's price source: SOL/USD e6 and its timestamp (unix ms).
-    /// Pyth (on-chain price account, `launch::pyth_sol_usd`) when configured;
+    /// Exchanges or Pyth (on-chain account) when configured;
     /// else a seeded mock path, one step of at most `max_bps`, kept within
     /// +-5% of the configured initial price, timestamped when generated.
     fn source_price(&mut self, max_bps: u64) -> Result<(u64, u64)> {
+        if let Some(source) = &mut self.exchanges { return source.latest().map(|r| (r.price, r.publish_time_ms)); }
         let mut source = match self.pyth_feed {
             Some(feed) => pusher::PriceSource::Pyth {
                 rpc: RpcClient::new_with_commitment(self.rpc.url(), CommitmentConfig::confirmed()),
@@ -782,7 +785,8 @@ fn real_main() -> Result<()> {
         Some("step") => launch::step_main(&args[1..]),
         Some("bots") => run(launch::bots(&args[1..])?, true),
         Some("roles") => launch::roles_main(&args[1..]),
-        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles] <config> <cluster> <run dir>"),
+        Some("prices") => pusher::prices(&args[1..]),
+        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles | prices] <config> <cluster> <run dir>"),
     }
 }
 

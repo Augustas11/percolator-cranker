@@ -166,18 +166,35 @@ retain their existing compute budget.
   `at_ms`), and `PusherMarkStale` fires when no push has landed for 2 min.
   The health check prints p50 and max over 5 pushes; over target it warns
   (`LAUNCH_LAG_STRICT=1` fails).
-- **Price source:** `price_source = "pyth"` (devnet, mainnet) reads the
-  Pyth SOL/USD PriceUpdateV2 account (`oracle.pyth_price_account`) over the
-  same RPC and parses it with the wrapper's own reader (owner, feed id, age
-  `pyth_max_age_s`, confidence `pyth_max_conf_bps`); no new dependency.
-  `"mock"` (local) keeps the seeded walk. Tested locally against devnet's
-  account cloned into the validator; not run on devnet.
-- **That source is too slow for the money case.** Devnet's sponsored
-  SOL/USD account was ~70 s old when checked (2026-10-29). The low-latency
-  path is Hermes (what upstream's `pyth-push-devnet.ts` reads), and Hermes'
-  price endpoint requires a paid API key since the Pyth Core upgrade
-  (2026-08-26). A fast streaming source is pending an owner decision;
-  `PriceSource::latest` is the extension boundary. No Hermes client is built here.
+- **Price source:** `price_source = "exchanges"` is the devnet default until
+  a paid Pyth plan exists (about $500/month, a pre-mainnet owner decision).
+  Hermes has required a paid key since 2026-08-26. One reconnecting thread
+  per venue reads public Coinbase Exchange SOL-USD ticker, Kraken v2 SOL/USD
+  trades, and Binance SOLUSDT trades when reachable without a key. Binance
+  USDT is treated as USD, without conversion. No exchange keys are used.
+  `oracle.exchange_max_age_ms` (2,000) rejects stale exchange event timestamps
+  (and future timestamps). Prices farther than `exchange_max_dev_bps` (50)
+  from the median of all fresh venues are excluded; the remaining median
+  (midpoint for two) needs `exchange_min_venues` (2). Missing quorum errors
+  rather than pushing, feeding the existing failure counter and stale alarm.
+  Dropped venues and reasons log only when the filter state changes.
+  Lag runs from the **newest exchange timestamp among venues used** to push
+  landed, not from local receipt time. It does not represent every venue's age.
+- `"mock"` remains local's seeded walk; mainnet stays `"pyth"`, reading the
+  SOL/USD PriceUpdateV2 account (`oracle.pyth_price_account`) over RPC with
+  owner, feed, age and confidence checks. The sponsored account was ~70 s old
+  when checked (2026-10-29), too slow for the money case.
+  `PriceSource::latest` remains the extension boundary for a later paid Hermes
+  source; no Hermes client is built here.
+- **Check prices without a chain:**
+  `staging/target/release/staging prices launch/sol-perp.toml devnet` prints
+  once per second: price e6, exchange publish time, age in ms, venues used,
+  and their high-low spread in bps relative to the median (or a quorum error).
+  It loads no keys, opens no RPC connection and submits no transactions.
+  Stop with Ctrl-C. Public feed formats:
+  [Coinbase ticker](https://docs.cdp.coinbase.com/exchange/websocket-feed/channels),
+  [Kraken trades](https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/trade),
+  [Binance trades](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams).
 - **The matcher refuses fills while the mark lags; keep it.** The engine
   refuses a risk-increasing trade while an asset's AuthMark target differs
   from its effective price (`trade_preflight_risk_gate`, engine `v16.rs`

@@ -76,6 +76,12 @@ pub struct ClusterCfg {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct OracleCfg {
+    #[serde(default = "default_exchange_max_age")]
+    pub exchange_max_age_ms: u64,
+    #[serde(default = "default_exchange_max_dev")]
+    pub exchange_max_dev_bps: u64,
+    #[serde(default = "default_exchange_min_venues")]
+    pub exchange_min_venues: usize,
     pub pyth_feed_id: String,
     pub pyth_price_account: String,
     pub pyth_max_age_s: u64,
@@ -95,6 +101,9 @@ pub struct OracleCfg {
     pub open_max_mark_age_ms: u64,
 }
 
+fn default_exchange_max_age() -> u64 { 2000 }
+fn default_exchange_max_dev() -> u64 { 50 }
+fn default_exchange_min_venues() -> usize { 2 }
 fn default_push_poll_ms() -> u64 { 400 }
 fn default_push_min_move_bps() -> u64 { 1 }
 fn default_priority_fee() -> u64 { 10_000 }
@@ -533,8 +542,11 @@ fn open(args: &[String]) -> Result<(Staging, State, PathBuf, String)> {
         bail!("{} uses mint {}, the config says {mint}; use a fresh run dir", run.display(), state.mint);
     }
     let mut st = Staging::new(cfg, rpc, program_id, payer, admin, lp, trader, mint, own_mint);
-    if c.price_source == "pyth" {
-        st.pyth_feed = Some(feed_id(&st.cfg.oracle)?);
+    match c.price_source.as_str() {
+        "pyth" => st.pyth_feed = Some(feed_id(&st.cfg.oracle)?),
+        "exchanges" => st.exchanges = Some(crate::pusher::Exchanges::new(&st.cfg.oracle)?),
+        "mock" => {},
+        other => bail!("unknown price_source {other:?}"),
     }
     if !state.market.is_empty() {
         st.set_market(Pubkey::from_str(&state.market)?);
@@ -588,10 +600,20 @@ pub fn step_main(args: &[String]) -> Result<()> {
 }
 
 fn run_step(st: &mut Staging, state: &mut State, run: &Path, cluster: &str, name: &str) -> Result<()> {
-    if st.pyth_feed.is_some() && matches!(name, "init-market" | "oracle") {
+    if (st.pyth_feed.is_some() || st.exchanges.is_some()) && matches!(name, "init-market" | "oracle") {
         // InitMarket and AuthMark start at the live price; no other step
         // (handover least of all) needs a price.
-        st.mark = st.source_price(0)?.0;
+        // Allow websocket subscriptions to produce the initial quorum; never
+        // substitute the mock price when the live source is unavailable.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            match st.source_price(0) {
+                Ok((price, _)) => { st.mark = price; break; },
+                Err(_) if st.exchanges.is_some() && std::time::Instant::now() < deadline =>
+                    std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(e) => return Err(e),
+            }
+        }
     }
     match name {
         "init-market" => {

@@ -15,8 +15,10 @@ engine_rev = "4db11a8cb0053815e23a35d3a7d3edc265d8d866"
 # the id of repo-prog/target/deploy/percolator_prog-keypair.json.
 # collateral_mint: a mint address, or "create" for a fresh 6-decimal test USDC
 # mint whose authority is the run's payer (local and devnet only).
-# price_source: "mock" (seeded walk, local) or "pyth" (the on-chain Pyth
-# SOL/USD price account, read over this RPC).
+# price_source: "mock" (local), "exchanges" (devnet public SOL/USD median),
+# or "pyth" (mainnet on-chain price account over RPC). Exchanges is the
+# devnet source until a paid Pyth plan (~$500/month, pre-mainnet decision).
+# Hermes has required a paid key since 2026-08-26.
 [cluster.local]
 rpc = "http://127.0.0.1:8799"
 program_id = ""
@@ -28,7 +30,7 @@ rpc = "https://api.devnet.solana.com"
 # Upstream's devnet program; replace with ours to rehearse on our deployment.
 program_id = "Bu1J8eQQN2mNnUgisSEd5StBG6zDaRb7fwDjN34VzgLG"
 collateral_mint = "create"
-price_source = "pyth"
+price_source = "exchanges"
 
 [cluster.mainnet]
 rpc = ""                # the paid RPC endpoint
@@ -49,6 +51,14 @@ insurance_authority = ""        # the Squads vault
 asset_admin = ""                # cold hardware wallet C
 
 [oracle]
+# Public Coinbase + Kraken, plus Binance when reachable without a key.
+# Binance SOL/USDT is treated as USD. Median of fresh prices, then exclude
+# prices >50 bps from that median and recompute; require 2 usable venues.
+# Lag uses the newest USED exchange event timestamp, never receipt time.
+# No quorum means no push; existing failure counts and stale alarms apply.
+exchange_max_age_ms = 2000
+exchange_max_dev_bps = 50
+exchange_min_venues = 2
 # Pyth SOL/USD. price_source = "pyth" reads its PriceUpdateV2 account (the
 # sponsored push-oracle account, shard 0, same address on devnet and
 # mainnet) with the wrapper's own parser; a reading older than
@@ -76,7 +86,7 @@ open_max_mark_age_ms = 1000
 # InitMarket. Values and reasoning: docs/OPERATOR_PLAYBOOK.md section 2.
 [market]
 max_portfolio_assets = 1
-initial_price = 150000000        # mock start; on pyth clusters the live price is used
+initial_price = 150000000        # mock start; live sources use their current price
 h_min = 0
 h_max = 150
 min_nonzero_mm_req = 1000
