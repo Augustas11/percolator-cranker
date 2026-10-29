@@ -57,6 +57,8 @@ jobs:
           cargo build --release --manifest-path "$BRINGUP_DIR/Cargo.toml"
       - name: unit tests (validator-gated integration tests self-skip)
         run: cargo test --release --manifest-path "$CRANKER_MANIFEST"
+      - name: hedger unit tests (policy, decoder, venue signing)
+        run: cargo test --release --locked --manifest-path hedger/Cargo.toml
 
   # Runs only where scripts/export_public.sh exists (the maintainers' export
   # source); skipped everywhere else. Re-runs the export, its leak helper,

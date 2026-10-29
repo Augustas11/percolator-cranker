@@ -1,0 +1,25 @@
+[package]
+name = "hedger"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Private: offsets our SOL-PERP LP's inventory on an external perp venue
+# (README.md). Not exported.
+[dependencies]
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "4db11a8cb0053815e23a35d3a7d3edc265d8d866" }
+percolator-prog = { path = "../repo-prog" }
+solana-sdk = "1.18"
+solana-client = "1.18"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.5"
+# Venue HTTP; already in the graph through solana-client.
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# Hyperliquid order signing (venue.rs): msgpack action hash, keccak, secp256k1.
+# sha3 and libsecp256k1 are already in the graph through solana-sdk.
+rmp-serde = "1"
+sha3 = "0.10"
+libsecp256k1 = "0.6"
+hex = "0.4"
