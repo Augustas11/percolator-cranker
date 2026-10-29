@@ -149,11 +149,15 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                     if bincode::serialized_size(&tx)? > 1232 { bail!("push transaction exceeds 1232 bytes"); }
                     log_read_state(&mut read_error, None);
                     send_attempted = true;
+                    let src_age_ms = launch::now_ms().saturating_sub(published);
+                    let send_started = Instant::now();
                     let sig = rpc.send_transaction_with_config(&tx, RpcSendTransactionConfig { skip_preflight: true, ..Default::default() })?;
                     let sent = Instant::now();
+                    let send_ms = sent.duration_since(send_started).as_millis();
                     loop {
                         if let Some(status) = rpc.get_signature_status_with_commitment(&sig, CommitmentConfig::processed())? {
                             status?;
+                            let confirm_ms = sent.elapsed().as_millis();
                             let landed = launch::now_ms();
                             let lag = landed.saturating_sub(published);
                             let mut s = state.lock().unwrap();
@@ -163,7 +167,7 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                             drop(s);
                             last_slot = slot;
                             if keeper_log {
-                                println!("{{\"event\":\"mark_lag\",\"ms\":{lag},\"target_ms\":{},\"at_ms\":{landed}}}", cfg.lag_target_ms);
+                                println!("{{\"event\":\"mark_lag\",\"ms\":{lag},\"src_age_ms\":{src_age_ms},\"send_ms\":{send_ms},\"confirm_ms\":{confirm_ms},\"target_ms\":{},\"at_ms\":{landed}}}", cfg.lag_target_ms);
                             }
                             return Ok(Some(format!("ok({lag}ms)")));
                         }

@@ -413,7 +413,7 @@ fn send_prog_ix(
     signer_refs.push(payer);
     signer_refs.extend_from_slice(extra_signers);
     for attempt in 0..5 {
-        let (bh, _) = rpc.get_latest_blockhash_with_commitment(CommitmentConfig::processed())?;
+        let (bh, _) = rpc.get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())?;
         let tx = Transaction::new_signed_with_payer(
             &[cu_ix(), heap_ix(), instruction.clone()],
             Some(&payer.pubkey()),
