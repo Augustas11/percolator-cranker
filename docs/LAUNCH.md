@@ -148,17 +148,19 @@ the market (`research/replay/REPORT.md`). Config: `oracle.lag_target_ms`
 (400). The pusher has its own thread and RPC client, polling every
 `oracle.push_poll_ms` (400); it pushes at `push_min_move_bps` (1) or the
 slot heartbeat. `oracle.push_interval_ms` remains the main bots tick (3,000).
-Pushes alone use `priority_fee_micro_lamports` (10,000) and `push_cu_limit`
-(14,000, about 2× the measured 6,596 CU local landed push); other roles
-retain their existing compute budget.
+Pushes and accrual use `priority_fee_micro_lamports` (10,000). Pushes use
+`push_cu_limit` (14,000, about 2× the measured 6,596 CU local landed push);
+accrual requests 1,400,000 CU.
 
 The pusher also checks asset-0 accrual each poll. Devnet bot ticks can take
 40–50 seconds, while the engine advances at most 32 slots per crank and
 `PushAuthMark` never accrues. When the gap exceeds `oracle.accrual_lag_slots`
 (default 32), a separate transaction sends up to `oracle.accrual_max_cranks_per_tx`
 (default 10) Live cranks. Crank failures cannot revert a push; the `accrual`
-role logs and counts them without triggering an abnormal exit. Trades refuse
-the tick with `accrual_behind` while the snapshot is over 32 slots behind.
+role logs and counts them without triggering an abnormal exit. Accrual skips
+preflight and polls processed status with a three-second deadline, including
+one retry at half the crank count on `EngineNonProgress`. Trades refuse
+the tick with `accrual_behind` while the snapshot exceeds `oracle.accrual_lag_slots`.
 
 - **Measured lag** = source price time → push landed (processed, polled
   every 50 ms; the push skips preflight). Mock: the time the price was
@@ -180,11 +182,11 @@ the tick with `accrual_behind` while the snapshot is over 32 slots behind.
   per venue reads public Coinbase Exchange SOL-USD ticker, Kraken v2 SOL/USD
   trades, and Binance SOLUSDT trades when reachable without a key. Binance
   USDT is treated as USD, without conversion. No exchange keys are used.
-  `oracle.exchange_max_age_ms` (2,000) rejects stale exchange event timestamps
-  (and future timestamps). Prices farther than `exchange_max_dev_bps` (50)
+  `oracle.exchange_max_age_ms` (2,000) rejects stale exchange event timestamps;
+  future timestamps tolerate `exchange_clock_skew_ms` (500 ms). Prices farther than `exchange_max_dev_bps` (50)
   from the median of all fresh venues are excluded; the remaining median
-  (midpoint for two) needs `exchange_min_venues` (2). Missing quorum errors
-  rather than pushing, feeding the existing failure counter and stale alarm.
+  (midpoint for two) needs `exchange_min_venues` (2). Missing quorum skips
+  pushes without counting a push failure; `PusherMarkStale` catches staleness.
   Dropped venues and reasons log only when the filter state changes.
   Lag runs from the **newest exchange timestamp among venues used** to push
   landed, not from local receipt time. It does not represent every venue's age.
@@ -207,14 +209,15 @@ the tick with `accrual_behind` while the snapshot is over 32 slots behind.
   refuses a risk-increasing trade while an asset's AuthMark target differs
   from its effective price (`trade_preflight_risk_gate`, engine `v16.rs`
   16153, `asset_has_target_effective_lag` 16013). The matcher never works
-  around it: an open requires a landed push no older than
-  `oracle.open_max_mark_age_ms` (1,000), equal target/effective prices,
+  around it: an open requires the last landed push's source publish age to be
+  at most `oracle.open_max_mark_age_ms` (1,000), equal target/effective prices,
   and the asset cranked to the current slot in the same tx, and the mock pusher keeps each step
   inside `max_price_move_bps_per_slot`. With Pyth a larger move leaves the
   effective price walking behind, and opens are refused until it catches up.
   Do not remove this.
 - **Matcher caps:** `max_fill_notional_usd` and `max_lp_inventory_usd` are
-  both $100,000. The LP co-signs every fill; refusals log `trade=refused(reason)`
+  both $100,000, valued at max(effective price, target price). The LP co-signs
+  every fill; refusals log `trade=refused(reason)`
   without counting as failures. Inventory-reducing fills may exceed the inventory
   cap, but every fill must meet the ticket cap. REPORT.md finds 2.7–4.8 bps adverse
   selection above $100k; its inventory limit and `ops/CAPITAL_PLAN.md` set inventory

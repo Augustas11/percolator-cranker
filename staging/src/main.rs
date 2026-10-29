@@ -89,12 +89,20 @@ fn short(e: &anyhow::Error) -> String {
         .unwrap_or_else(|| msg.chars().take(120).collect())
 }
 
+// Keeper records preserve the standard Solana instruction-error text even
+// when a program code is unknown to drip. Blockhash/RPC failures do not.
+fn is_program_error(error: &str) -> bool {
+    error.contains("Error processing Instruction ") || error.contains("InstructionError(")
+        || error.contains("\"InstructionError\"")
+}
+
 #[derive(Default, Clone)]
 struct Role {
     ok: u64,
     fail: u64,
     consec: u64,
     max_consec: u64,
+    transport_errors: u64,
 }
 
 impl Role {
@@ -118,7 +126,7 @@ impl Role {
     }
 
     fn json(&self) -> String {
-        format!("{{\"ok\":{},\"fail\":{},\"max_consec_fail\":{}}}", self.ok, self.fail, self.max_consec)
+        format!("{{\"ok\":{},\"fail\":{},\"max_consec_fail\":{},\"transport_errors\":{}}}", self.ok, self.fail, self.max_consec, self.transport_errors)
     }
 
     fn abnormal(&self, max_consec: u64) -> bool {
@@ -507,7 +515,7 @@ impl Staging {
         // A bucket just past expiry refuses fills (EngineStale) until the
         // keeper's crank of a claim holder expires it: skip this tick.
         let now = self.rpc.get_slot()?;
-        if now.saturating_sub(g.assets[0].slot_last) > 32 {
+        if now.saturating_sub(g.assets[0].slot_last) > self.cfg.oracle.accrual_lag_slots {
             return Ok(Some("refused(accrual_behind)".into()));
         }
         if g.source_backing_buckets[..2].iter().any(|b| b.status == Bucket::Fresh && b.expiry_slot <= now) {
@@ -900,30 +908,57 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         // Inside the force-close delay after SHUTDOWN, cranks of the
         // shut-down asset are refused (EngineLockActive): the keeper waits
         // for the resolve on the next tick.
-        let k = if st.phase == Phase::Recovery { "-".into() } else { keeper.role.record(
-            cycle::run_one_cycle(&ctx, tick, &budget, &mut quarantine, &mut records, &mut cu).and_then(|s| {
-                keeper.progressed += s.progressed as u64;
-                keeper.idle += s.idle as u64;
-                keeper.failed += s.failed as u64;
-                if st.keeper_log {
-                    launch::print_keeper_lines(&records, &s.line());
+        let k = if st.phase == Phase::Recovery { "-".into() } else {
+            let result = cycle::run_one_cycle(&ctx, tick, &budget, &mut quarantine, &mut records, &mut cu);
+            // Records retain failed txs even when the cycle also made progress.
+            let program_failures = records.iter().filter(|r| match &r.outcome {
+                submit::CrankOutcome::HardReject { error, error_name, .. } =>
+                    r.outcome.class() == OutcomeClass::Failed && (error_name.is_some() || is_program_error(error)),
+                _ => false,
+            }).count();
+            let rejected_transport = records.iter().filter(|r| match &r.outcome {
+                submit::CrankOutcome::HardReject { error, error_name, .. } =>
+                    if error_name.is_none() && !is_program_error(error) {
+                        eprintln!("keeper transport: {}", launch::scrub(error));
+                        true
+                    } else { false },
+                _ => false,
+            }).count();
+            let mut transport_errors = rejected_transport;
+            let result = match result {
+                Ok(s) => {
+                    keeper.progressed += s.progressed as u64;
+                    keeper.idle += s.idle as u64;
+                    keeper.failed += program_failures as u64;
+                    let rpc_failures: Vec<_> = s.failures.iter().filter(|(_, e)| e.starts_with("Rpc:")).collect();
+                    transport_errors += s.unconfirmed.len() + s.drain_rpc_errors.len() + rpc_failures.len();
+                    if !s.unconfirmed.is_empty() || !s.drain_rpc_errors.is_empty() || !rpc_failures.is_empty() {
+                        eprintln!("keeper transport: unconfirmed={:?}, rpc={rpc_failures:?}, after_progress={:?}", s.unconfirmed, s.drain_rpc_errors);
+                    }
+                    if st.keeper_log { launch::print_keeper_lines(&records, &s.line()); }
+                    if program_failures > 0 {
+                        Err(anyhow!("{program_failures} failed program txs: {:?}", s.failures))
+                    } else {
+                        Ok(Some(format!("p{}/i{}", s.progressed, s.idle)))
+                    }
                 }
-                // A failed crank tx or an RPC error inside an attempt that
-                // also progressed is classed Progress by the keeper; staging
-                // still counts it as a keeper failure.
-                let failed_txs = records.iter().filter(|r| r.outcome.class() == OutcomeClass::Failed).count();
-                if s.failed > 0 || failed_txs > 0 || !s.unconfirmed.is_empty() || !s.drain_rpc_errors.is_empty() {
-                    bail!(
-                        "{} failed ({failed_txs} failed txs), {} unconfirmed, rpc after progress {:?}: {:?}",
-                        s.failed,
-                        s.unconfirmed.len(),
-                        s.drain_rpc_errors,
-                        s.failures
-                    );
+                Err(e) => {
+                    if program_failures > 0 || is_program_error(&format!("{e:#}")) {
+                        keeper.failed += program_failures.max(1) as u64;
+                        Err(e)
+                    } else {
+                        transport_errors += 1;
+                        eprintln!("keeper transport: {}", short(&e));
+                        Ok(None)
+                    }
                 }
-                Ok(Some(format!("p{}/i{}", s.progressed, s.idle)))
-            }),
-        ) };
+            };
+            if transport_errors > 0 {
+                keeper.role.transport_errors += transport_errors as u64;
+                eprintln!("keeper: {transport_errors} transport errors (excluded from abnormal exit)");
+            }
+            keeper.role.record(result)
+        };
         let l = if l == "-" { String::new() } else { format!(" lifecycle={l}") };
         println!("t{tick} SOL={} push={p} accrual={} trade={t} backing={b} insurance={i} keeper={k}{l}", st.mark, accrual.json());
 
@@ -1002,6 +1037,22 @@ fn fill_allowed(size_q: i128, effective_price: u64, target_price: u64, lp_positi
 #[cfg(test)]
 mod fill_tests {
     use super::*;
+    #[test]
+    fn keeper_transport_vs_program_errors() {
+        for error in ["Error processing Instruction 3: custom program error: 0x17",
+            "TransactionError(InstructionError(3, ComputationalBudgetExceeded))",
+            r#"{"InstructionError":[3,{"Custom":23}]}"#] {
+            assert!(is_program_error(error), "{error}");
+        }
+        for error in ["-32002: Transaction simulation failed: Blockhash not found",
+            "request timed out", "error sending request", "unable to confirm transaction"] {
+            assert!(!is_program_error(error), "{error}");
+        }
+        let role = Role { transport_errors: 100, ..Role::default() };
+        assert!(!role.abnormal(5));
+        assert!(role.json().contains("\"transport_errors\":100"));
+    }
+
     fn cfg() -> launch::MatcherCfg {
         launch::MatcherCfg { program_id: Pubkey::new_unique().to_string(), size_q: 1, spread_bps: 10, fee_bps: 12, max_fill_notional_usd: 100_000, max_lp_inventory_usd: 100_000 }
     }

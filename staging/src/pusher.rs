@@ -72,7 +72,31 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
     let program_id = st.program_id;
     let keeper_log = st.keeper_log;
     let matcher_program = Pubkey::from_str(&st.cfg.matcher.program_id).context("matcher.program_id")?;
-    let matcher_ctxs = st.matcher_ctxs.iter().map(|ctx| Pubkey::from_str(ctx).context("matcher_ctxs")).collect::<Result<Vec<_>>>()?;
+    let configured_ctxs = st.matcher_ctxs.iter().map(|ctx| Pubkey::from_str(ctx).context("matcher_ctxs")).collect::<Result<Vec<_>>>()?;
+    let mut matcher_ctxs = Vec::new();
+    for ctx in configured_ctxs {
+        match rpc.get_account_data(&ctx) {
+            Ok(data) if ctx_authority_matches(&data, &oracle.pubkey()) => matcher_ctxs.push(ctx),
+            Ok(_) => eprintln!("push: dropping matcher ctx {ctx}: price_authority does not match {} (or invalid layout)", oracle.pubkey()),
+            Err(e) => eprintln!("push: dropping matcher ctx {ctx}: cannot read account: {}", short(&e.into())),
+        }
+    }
+    // Values do not affect wire size; validate the exact instruction shape before spawning.
+    let push = Instruction {
+        program_id,
+        accounts: vec![AccountMeta::new(oracle.pubkey(), true), AccountMeta::new(st.market, false)],
+        data: P::PushAuthMark { asset_index: 0, market_id: 0, now_slot: 0, mark_e6: 0,
+            observation_sequence: 0, authority_epoch: 0 }.encode(),
+    };
+    let startup_tx = Transaction::new_signed_with_payer(
+        &push_instructions(&cfg, push, matcher_program, oracle.pubkey(), &matcher_ctxs, 0),
+        Some(&payer.pubkey()), &[&payer, &oracle], solana_sdk::hash::Hash::default(),
+    );
+    if bincode::serialized_size(&startup_tx)? > 1232 { bail!("push transaction exceeds 1232 bytes at startup"); }
+    // Bound individual accrual RPC requests as well as the shared polling deadline.
+    let accrual_rpc = RpcClient::new_with_timeout_and_commitment(
+        st.rpc.url(), Duration::from_millis(500), CommitmentConfig::processed(),
+    );
     let handle = std::thread::spawn(move || {
         let mut last_slot = 0;
         let mut market = Pubkey::default();
@@ -96,14 +120,12 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                 let has_landed = s.landed_ms.is_some();
                 drop(s);
                 let mut send_attempted = false;
-                let mut accrual_snapshot = None;
                 let result = (|| -> Result<Option<String>> {
                     let data = rpc.get_account_data(&market)?;
                     let (_, g) = read_market(&data).map_err(|e| anyhow!("{e:?}"))?;
                     if g.mode != MarketModeV16::Live { return Ok(None); }
                     let seq = read_asset_control_sequences(&data, 0).map_err(|e| anyhow!("{e:?}"))?;
                     let slot = rpc.get_slot()?;
-                    accrual_snapshot = Some((data.clone(), slot, g.assets[0].slot_last));
                     if let PriceSource::Mock { max_bps, .. } = &mut source {
                         *max_bps = (g.config.max_price_move_bps_per_slot * slot.saturating_sub(last_slot).max(1)).min(50);
                     }
@@ -122,12 +144,7 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                             authority_epoch: seq.authority_epoch,
                         }.encode(),
                     };
-                    let mut ixs = vec![
-                        ComputeBudgetInstruction::set_compute_unit_limit(cfg.push_cu_limit),
-                        ComputeBudgetInstruction::set_compute_unit_price(cfg.priority_fee_micro_lamports),
-                        ComputeBudgetInstruction::request_heap_frame(128 * 1024), ix,
-                    ];
-                    ixs.extend(matcher_ctxs.iter().map(|ctx| update_ref(matcher_program, oracle.pubkey(), *ctx, mark)));
+                    let ixs = push_instructions(&cfg, ix, matcher_program, oracle.pubkey(), &matcher_ctxs, mark);
                     let tx = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &[&payer, &oracle], rpc.get_latest_blockhash()?);
                     if bincode::serialized_size(&tx)? > 1232 { bail!("push transaction exceeds 1232 bytes"); }
                     log_read_state(&mut read_error, None);
@@ -166,9 +183,20 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                 if outcome != "-" { println!("push={outcome}"); }
                 // Separate transaction: a failed crank must never revert a mark.
                 // The lifecycle lock still covers this send and confirmation.
-                let accrual = (|| -> Result<Option<String>> {
-                    let Some((data, slot, slot_last)) = accrual_snapshot else { return Ok(None); };
-                    let cranks = accrual_crank_count(slot.saturating_sub(slot_last), cfg.accrual_lag_slots, cfg.accrual_max_cranks_per_tx);
+                let client = Arc::clone(accrual_rpc.get_inner_client());
+                let accrual_payer = payer.insecure_clone();
+                let accrual_cfg = cfg.clone();
+                let accrual_pyth = pyth.clone();
+                let accrual = run_bounded(&accrual_rpc, Duration::from_secs(3), async move {
+                    let payer = accrual_payer;
+                    let cfg = accrual_cfg;
+                    let pyth = accrual_pyth;
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    let data = client.get_account_data(&market).await?;
+                    let (_, g) = read_market(&data).map_err(|e| anyhow!("{e:?}"))?;
+                    if g.mode != MarketModeV16::Live { return Ok(None); }
+                    let slot = client.get_slot().await?;
+                    let mut cranks = accrual_crank_count(slot.saturating_sub(g.assets[0].slot_last), cfg.accrual_lag_slots, cfg.accrual_max_cranks_per_tx);
                     if cranks == 0 || portfolio == Pubkey::default() { return Ok(None); }
                     let obs = observation::fetch_observation_for_asset(&data, 0, &pyth)?;
                     let route = CrankRoute::Live { reward_portfolio: None };
@@ -176,15 +204,25 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                         &program_id, &payer.pubkey(), &market, &portfolio, &route, &[obs], slot,
                     );
                     let crank = built.swap_remove(index);
-                    let mut ixs = vec![
-                        ComputeBudgetInstruction::set_compute_unit_limit(cranks.saturating_mul(125_000).min(1_400_000) as u32),
-                        ComputeBudgetInstruction::request_heap_frame(128 * 1024),
-                    ];
-                    for _ in 0..cranks { ixs.push(crank.clone()); }
-                    let tx = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &[&payer], rpc.get_latest_blockhash()?);
-                    rpc.send_and_confirm_transaction(&tx)?;
+                    for attempt in 0..2 {
+                        let mut ixs = vec![
+                            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+                            ComputeBudgetInstruction::set_compute_unit_price(cfg.priority_fee_micro_lamports),
+                            ComputeBudgetInstruction::request_heap_frame(128 * 1024),
+                        ];
+                        for _ in 0..cranks { ixs.push(crank.clone()); }
+                        if Instant::now() >= deadline { bail!("accrual deadline before send"); }
+                        let tx = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &[&payer], client.get_latest_blockhash().await?);
+                        let result = send_accrual(&client, &tx, deadline).await;
+                        match result {
+                            Err(e) if attempt == 0 && submit::wrapper_error_name(&e.to_string()) == Some("EngineNonProgress") => {
+                                cranks = retry_crank_count(cranks);
+                            }
+                            other => { other?; break; }
+                        }
+                    }
                     Ok(Some(format!("ok({cranks} cranks)")))
-                })();
+                });
                 let outcome = state.lock().unwrap().accrual.record(accrual);
                 if outcome != "-" { println!("accrual={outcome}"); }
 
@@ -197,6 +235,49 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
         }
     });
     Ok((shared, lifecycle, handle))
+}
+
+// Cancel the future itself, including the RPC client's HTTP 429 retry sleeps.
+fn run_bounded<T: Send + 'static>(rpc: &RpcClient, timeout: Duration,
+    future: impl std::future::Future<Output = Result<T>> + Send + 'static) -> Result<T> {
+    let task = rpc.runtime().spawn(future);
+    let abort = task.abort_handle();
+    let (done, finished) = std::sync::mpsc::channel();
+    let watchdog = std::thread::spawn(move || {
+        if finished.recv_timeout(timeout).is_err() { abort.abort(); }
+    });
+    let result = rpc.runtime().block_on(task);
+    let _ = done.send(());
+    let _ = watchdog.join();
+    result.map_err(|e| anyhow!("accrual deadline/cancellation: {e}"))?
+}
+
+fn ctx_authority_matches(data: &[u8], authority: &Pubkey) -> bool {
+    data.get(236..268) == Some(authority.as_ref())
+}
+
+fn retry_crank_count(count: u64) -> u64 { (count / 2).max(1) }
+
+fn push_instructions(cfg: &launch::OracleCfg, push: Instruction, matcher: Pubkey, authority: Pubkey, ctxs: &[Pubkey], mark: u64) -> Vec<Instruction> {
+    let mut ixs = vec![
+        ComputeBudgetInstruction::set_compute_unit_limit(cfg.push_cu_limit),
+        ComputeBudgetInstruction::set_compute_unit_price(cfg.priority_fee_micro_lamports),
+        ComputeBudgetInstruction::request_heap_frame(128 * 1024), push,
+    ];
+    ixs.extend(ctxs.iter().map(|ctx| update_ref(matcher, authority, *ctx, mark)));
+    ixs
+}
+
+async fn send_accrual(rpc: &solana_client::nonblocking::rpc_client::RpcClient, tx: &Transaction, deadline: Instant) -> Result<()> {
+    let sig = rpc.send_transaction_with_config(tx, RpcSendTransactionConfig { skip_preflight: true, ..Default::default() }).await?;
+    while Instant::now() < deadline {
+        if let Some(status) = rpc.get_signature_status_with_commitment(&sig, CommitmentConfig::processed()).await? {
+            status?;
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    bail!("accrual {sig} not processed before deadline")
 }
 
 /// The engine advances at most 32 slots per Live crank.
@@ -247,6 +328,56 @@ fn update_ref(program_id: Pubkey, authority: Pubkey, ctx: Pubkey, mark_e6: u64) 
 mod tests {
     use super::*;
     #[test]
+    fn accrual_cancels_stalled_rpc() {
+        let rpc = RpcClient::new("http://127.0.0.1:1".to_string());
+        let started = Instant::now();
+        let result = run_bounded::<()>(&rpc, Duration::from_millis(30), std::future::pending());
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        // A request timeout alone does not bound Solana's Retry-After sleep.
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let rpc = RpcClient::new(format!("http://{}", listener.local_addr().unwrap()));
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).unwrap();
+            socket.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 119\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let client = Arc::clone(rpc.get_inner_client());
+        let started = Instant::now();
+        let result = run_bounded(&rpc, Duration::from_millis(250), async move {
+            Ok(client.get_slot().await?)
+        });
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn refreshed_accrual_count_and_retry() {
+        let slot = 200u64;
+        assert_eq!(accrual_crank_count(slot.saturating_sub(100), 32, 10), 4);
+        assert_eq!(accrual_crank_count(slot.saturating_sub(180), 32, 10), 0);
+        for (count, retry) in [(10, 5), (5, 2), (2, 1), (1, 1)] {
+            assert_eq!(retry_crank_count(count), retry);
+        }
+    }
+
+    #[test]
+    fn ctx_authority_filter() {
+        let authority = Pubkey::new_unique();
+        let mut data = vec![0; 268];
+        data[236..268].copy_from_slice(authority.as_ref());
+        assert!(ctx_authority_matches(&data, &authority));
+        assert!(!ctx_authority_matches(&data, &Pubkey::new_unique()));
+        assert!(!ctx_authority_matches(&data[..267], &authority));
+        assert!(!ctx_authority_matches(&[], &authority));
+    }
+
+    #[test]
     fn accrual_threshold_and_crank_count() {
         let cfg = launch::load(DEFAULT_CONFIG).unwrap();
         assert_eq!(cfg.oracle.accrual_lag_slots, 32);
@@ -277,11 +408,15 @@ mod tests {
             accounts: vec![AccountMeta::new(oracle.pubkey(), true), AccountMeta::new(Pubkey::new_unique(), false)],
             data: P::PushAuthMark { asset_index: 0, market_id: 1, now_slot: 1, mark_e6: mark, observation_sequence: 1, authority_epoch: 1 }.encode(),
         };
-        let tx = Transaction::new_signed_with_payer(&[
-            ComputeBudgetInstruction::set_compute_unit_limit(cfg.oracle.push_cu_limit),
-            ComputeBudgetInstruction::set_compute_unit_price(cfg.oracle.priority_fee_micro_lamports),
-            ComputeBudgetInstruction::request_heap_frame(128 * 1024), push, ix,
-        ], Some(&payer.pubkey()), &[&payer, &oracle], solana_sdk::hash::Hash::default());
+        let matcher = Pubkey::from_str(&cfg.matcher.program_id).unwrap();
+        let oversized = push_instructions(&cfg.oracle, push.clone(), matcher, oracle.pubkey(),
+            &(0..40).map(|_| Pubkey::new_unique()).collect::<Vec<_>>(), mark);
+        let oversized_tx = Transaction::new_signed_with_payer(&oversized,
+            Some(&payer.pubkey()), &[&payer, &oracle], solana_sdk::hash::Hash::default());
+        assert!(bincode::serialized_size(&oversized_tx).unwrap() > 1232);
+        let tx = Transaction::new_signed_with_payer(
+            &push_instructions(&cfg.oracle, push, matcher, oracle.pubkey(), &[ctx], mark),
+            Some(&payer.pubkey()), &[&payer, &oracle], solana_sdk::hash::Hash::default());
         let bytes = bincode::serialized_size(&tx).unwrap();
         assert!(bytes <= 1232, "{bytes} bytes");
         println!("PushAuthMark + UpdateRef: {bytes} bytes, {} signatures", tx.signatures.len());
