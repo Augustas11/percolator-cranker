@@ -362,8 +362,8 @@ pub fn submit_crank_routed(
     };
     let pre_state_hash = fnv_hash(&pre_target);
 
-    // Submit with retry-on-blockhash-not-found (the test validator's RPC
-    // occasionally races the bank). A preflight "Blockhash not found" means
+    // Fetch a confirmed blockhash to match preflight commitment on public
+    // load-balanced RPCs. A preflight "Blockhash not found" means
     // the previous attempt was never forwarded, so a retry re-signs the same
     // instructions with a fresh blockhash and stays within the one budget
     // reservation the caller took. The deadline is re-checked before every
@@ -374,7 +374,7 @@ pub fn submit_crank_routed(
             return Err(DeadlineReached.into());
         }
         let (bh, _) = rpc
-            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())
             .context("get_latest_blockhash")?;
         let tx = Transaction::new_signed_with_payer(
             &ixs,

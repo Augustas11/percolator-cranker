@@ -1,8 +1,10 @@
 use super::*;
 use serde_json::Value;
 use std::net::{TcpStream, ToSocketAddrs};
+use std::time::Instant;
 use tungstenite::{client::IntoClientRequest, Message};
 
+const IDLE_RECONNECT: Duration = Duration::from_secs(60);
 const VENUES: [&str; 3] = ["coinbase", "kraken", "binance"];
 const URLS: [&str; 2] = [
     "wss://ws-feed.exchange.coinbase.com",
@@ -113,6 +115,11 @@ fn parse(venue: usize, text: &str) -> Option<Quote> {
     }
 }
 
+fn is_idle_read(error: &tungstenite::Error) -> bool {
+    matches!(error, tungstenite::Error::Io(e) if matches!(e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
+}
+
 impl Exchanges {
     pub fn new(cfg: &launch::OracleCfg) -> Result<Self> {
         if !(1..=3).contains(&cfg.exchange_min_venues) { bail!("exchange_min_venues must be 1..=3"); }
@@ -141,9 +148,18 @@ impl Exchanges {
                         let (mut ws, _) = tungstenite::client_tls(req, tcp)?;
                         if !SUBSCRIPTIONS[i].is_empty() { ws.send(Message::Text(SUBSCRIPTIONS[i].into()))?; }
                         eprintln!("exchange {} connected", VENUES[i]);
+                        let mut last_message = Instant::now();
                         loop {
                             if shared.strong_count() == 0 { return Ok(()); }
-                            match ws.read()? {
+                            let message = match ws.read() {
+                                Ok(message) => { last_message = Instant::now(); message },
+                                Err(e) if is_idle_read(&e) => {
+                                    if last_message.elapsed() >= IDLE_RECONNECT { bail!("websocket idle 60 s"); }
+                                    continue;
+                                },
+                                Err(e) => return Err(e.into()),
+                            };
+                            match message {
                                 Message::Text(text) => {
                                     if let Some(q) = parse(i, &text) {
                                         if let Some(shared) = shared.upgrade() {
@@ -189,6 +205,16 @@ impl Exchanges {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_read_errors() {
+        use std::io::ErrorKind;
+        for kind in [ErrorKind::WouldBlock, ErrorKind::TimedOut] {
+            assert!(is_idle_read(&tungstenite::Error::Io(kind.into())));
+        }
+        assert!(!is_idle_read(&tungstenite::Error::Io(ErrorKind::ConnectionReset.into())));
+        assert!(!is_idle_read(&tungstenite::Error::ConnectionClosed));
+    }
+
     fn cfg() -> launch::OracleCfg {
         launch::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../launch/sol-perp.toml")).unwrap().oracle
     }
