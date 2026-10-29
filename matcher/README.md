@@ -59,6 +59,11 @@ Test-fill option --price-authority KEYPAIR pushes the reference (plus the mark w
 the trade (rehearsal while the pusher is paused); the trade itself is signed by the taker only.
 
 Devnet (2026-10-29): program `8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE`, context
-`BHsZrk4cck5xBUhFkE59G9ZJtDLvSZLEtAmpn3wNbDTK` for market `7p8DtcMH…`, LP portfolio
-`GKJHRYBK…`, delegate `DdHruM8Y…`. Limits: fill 10 SOL, inventory 100 SOL, age 25 slots,
-deviation 10 bps; price authority = the run's oracle key. Keys live in `~/.config/drip-devnet/`.
+`3WPsoVhij9XCZkJJ12zcev1DwqCouXXEFvnYKUnH1WMi` for the relisted market `HyMKxfct…`, LP portfolio
+`GUvzajrr…`, delegate `DfrgfJRy…`. (Context `BHsZrk4c…` is bound to the retired market `7p8DtcMH…`.)
+Limits: fill 10 SOL, inventory 100 SOL, age 25 slots, deviation 10 bps; price authority = the
+run's oracle key. Keys live in `~/.config/drip-devnet/`.
+
+Any non-matcher position change on the LP (for example a co-signed `TradeNoCpi`) clears the
+LP's matcher capability at this wrapper pin (`v16_program.rs:1180-1203`, `:8251-8256`), so the
+LP must sign SetMatcherConfig again. Do not co-sign TradeNoCpi on the matcher's LP portfolio.
