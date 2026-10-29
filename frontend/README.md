@@ -18,6 +18,11 @@ price. Fills show only this client's landed transactions and the mark at send ti
 
 `npm test` runs tests; `npm run build` typechecks and builds for production.
 
+In devnet mode, `VITE_INDEXER_URL` defaults to `http://127.0.0.1:8090`; set it to `none` to disable the read-only indexer panels.
+From the repository root, run `cargo run --release --manifest-path indexer/Cargo.toml -- run`.
+The indexer listens on `127.0.0.1:8090`; CORS allows `localhost:5173` by default.
+Panels poll every 15 seconds. All figures are devnet, test tokens; mock mode uses deterministic indexer data.
+
 `src/chain/` is the client for upstream Percolator v16 (wrapper `5cb331dd`). Its
 tests match byte for byte the fixtures that the Rust `client/` crate emits from the
 pinned program crate. Regenerate them from the repository root with

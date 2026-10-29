@@ -1,5 +1,7 @@
 import { useCallback, useState, useSyncExternalStore } from "react";
 import type { MarketClient, Side } from "./market/types";
+import type { IndexerClient } from "./indexer/client";
+import { IndexerPanels } from "./Indexer";
 import "./App.css";
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
@@ -13,7 +15,7 @@ export function useSnapshot(client: MarketClient) {
   return useSyncExternalStore(subscribe, getSnapshot);
 }
 
-export default function App({ client }: { client: MarketClient }) {
+export default function App({ client, indexer }: { client: MarketClient; indexer?: IndexerClient | null }) {
   const { market, mark, funding, portfolio, fills } = useSnapshot(client);
   const [amount, setAmount] = useState("");
   const [size, setSize] = useState("1");
@@ -113,6 +115,7 @@ export default function App({ client }: { client: MarketClient }) {
         </table></div>
         {fills.length === 0 && <p>No fills yet</p>}
       </section>
+      <IndexerPanels indexer={indexer ?? null} owner={portfolio.owner} />
     </main>
   </>;
 }
