@@ -250,29 +250,33 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
     let market: Pubkey = args.value("market")?;
     let lp_pf: Pubkey = args.value("portfolio")?;
     let ctx: Pubkey = args.value("ctx")?;
-    let taker = Keypair::new();
-    let pf = Keypair::new();
-    send(
-        rpc,
-        payer,
-        &[system_instruction::transfer(
-            &payer.pubkey(),
-            &taker.pubkey(),
-            1_000_000,
-        )],
-        &[],
-    )?;
-    funded_portfolio(
-        rpc,
-        payer,
-        wrapper,
-        market,
-        &taker,
-        &pf,
-        args.value("deposit")?,
-    )?;
+    // Saved taker keypairs: the portfolio (~0.05 SOL rent) is created and funded once,
+    // and retries cost only fees.
+    let taker = args.key("taker-keypair")?;
+    let pf = args.key("taker-portfolio-keypair")?;
+    if rpc.get_account(&pf.pubkey()).is_err() {
+        send(
+            rpc,
+            payer,
+            &[system_instruction::transfer(
+                &payer.pubkey(),
+                &taker.pubkey(),
+                10_000_000,
+            )],
+            &[],
+        )?;
+        funded_portfolio(
+            rpc,
+            payer,
+            wrapper,
+            market,
+            &taker,
+            &pf,
+            args.value("deposit")?,
+        )?;
+    }
     println!(
-        "throwaway_taker={} portfolio={}",
+        "taker={} portfolio={}",
         taker.pubkey(),
         pf.pubkey()
     );

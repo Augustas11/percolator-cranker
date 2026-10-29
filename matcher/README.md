@@ -47,7 +47,8 @@ Set-config: --lp-owner KEYPAIR --wrapper PUBKEY --market PUBKEY --portfolio PUBK
 Update-ref: --price-authority KEYPAIR --market PUBKEY --ctx PUBKEY;
 optional --push-auth-mark --wrapper PUBKEY pushes the same effective price in that tx.
 Test-fill: --wrapper PUBKEY --market PUBKEY --portfolio LP_PUBKEY --ctx PUBKEY
---size SIGNED_BASE_UNITS --deposit TOKEN_ATOMS (payer must own the test mint).
+--size SIGNED_BASE_UNITS --taker-keypair KEYPAIR --taker-portfolio-keypair KEYPAIR; the first run
+creates and funds that portfolio with --deposit TOKEN_ATOMS (payer must own the test mint).
 
 The pusher must add UpdateRef to its PushAuthMark transaction, signed by the same
 oracle key. The matcher cannot read the market through the wrapper's CPI tail.
