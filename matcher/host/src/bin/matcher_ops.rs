@@ -119,6 +119,9 @@ fn main() -> Result<()> {
         show_context(&account.data)?;
         return Ok(());
     }
+    if command == "check" {
+        return preflight(&rpc, &args, program);
+    }
     let payer = args.key("payer")?;
     match command.as_str() {
         "init-ctx" => {
@@ -220,6 +223,8 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
     let market: Pubkey = args.value("market")?;
     let lp_pf: Pubkey = args.value("portfolio")?;
     let ctx: Pubkey = args.value("ctx")?;
+    // Devnet SOL rule: send nothing unless every precondition holds (read-only).
+    preflight(rpc, args, program)?;
     // Saved taker keypairs: the portfolio (~0.05 SOL rent) is created and funded once,
     // and retries cost only fees.
     let taker = args.key("taker-keypair")?;
@@ -429,6 +434,88 @@ fn funded_portfolio(
         ],
     );
     send(rpc, payer, &[deposit], &[owner])?;
+    Ok(())
+}
+
+/// Read-only devnet fill preconditions; prints each and fails if any does not hold.
+fn preflight(rpc: &RpcClient, args: &Args, program: Pubkey) -> Result<()> {
+    let market: Pubkey = args.value("market")?;
+    let lp_pf: Pubkey = args.value("portfolio")?;
+    let ctx: Pubkey = args.value("ctx")?;
+    let now = rpc.get_slot()?;
+    let (cfg_market, g) = state::read_market(&rpc.get_account_data(&market)?)?;
+    let asset = &g.assets[0];
+    let c = rpc.get_account_data(&ctx)?;
+    let ref_price = u64::from_le_bytes(c[REF_PRICE_OFF..REF_PRICE_OFF + 8].try_into()?);
+    let ref_slot = u64::from_le_bytes(c[REF_SLOT_OFF..REF_SLOT_OFF + 8].try_into()?);
+    let age = u64::from_le_bytes(c[AGE_OFF..AGE_OFF + 8].try_into()?);
+    let dev = u16::from_le_bytes(c[DEVIATION_OFF..DEVIATION_OFF + 2].try_into()?) as u128;
+    let lp = rpc.get_account_data(&lp_pf)?;
+    let cfg = state::read_portfolio_matcher_config(&lp)?;
+    let expiry = state::read_portfolio_matcher_expiry(&lp)?;
+    let eff = asset.effective_price;
+    // The one saved taker: its portfolio exists, or its faucet-funded token account
+    // holds the deposit for the single setup.
+    let taker_ok = match (
+        args.key("taker-portfolio-keypair"),
+        args.key("taker-keypair"),
+    ) {
+        (Ok(pf), _) if rpc.get_account(&pf.pubkey()).is_ok() => true,
+        (_, Ok(taker)) => {
+            let ata_program: Pubkey = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL".parse()?;
+            let mint = Pubkey::new_from_array(cfg_market.collateral_mint);
+            let ata = Pubkey::find_program_address(
+                &[
+                    taker.pubkey().as_ref(),
+                    spl_token::ID.as_ref(),
+                    mint.as_ref(),
+                ],
+                &ata_program,
+            )
+            .0;
+            let need: u64 = args.value("deposit").unwrap_or(u64::MAX);
+            rpc.get_account_data(&ata)
+                .ok()
+                .and_then(|d| TokenAccount::unpack(&d).ok())
+                .is_some_and(|t| t.amount >= need)
+        }
+        _ => false,
+    };
+    let checks = [
+        ("market Live", g.mode == percolator::MarketModeV16::Live),
+        (
+            "mark pushed within 25 slots",
+            now.saturating_sub(g.current_slot) <= 25,
+        ),
+        (
+            "accrual within 32 slots",
+            now.saturating_sub(g.slot_last) <= 32,
+        ),
+        ("target == effective", asset.raw_oracle_target_price == eff),
+        ("not loss-stale", !g.loss_stale_active),
+        (
+            "matcher ref fresh",
+            ref_slot != 0 && now.saturating_sub(ref_slot) <= age,
+        ),
+        (
+            "matcher ref near mark",
+            (eff.abs_diff(ref_price) as u128) * 10_000 <= dev * ref_price as u128,
+        ),
+        (
+            "LP capability set for this matcher",
+            cfg.enabled() == 1
+                && cfg.matcher_program == program.to_bytes()
+                && cfg.matcher_context == ctx.to_bytes()
+                && expiry > now,
+        ),
+        ("saved taker funded", taker_ok),
+    ];
+    for (name, ok) in &checks {
+        println!("{} {name}", if *ok { "PASS" } else { "FAIL" });
+    }
+    if checks.iter().any(|(_, ok)| !ok) {
+        bail!("preconditions not met; nothing sent");
+    }
     Ok(())
 }
 
