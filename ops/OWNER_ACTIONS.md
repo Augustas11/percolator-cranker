@@ -4,6 +4,21 @@ Only the owner can do these. Work through them in order; the lead time is
 how early each must start before launch. Upstream has no launch date, so
 **start the long ones now**.
 
+## To do now (devnet)
+
+- [ ] **Free Helius devnet RPC key.** The bots on Pearl use the public
+  devnet RPC, where pushes take ~10.5 s to land and keeper transactions fail
+  with "blockhash not found". Send the RPC URL; it goes into the Pearl run
+  config only, never the repo.
+- [ ] **Designer assets for $DRIP.**
+
+## Before mainnet
+
+Builder mode (2026-10-28): no lawyer, no entity, so 1 and 2 are dropped.
+The devnet bots run on the Pearl VPS (2026-10-29); mainnet still needs its
+own servers (5). The hedge account (7) is parked, so the hedger stays in
+dry-run.
+
 | # | Action | Lead time | Done when |
 |---|---|---|---|
 | 1 | **Engage a lawyer** with `LEGAL_QUESTIONS.md` | 3–6 weeks (finding counsel ~1–2 weeks, plus answers) | Written answers on status, geo-block, KYC, marketing |
