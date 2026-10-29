@@ -182,13 +182,17 @@ impl Venue for Hyperliquid {
         if reply["status"] != "ok" {
             bail!("exchange: {reply}");
         }
-        let st = &reply["response"]["data"]["statuses"][0];
+        let statuses = &reply["response"]["data"]["statuses"];
+        let Some(statuses) = statuses.as_array().filter(|s| s.len() == 1) else {
+            bail!("unexpected order status: {statuses}");
+        };
+        let st = &statuses[0];
         if let Some(e) = st["error"].as_str() {
             bail!("order refused: {e}");
         }
         let f = &st["filled"];
         if f.is_null() {
-            return Ok(Fill { sol: 0.0, avg_px: 0.0 });
+            bail!("unexpected order status: {st}");
         }
         Ok(Fill { sol: num(&f["totalSz"])?.copysign(sol), avg_px: num(&f["avgPx"])? })
     }

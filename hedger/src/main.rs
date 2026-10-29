@@ -37,6 +37,17 @@ fn check_pairing(genesis: &str, network: &str) -> Result<()> {
     }
 }
 
+fn check_rpc_scheme(rpc: &str, network: &str) -> Result<()> {
+    if network == "mainnet" && !rpc.starts_with("https://") {
+        bail!("mainnet requires an https:// chain.rpc");
+    }
+    Ok(())
+}
+
+fn redact(msg: String, rpc: &str) -> String {
+    msg.replace(rpc, "<rpc>")
+}
+
 #[derive(Deserialize)]
 struct Config {
     chain: ChainCfg,
@@ -113,11 +124,13 @@ fn real_main() -> Result<()> {
         let hl = Hyperliquid::connect("mainnet", &cfg.venue.coin)?;
         return run_cost_check(&hl, cfg.venue.taker_fee_bps);
     }
+    check_rpc_scheme(&cfg.chain.rpc, &cfg.venue.network)?;
     // Use system roots, not the bundled webpki-roots 0.25.
-    let client = reqwest::Client::builder().use_native_tls().timeout(Duration::from_secs(30)).build()?;
+    let client = reqwest::Client::builder().use_native_tls().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(30)).build()?;
     let sender = HttpSender::new_with_client(&cfg.chain.rpc, client);
     let rpc = RpcClient::new_sender(sender, RpcClientConfig::with_commitment(CommitmentConfig::confirmed()));
-    let genesis = rpc.get_genesis_hash().context("read chain genesis hash")?.to_string();
+    let genesis = rpc.get_genesis_hash().context("read chain genesis hash")
+        .map_err(|e| anyhow::anyhow!(redact(format!("{e:#}"), &cfg.chain.rpc)))?.to_string();
     check_pairing(&genesis, &cfg.venue.network)?;
     let mut hl = Hyperliquid::connect(&cfg.venue.network, &cfg.venue.coin)?;
     if live {
@@ -212,7 +225,7 @@ fn run(cfg: Config, rpc: RpcClient, genesis: &str, hl: Hyperliquid, live: bool, 
             Ok(()) => {}
             Err(e) => {
                 s.errors += 1;
-                log("error", json!({"error": format!("{e:#}")}));
+                log("error", json!({"error": redact(format!("{e:#}"), &cfg.chain.rpc)}));
             }
         }
         *metrics.write().unwrap() = render(&s, &guard, &market.to_string(), live);
@@ -356,7 +369,7 @@ fn render(s: &Stats, g: &Guard, market: &str, live: bool) -> String {
         ("last_hedge_cost_bps", "gauge", s.last_cost_bps),
         ("hedge_cost_bps", "gauge", avg_bps(s).unwrap_or(0.0)),
         ("hedge_volume_usd", "counter", s.volume_usd),
-        ("hedge_cost_usd", "counter", s.cost_usd),
+        ("hedge_cost_usd", "gauge", s.cost_usd),
         ("orders", "counter", s.orders as f64),
         ("errors", "counter", s.errors as f64),
         ("guard_pnl_usd", "gauge", g.pnl_usd),
@@ -398,5 +411,10 @@ mod tests {
         assert!(check_pairing("local-genesis", "mainnet").is_err());
         assert!(check_pairing("local-genesis", "testnet").is_ok());
         assert!(check_pairing(MAINNET_BETA_GENESIS, "foo").is_err());
+        assert!(check_rpc_scheme("http://localhost:8899", "mainnet").is_err());
+        assert!(check_rpc_scheme("https://example.com", "mainnet").is_ok());
+        assert!(check_rpc_scheme("http://localhost:8899", "testnet").is_ok());
+        let rpc = "https://example.com/api-key";
+        assert_eq!(redact(format!("request to {rpc} failed: {rpc}"), rpc), "request to <rpc> failed: <rpc>");
     }
 }

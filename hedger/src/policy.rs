@@ -47,6 +47,7 @@ pub fn decide(
     let want = -residual;
     let target = (hedge_sol + want).clamp(-p.max_hedge_sol, p.max_hedge_sol);
     let order = (target - hedge_sol).clamp(-p.max_order_sol, p.max_order_sol);
+    let order = order.clamp(-residual.abs(), residual.abs());
     let order = round_toward_zero(order, step);
     if order == 0.0 || order.signum() != want.signum() {
         return Decision::Hold("max_hedge");
@@ -162,6 +163,8 @@ mod tests {
         p.max_hedge_sol = 500.0;
         assert_eq!(decide(&p, 0.0, 1_000.0, 100.0, 0.01, None), Decision::Order(-100.0));
         assert_eq!(decide(&p, -1_000.0, 800.0, 100.0, 0.01, None), Decision::Hold("max_hedge"));
+        p.threshold_usd = 1_000.0;
+        assert_eq!(decide(&p, -780.0, 800.0, 100.0, 0.01, None), Decision::Order(-20.0));
     }
 
     #[test]
