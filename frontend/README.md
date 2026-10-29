@@ -27,7 +27,10 @@ Refresh the `.bin` account dumps first with
 (`market.bin` = market, `portfolio.bin` = a trader portfolio, `lp_portfolio.bin` = the LP portfolio).
 
 `npm run roundtrip` runs a real devnet round trip. It creates a portfolio,
-deposits, opens, closes and withdraws, and prints the signatures. It needs a
+deposits, opens, closes and withdraws, then closes the portfolio to refund rent
+(unless `ROUNDTRIP_KEEP_PORTFOLIO=1`). It prints signatures and saves progress
+after each send to `.roundtrip/result.json`. Failed simulations rebuild and
+retry once after 6 seconds before aborting without sending. It needs a
 funded throwaway wallet (`TESTER_KEYPAIR`). Its trades take the same `TradeCpi`
 path as the browser.
 Test tokens only, no real funds.
