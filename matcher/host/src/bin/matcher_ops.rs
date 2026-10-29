@@ -408,7 +408,7 @@ fn preflight(rpc: &RpcClient, args: &Args, program: Pubkey) -> Result<()> {
     let lp_pf: Pubkey = args.value("portfolio")?;
     let ctx: Pubkey = args.value("ctx")?;
     let now = rpc.get_slot()?;
-    let (cfg_market, g) = state::read_market(&rpc.get_account_data(&market)?)?;
+    let (_, g) = state::read_market(&rpc.get_account_data(&market)?)?;
     let asset = &g.assets[0];
     let c = rpc.get_account_data(&ctx)?;
     let ref_price = u64::from_le_bytes(c[REF_PRICE_OFF..REF_PRICE_OFF + 8].try_into()?);
@@ -419,39 +419,12 @@ fn preflight(rpc: &RpcClient, args: &Args, program: Pubkey) -> Result<()> {
     let cfg = state::read_portfolio_matcher_config(&lp)?;
     let expiry = state::read_portfolio_matcher_expiry(&lp)?;
     let eff = asset.effective_price;
-    // The one saved taker: its portfolio exists, or its faucet-funded token account
-    // holds the deposit for the single setup.
-    let taker_ok = match (
-        args.key("taker-portfolio-keypair"),
-        args.key("taker-keypair"),
-    ) {
-        (Ok(pf), _) if rpc.get_account(&pf.pubkey()).is_ok() => true,
-        (_, Ok(taker)) => {
-            let ata_program: Pubkey = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL".parse()?;
-            let mint = Pubkey::new_from_array(cfg_market.collateral_mint);
-            let ata = Pubkey::find_program_address(
-                &[
-                    taker.pubkey().as_ref(),
-                    spl_token::ID.as_ref(),
-                    mint.as_ref(),
-                ],
-                &ata_program,
-            )
-            .0;
-            let need: u64 = args.value("deposit").unwrap_or(u64::MAX);
-            rpc.get_account_data(&ata)
-                .ok()
-                .and_then(|d| TokenAccount::unpack(&d).ok())
-                .is_some_and(|t| t.amount >= need)
-        }
-        _ => false,
-    };
     println!(
         "slot={now} market.current_slot={} market.slot_last={} asset.slot_last={} ref_slot={ref_slot}",
         g.current_slot, g.slot_last, asset.slot_last
     );
     // The trade transaction's own cranks catch up the mark and accrual, and test-fill
-    // simulates it before sending, so these three are shown but do not gate.
+    // simulates it before sending, so these two are shown but do not gate.
     for (name, ok) in [
         (
             "mark pushed within 25 slots",
@@ -483,7 +456,6 @@ fn preflight(rpc: &RpcClient, args: &Args, program: Pubkey) -> Result<()> {
                 && cfg.matcher_context == ctx.to_bytes()
                 && expiry > now,
         ),
-        ("saved taker funded", taker_ok),
     ];
     for (name, ok) in &checks {
         println!("{} {name}", if *ok { "PASS" } else { "FAIL" });

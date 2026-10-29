@@ -56,10 +56,10 @@ The wrapper rejects target/effective mismatch and fees below the 12 bps base fee
 SetMatcherConfig uses a 12 bps cap; TradeCpi charges the LP exactly the base fee.
 Return flags are VALID only: backing-fee cap bits are zero, so the LP pays no backing fee.
 
-`check` (same options as test-fill) prints each devnet fill precondition read-only: market Live,
-mark pushed and accrual current, target == effective, not loss-stale, matcher reference fresh and
-near the mark, LP capability set, saved taker funded. test-fill runs it first and sends nothing
-unless all pass (devnet SOL rule: no on-chain test that is expected to fail).
+`check` (same options as test-fill) gates read-only on what the fill transaction cannot fix:
+market Live, accrual within 32 slots, matcher reference fresh and near the mark, LP capability
+set. test-fill runs it first, then simulates every transaction and sends none that fails
+(devnet SOL rule: no on-chain test that is expected to fail).
 
 **Operating rule: one key per role.** Only the pusher signs with the oracle key, and UpdateRef
 rides in its PushAuthMark transaction; this CLI never takes the oracle key. Only the matcher LP's
