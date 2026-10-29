@@ -46,6 +46,7 @@ jobs:
             ~/.cargo/git
             target
             cranker/target
+            indexer/target
             client/target
           key: host-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'scripts/pins.env') }}
           restore-keys: host-${{ runner.os }}-
@@ -57,6 +58,8 @@ jobs:
           cargo build --release --manifest-path "$BRINGUP_DIR/Cargo.toml"
       - name: unit tests (validator-gated integration tests self-skip)
         run: cargo test --release --manifest-path "$CRANKER_MANIFEST"
+      - name: indexer unit tests
+        run: cargo test --release --manifest-path indexer/Cargo.toml
 
   # Runs only where scripts/export_public.sh exists (the maintainers' export
   # source); skipped everywhere else. Re-runs the export, its leak helper,

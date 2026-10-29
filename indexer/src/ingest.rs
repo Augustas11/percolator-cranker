@@ -1,0 +1,330 @@
+use crate::{db, decode, now, Config};
+use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use percolator::{AssetLifecycleV16, MarketGroupV16HeaderAccount, MarketModeV16};
+use percolator_prog::{
+    constants::MARKET_GROUP_OFF,
+    state::{read_market, read_portfolio},
+};
+use rusqlite::Connection;
+use serde_json::{json, Value};
+use solana_client::{
+    client_error::ClientErrorKind, rpc_client::RpcClient, rpc_request::RpcRequest,
+};
+use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
+use std::time::Duration;
+
+fn retryable(e: &solana_client::client_error::ClientError) -> bool {
+    match e.kind() {
+        ClientErrorKind::Reqwest(e) => e
+            .status()
+            .is_none_or(|status| status.as_u16() == 429 || status.is_server_error()),
+        ClientErrorKind::Io(_) => true,
+        _ => e.to_string().contains("429") || e.to_string().contains("Too Many Requests"),
+    }
+}
+fn retry<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut delay = Duration::from_millis(500);
+    loop {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e)
+                if e.downcast_ref::<solana_client::client_error::ClientError>()
+                    .is_some_and(retryable) =>
+            {
+                eprintln!("RPC retry in {:.1}s: {e}", delay.as_secs_f64());
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_secs(30));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+fn signatures(
+    rpc: &RpcClient,
+    cfg: &Config,
+    before: Option<&str>,
+    until: Option<&str>,
+) -> Result<Vec<String>> {
+    let result: Value = retry(|| {
+        rpc.send(
+            RpcRequest::GetSignaturesForAddress,
+            json!([cfg.program.to_string(),{
+        "limit":1000,"before":before,"until":until,"commitment":"finalized"} ]),
+        )
+        .map_err(Into::into)
+    })?;
+    result
+        .as_array()
+        .context("invalid signatures response")?
+        .iter()
+        .map(|v| {
+            v["signature"]
+                .as_str()
+                .map(str::to_owned)
+                .context("missing signature")
+        })
+        .collect()
+}
+fn fetch(
+    rpc: &RpcClient,
+    c: &Connection,
+    cfg: &Config,
+    signatures: &[String],
+) -> Result<Vec<decode::Decoded>> {
+    let mut rows = Vec::new();
+    for signature in signatures.iter().rev() {
+        if db::contains(c, signature)? {
+            continue;
+        }
+        let tx: Value = retry(|| {
+            let result = rpc.send(
+                RpcRequest::GetTransaction,
+                json!([signature,{
+                "encoding":"json","maxSupportedTransactionVersion":0,"commitment":"finalized"}]),
+            );
+            // Also throttle retries, null responses, and errors; never hammer getTransaction.
+            std::thread::sleep(Duration::from_millis(cfg.rpc_delay_ms));
+            result.map_err(Into::into)
+        })?;
+        anyhow::ensure!(
+            !tx.is_null(),
+            "transaction {signature} unavailable; cursor left pending (RPC history may be pruned)"
+        );
+        rows.push(decode::decode(
+            signature,
+            &tx,
+            &cfg.program.to_string(),
+            &cfg.market.to_string(),
+        )?);
+    }
+    Ok(rows)
+}
+fn commit(
+    c: &mut Connection,
+    rows: &[decode::Decoded],
+    cursor: Option<(&str, &str)>,
+) -> Result<()> {
+    let tx = c.transaction()?;
+    for row in rows {
+        db::insert(&tx, row)?;
+    }
+    if let Some((key, value)) = cursor {
+        db::set_meta(&tx, key, value)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+fn backfill(rpc: &RpcClient, c: &mut Connection, cfg: &Config) -> Result<()> {
+    let mut before = db::meta(c, "oldest_signature")?;
+    loop {
+        let page = signatures(rpc, cfg, before.as_deref(), None)?;
+        if page.is_empty() {
+            db::set_meta(c, "backfill_complete", "true")?;
+            return Ok(());
+        }
+        let rows = fetch(rpc, c, cfg, &page)?;
+        let tx = c.transaction()?;
+        for row in &rows {
+            db::insert(&tx, row)?;
+        }
+        db::set_meta(&tx, "oldest_signature", page.last().unwrap())?;
+        if db::meta(&tx, "newest_signature")?.is_none() {
+            db::set_meta(&tx, "newest_signature", &page[0])?;
+        }
+        tx.commit()?;
+        before = page.last().cloned();
+    }
+}
+fn catch_up(rpc: &RpcClient, c: &mut Connection, cfg: &Config) -> Result<()> {
+    let until = db::meta(c, "newest_signature")?;
+    let mut before = None;
+    let mut pages = Vec::new();
+    loop {
+        let page = signatures(rpc, cfg, before.as_deref(), until.as_deref())?;
+        if page.is_empty() {
+            break;
+        }
+        before = page.last().cloned();
+        pages.push(page);
+    }
+    let newest = pages.first().map(|p| p[0].clone());
+    // Commit oldest pages first, but move the tip only once the entire gap is durable.
+    for (i, page) in pages.iter().rev().enumerate() {
+        let rows = fetch(rpc, c, cfg, page)?;
+        let cursor = if i + 1 == pages.len() {
+            newest.as_deref().map(|s| ("newest_signature", s))
+        } else {
+            None
+        };
+        commit(c, &rows, cursor)?;
+    }
+    Ok(())
+}
+
+fn state(rpc: &RpcClient, cfg: &Config) -> Result<(u64, Value, Vec<db::Snapshot>)> {
+    let response = retry(|| {
+        rpc.get_account_with_commitment(&cfg.market, CommitmentConfig::finalized())
+            .map_err(Into::into)
+    })?;
+    let slot = response.context.slot;
+    let account = response.value.context("market account missing")?;
+    anyhow::ensure!(
+        account.owner == cfg.program,
+        "market account has wrong owner"
+    );
+    let (_, group) = read_market(&account.data).map_err(|e| anyhow!("read_market: {e:?}"))?;
+    let raw = account
+        .data
+        .get(
+            MARKET_GROUP_OFF..MARKET_GROUP_OFF + std::mem::size_of::<MarketGroupV16HeaderAccount>(),
+        )
+        .context("short market header")?;
+    let header = bytemuck::pod_read_unaligned::<MarketGroupV16HeaderAccount>(raw);
+    let mut oi = serde_json::Map::new();
+    for (i, a) in group.assets.iter().enumerate() {
+        let lifecycle = match a.lifecycle {
+            AssetLifecycleV16::Disabled => continue,
+            AssetLifecycleV16::PendingActivation => "pending_activation",
+            AssetLifecycleV16::Active => "active",
+            AssetLifecycleV16::DrainOnly => "drain_only",
+            AssetLifecycleV16::Retired => "retired",
+            AssetLifecycleV16::Recovery => "recovery",
+        };
+        oi.insert(format!("asset_{i}"),json!({"long_q":a.oi_eff_long_q.to_string(),"short_q":a.oi_eff_short_q.to_string(),"lifecycle":lifecycle}));
+    }
+    let mode = match group.mode {
+        MarketModeV16::Live => "live",
+        MarketModeV16::Resolved => "resolved",
+        MarketModeV16::Recovery => "recovery",
+    };
+    let summary = json!({"mode":mode,"open_interest":oi,"materialized_portfolio_count":group.materialized_portfolio_count,
+        "insurance":header.insurance.get().to_string(),"vault":header.vault.get().to_string()});
+    // discovery uses confirmed internally. Use its reusable key/layout filtering, then
+    // read those keys at finalized below; no confirmed account data is persisted.
+    let discovered = drip::discovery::discover_portfolios(rpc, &cfg.program)?;
+    let keys: Vec<Pubkey> = discovered
+        .iter()
+        .filter(|p| {
+            p.market_group_id() == Some(cfg.market)
+                && p.layout_discriminator() == Some(drip::binding::V16_LAYOUT_DISCRIMINATOR)
+        })
+        .map(|p| p.pubkey)
+        .collect();
+    let mut snapshots = Vec::new();
+    for chunk in keys.chunks(100) {
+        // Raw request permits minContextSlot and returns a slot for this exact account batch.
+        let result: Value = retry(|| {
+            rpc.send(
+                RpcRequest::GetMultipleAccounts,
+                json!([
+            chunk.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            {"encoding":"base64","commitment":"finalized","minContextSlot":slot}]),
+            )
+            .map_err(Into::into)
+        })?;
+        let snapshot_slot = result["context"]["slot"]
+            .as_u64()
+            .context("missing snapshot slot")?;
+        let accounts = result["value"]
+            .as_array()
+            .context("missing portfolio accounts")?;
+        anyhow::ensure!(
+            accounts.len() == chunk.len(),
+            "incorrect account response length"
+        );
+        for (key, raw) in chunk.iter().zip(accounts) {
+            if raw.is_null() {
+                continue;
+            }
+            anyhow::ensure!(
+                raw["owner"].as_str() == Some(cfg.program.to_string().as_str()),
+                "portfolio owner mismatch"
+            );
+            let bytes = STANDARD.decode(
+                raw["data"][0]
+                    .as_str()
+                    .context("missing base64 account data")?,
+            )?;
+            let p = read_portfolio(&bytes).map_err(|e| anyhow!("read_portfolio {key}: {e:?}"))?;
+            anyhow::ensure!(
+                p.provenance_header.market_group_id == cfg.market.to_bytes(),
+                "portfolio market mismatch"
+            );
+            let positions:Vec<_>=p.legs.iter().filter(|l|l.active!=0).map(|l|json!({"asset_index":l.asset_index.get(),"market_id":l.market_id.get(),
+                "side":if l.side==0 {"long"} else {"short"},"basis_pos_q":l.basis_pos_q.get().to_string()})).collect();
+            snapshots.push(db::Snapshot {
+                portfolio: key.to_string(),
+                slot: snapshot_slot,
+                taken_at: now(),
+                owner: Pubkey::new_from_array(p.owner).to_string(),
+                capital: p.capital.get().to_string(),
+                pnl: p.pnl.get().to_string(),
+                positions: json!(positions),
+            });
+        }
+    }
+    Ok((slot, summary, snapshots))
+}
+pub fn pass(c: &mut Connection, cfg: &Config) -> Result<()> {
+    let rpc = RpcClient::new_with_timeout_and_commitment(
+        cfg.rpc_url.clone(),
+        Duration::from_secs(60),
+        CommitmentConfig::finalized(),
+    );
+    if db::meta(c, "backfill_complete")?.as_deref() != Some("true") {
+        backfill(&rpc, c, cfg)?;
+    }
+    // Capture state first, then ingest landed transactions through that point before
+    // applying the liquidation exclusion query. RPC reads never submit transactions.
+    let (slot, summary, snapshots) = state(&rpc, cfg)?;
+    catch_up(&rpc, c, cfg)?;
+    let tx = c.transaction()?;
+    for s in &snapshots {
+        db::snapshot(&tx, s)?;
+    }
+    db::set_meta(&tx, "market_json", &summary.to_string())?;
+    db::set_meta(&tx, "last_ingest_at", &now().to_string())?;
+    db::set_meta(&tx, "last_ingest_slot", &slot.to_string())?;
+    tx.commit()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn permanent_errors_fail_without_retry_and_success_returns() {
+        let mut attempts = 0;
+        let result: Result<()> = retry(|| {
+            attempts += 1;
+            Err(anyhow!("permanent RPC failure"))
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+        assert_eq!(retry(|| Ok(7)).unwrap(), 7);
+        let transport = solana_client::client_error::ClientError::from(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert!(retryable(&transport));
+    }
+    #[test]
+    fn page_rows_and_cursor_commit_together() {
+        let mut c = db::open(std::path::Path::new(":memory:")).unwrap();
+        let row = crate::decode::tests::fixture("crank");
+        commit(&mut c, &[row], Some(("oldest_signature", "oldest"))).unwrap();
+        assert_eq!(
+            db::meta(&c, "oldest_signature").unwrap().as_deref(),
+            Some("oldest")
+        );
+        let row = crate::decode::tests::fixture("crank");
+        assert!(db::contains(&c, &row.signature).unwrap());
+        commit(&mut c, &[row], Some(("newest_signature", "newest"))).unwrap();
+        assert_eq!(
+            c.query_row("SELECT COUNT(*) FROM txs", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+    }
+}
