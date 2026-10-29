@@ -4,6 +4,9 @@ use std::sync::{Arc, Mutex};
 mod exchanges;
 pub use exchanges::Exchanges;
 
+// Public RPCs rate-limit per method (429, Retry-After 10 s), and the client sleeps on it.
+const CONFIRM_POLL: Duration = Duration::from_millis(200);
+
 /// Replaceable source boundary, with independent public websocket readers.
 // Later: paid pyth.dourolabs.app/hermes source, Authorization: Bearer from env.
 pub enum PriceSource {
@@ -172,7 +175,7 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                             return Ok(Some(format!("ok({lag}ms)")));
                         }
                         if sent.elapsed() > Duration::from_secs(30) { bail!("PushAuthMark {sig} not processed in 30 s"); }
-                        std::thread::sleep(Duration::from_millis(50));
+                        std::thread::sleep(CONFIRM_POLL);
                     }
                 })();
                 // Reads/build preparation are not PushAuthMark send attempts.
@@ -279,7 +282,7 @@ async fn send_accrual(rpc: &solana_client::nonblocking::rpc_client::RpcClient, t
             status?;
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(CONFIRM_POLL);
     }
     bail!("accrual {sig} not processed before deadline")
 }
