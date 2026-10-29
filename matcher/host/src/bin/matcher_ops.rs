@@ -426,10 +426,6 @@ fn preflight(rpc: &RpcClient, args: &Args, program: Pubkey) -> Result<()> {
     // The trade transaction's own cranks catch up the mark and accrual, and test-fill
     // simulates it before sending, so these two are shown but do not gate.
     for (name, ok) in [
-        (
-            "mark pushed within 25 slots",
-            now.saturating_sub(g.current_slot) <= 25,
-        ),
         ("target == effective", asset.raw_oracle_target_price == eff),
         ("not loss-stale", !g.loss_stale_active),
     ] {
