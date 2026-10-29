@@ -79,9 +79,10 @@ fn env_or<T: FromStr>(key: &str, default: T) -> T {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// Wrapper error name when known, else the first 120 chars of the error.
+/// Wrapper error name when known, else the first 120 chars of the error,
+/// with any URL cut to its host (RPC errors can carry a paid endpoint key).
 fn short(e: &anyhow::Error) -> String {
-    let msg = format!("{e:#}");
+    let msg = launch::scrub(&format!("{e:#}"));
     submit::wrapper_error_name(&msg)
         .map(str::to_string)
         .unwrap_or_else(|| msg.chars().take(120).collect())
@@ -801,7 +802,14 @@ fn summary(tick: u64, started: Instant, st: &Staging, roles: &[(&str, &Role)], k
     )
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = real_main() {
+        eprintln!("Error: {}", launch::scrub(&format!("{e:#}")));
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None => run(r2_setup()?, false),
@@ -825,6 +833,10 @@ fn r2_setup() -> Result<Staging> {
     let payer = read_keypair_file(&payer_path).map_err(|e| anyhow!("read payer {payer_path}: {e}"))?;
     let rpc = RpcClient::new_with_commitment(url.clone(), CommitmentConfig::confirmed());
     rpc.get_version().with_context(|| format!("connect to {}", launch::redact(&url)))?;
+    // The R2 rehearsal is local/test only: the chain decides, not the URL.
+    if launch::is_mainnet(&rpc)? {
+        bail!("R2 staging refuses mainnet ({})", launch::redact(&url));
+    }
     Staging::setup(cfg, rpc, program_id, payer)
 }
 

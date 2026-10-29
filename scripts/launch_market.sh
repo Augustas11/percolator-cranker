@@ -158,8 +158,12 @@ while True:
     # A clean keeper cycle: cranks submitted, none failed. On a market the
     # matcher refreshes every tick they are mostly idle (EngineNonProgress).
     cycles = [dict(kv.split("=") for kv in l.split(" summary: ")[1].split()) for l in lines if re.match(r"cycle \d+ summary: ", l)]
-    clean = [c for c in cycles if c["failed"] == "0" and int(c["progressed"]) + int(c["idle"]) > 0]
-    crank = bool(clean)
+    clean = [c for c in cycles if c["failed"] == "0" and c.get("unconfirmed", "0") == "0" and int(c["progressed"]) + int(c["idle"]) > 0]
+    # The bots' own keeper verdict too (it also counts failed txs and RPC
+    # errors inside cycles that progressed, which the summary line misses):
+    # the latest tick's keeper result must not be a failure.
+    verdicts = [m.group(1) for m in (re.search(r" keeper=(\S+)", l) for l in lines) if m and m.group(1) != "-"]
+    crank = bool(clean) and bool(verdicts) and not verdicts[-1].startswith("FAIL")
     fill = any(re.search(r" trade=[+-]\d", l) for l in lines)
     lags = [json.loads(l)["ms"] for l in lines if l.startswith('{"event":"mark_lag"')]
     snap, why = None, []

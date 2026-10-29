@@ -571,8 +571,9 @@ pub fn step_main(args: &[String]) -> Result<()> {
 }
 
 fn run_step(st: &mut Staging, state: &mut State, run: &Path, cluster: &str, name: &str) -> Result<()> {
-    if st.pyth_feed.is_some() {
-        // InitMarket and AuthMark start at the live price.
+    if st.pyth_feed.is_some() && matches!(name, "init-market" | "oracle") {
+        // InitMarket and AuthMark start at the live price; no other step
+        // (handover least of all) needs a price.
         st.mark = st.source_price(0)?.0;
     }
     match name {
@@ -702,4 +703,40 @@ pub fn redact(url: &str) -> String {
     let host = rest.split(['/', '?']).next().unwrap_or("");
     let host = host.rsplit('@').next().unwrap_or(host);
     if scheme.is_empty() { host.to_string() } else { format!("{scheme}://{host}/…") }
+}
+
+/// True when the RPC serves mainnet (its genesis hash).
+pub fn is_mainnet(rpc: &RpcClient) -> Result<bool> {
+    Ok(rpc.get_genesis_hash().context("read genesis hash")?.to_string() == MAINNET_GENESIS)
+}
+
+/// Error text with every http(s) URL cut to its host: RPC transport errors
+/// quote the request URL, and paid endpoints carry their key in it.
+pub fn scrub(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let mut rest = msg;
+    while let Some(i) = rest.find("http") {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        if tail.starts_with("http://") || tail.starts_with("https://") {
+            let end = tail.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>' | ',')).unwrap_or(tail.len());
+            out.push_str(&redact(&tail[..end]));
+            rest = &tail[end..];
+        } else {
+            out.push_str("http");
+            rest = &tail[4..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    #[test]
+    fn urls_lose_their_credentials() {
+        let m = super::scrub("error sending request for url (https://rpc.example.com/SECRETKEY?api-key=X): timed out; http://127.0.0.1:8899");
+        assert!(!m.contains("SECRET") && !m.contains("api-key"), "{m}");
+        assert!(m.contains("https://rpc.example.com/") && m.contains("timed out"), "{m}");
+    }
 }

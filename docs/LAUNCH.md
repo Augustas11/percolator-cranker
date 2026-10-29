@@ -238,15 +238,20 @@ One server; `deploy/`:
   gitignored), `docker compose -f deploy/docker-compose.yml up -d --build`.
 - `systemd/percolator-bots.service`, `systemd/percolator-monitor.service`
   (user `percolator`, run dir `/var/lib/percolator-launch`, env
-  `/etc/percolator/launch.env`); Prometheus and Alertmanager from the distro
-  with `deploy/prometheus.yml` (targets 127.0.0.1) and
-  `deploy/alertmanager.yml`. `percolator-staging@.service` stays for R2.
+  `/etc/percolator/launch.env`) run the bots and monitor only.
+  **Alerting is supported through Compose only**: `deploy/alertmanager.yml`
+  needs the token file and chat id that the Compose service prepares, so run
+  Prometheus + Alertmanager from Compose (`docker compose up -d prometheus
+  alertmanager`) even when the bots run under systemd.
+  `percolator-staging@.service` stays for R2.
 - Env: `LAUNCH_CLUSTER`, `LAUNCH_RPC_URL` (the paid RPC),
   `PERCOLATOR_PROGRAM_ID`, `LAUNCH_RUN_DIR`, `LAUNCH_UID`/`LAUNCH_GID`
   (owner of the run dir; Compose runs the bots and monitor as that user so
-  the 0600 keys stay private), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+  the 0600 keys stay private), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
+  and on mainnet, after the handover, `LAUNCH_MAINNET_I_UNDERSTAND=1`
+  (default 0; the bots still check genesis and the on-chain roles).
   `deploy/.env` never enters the Docker build context (`.dockerignore`), and
-  logs show the RPC host only, never its credentials.
+  logs and error messages show the RPC host only, never its credentials.
 - The run dir from the launch (state.json + keys/) is copied to the host.
   Mainnet: only the hot keys of `ops/KEYS.md`, placed on their host.
 - **Keeper:** inside the bots process (`drip::cycle`, the keeper's own

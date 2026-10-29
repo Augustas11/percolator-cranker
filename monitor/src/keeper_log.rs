@@ -20,6 +20,9 @@ pub struct KeeperLog {
     mark_lag_ms: Option<u64>,
     /// Unix ms when that push landed: a stopped pusher shows as a growing age.
     mark_lag_at_ms: Option<u64>,
+    /// Unix ms when this log was first read: before any push lands, the push
+    /// age counts from here, so a pusher that never succeeds still alerts.
+    watch_start_ms: Option<u64>,
     last_cycle: u64,
     summary: BTreeMap<String, u64>,
     attempts: [u64; 3],
@@ -41,6 +44,9 @@ pub fn cu_stats(values: &VecDeque<u64>) -> (u64, u64) {
 
 impl KeeperLog {
     pub fn line(&mut self, line: &str) {
+        self.watch_start_ms.get_or_insert_with(|| {
+            SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+        });
         if let Some((left, right)) = line.split_once('=') {
             if left.starts_with("market") && left.trim_end() == "market" && left.len() > 6 {
                 if let Ok(pk) = right.trim().parse::<solana_sdk::pubkey::Pubkey>() {
@@ -200,7 +206,7 @@ impl KeeperLog {
             // Before any known success, count from the first slot this log was watched,
             // so a keeper failing from its start still trips the no-success alert.
             "slots_since_last_success":self.last_success_slot.or(self.first_seen_slot).map(|s|slot.saturating_sub(s)),"last_events":self.events,"mark_lag_ms":self.mark_lag_ms,
-            "mark_push_age_seconds":self.mark_lag_at_ms.map(|at| {
+            "mark_push_age_seconds":self.mark_lag_at_ms.or(self.watch_start_ms).map(|at| {
                 let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
                 now.saturating_sub(at) / 1000
             })})
