@@ -46,9 +46,6 @@ impl Args {
     fn key(&self, name: &str) -> Result<Keypair> {
         read_keypair_file(self.get(name)?).map_err(|_| anyhow!("cannot read --{name} keypair"))
     }
-    fn flag(&self, name: &str) -> bool {
-        self.get(name).is_ok_and(|v| v == "true" || v == "1")
-    }
 }
 fn send(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction], signers: &[&Keypair]) -> Result<()> {
     let mut all = vec![
@@ -81,19 +78,16 @@ fn send(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction], signers: &[&Keypa
 fn main() -> Result<()> {
     let mut raw = std::env::args().skip(1);
     let Some(command) = raw.next() else {
-        bail!("usage: matcher_ops <init-ctx|set-matcher-config|update-ref|set-params|show|test-fill> --rpc URL --matcher PUBKEY --ctx PUBKEY [options]; each option also accepts MATCHER_UPPER_CASE env. See matcher/README.md");
+        bail!("usage: matcher_ops <init-ctx|init-lp|set-matcher-config|set-params|show|test-fill> --rpc URL --matcher PUBKEY --ctx PUBKEY [options]; each option also accepts MATCHER_UPPER_CASE env. See matcher/README.md");
     };
     let mut values = BTreeMap::new();
     while let Some(arg) = raw.next() {
         let name = arg
             .strip_prefix("--")
             .ok_or_else(|| anyhow!("expected --option, got {arg}"))?;
-        let value = if name == "push-auth-mark" {
-            "true".to_string()
-        } else {
-            raw.next()
-                .ok_or_else(|| anyhow!("missing value for {arg}"))?
-        };
+        let value = raw
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {arg}"))?;
         if values.insert(name.to_string(), value).is_some() {
             bail!("duplicate option {arg}");
         }
@@ -179,30 +173,6 @@ fn main() -> Result<()> {
                 expiry,
             )?;
             send(&rpc, &payer, &[ix], &[&owner])?;
-        }
-        "update-ref" => {
-            let authority = args.key("price-authority")?;
-            let market = args.value("market")?;
-            let data = rpc.get_account_data(&market)?;
-            let price = state::read_market(&data)?.1.assets[0].effective_price;
-            let mut ixs = Vec::new();
-            if args.flag("push-auth-mark") {
-                ixs.push(push_mark(
-                    args.value("wrapper")?,
-                    market,
-                    authority.pubkey(),
-                    &data,
-                    rpc.get_slot()?,
-                    price,
-                )?);
-            }
-            ixs.push(update_ref(
-                program,
-                authority.pubkey(),
-                args.value("ctx")?,
-                price,
-            ));
-            send(&rpc, &payer, &ixs, &[&authority])?;
         }
         "set-params" => {
             let owner = args.key("lp-owner")?;
@@ -323,60 +293,9 @@ fn test_fill(rpc: &RpcClient, payer: &Keypair, args: &Args, program: Pubkey) -> 
             ixs.push(crank);
         }
     }
-    // Public devnet takes longer than max_ref_age_slots to reach "confirmed",
-    // so the refresh and the trade read and land at "processed".
+    // The pusher refreshes the matcher reference; read and land at "processed" so the
+    // trade sees it within max_ref_age_slots (public devnet confirms slowly).
     let fast = RpcClient::new_with_commitment(rpc.url(), CommitmentConfig::processed());
-    // Rehearsal while the pusher is paused: refresh the mark and the matcher
-    // reference just before the trade so it lands inside max_ref_age_slots.
-    if args.get("price-authority").is_ok() {
-        let authority = args.key("price-authority")?;
-        let data = fast.get_account_data(&market)?;
-        let price = state::read_market(&data)?.1.assets[0].effective_price;
-        // Push the mark too only with --push-auth-mark (bots stopped); a running
-        // pusher would collide with it on the observation sequence.
-        let mut refresh = Vec::new();
-        if args.flag("push-auth-mark") {
-            refresh.push(push_mark(
-                wrapper,
-                market,
-                authority.pubkey(),
-                &data,
-                fast.get_slot()?,
-                price,
-            )?);
-        }
-        refresh.push(update_ref(program, authority.pubkey(), ctx, price));
-        let tx = Transaction::new_signed_with_payer(
-            &refresh,
-            Some(&payer.pubkey()),
-            &[payer, &authority],
-            fast.get_latest_blockhash()?,
-        );
-        let ref_slot = |f: &RpcClient| -> Result<u64> {
-            let d = f.get_account_data(&ctx)?;
-            Ok(u64::from_le_bytes(
-                d[REF_SLOT_OFF..REF_SLOT_OFF + 8].try_into()?,
-            ))
-        };
-        let before = ref_slot(&fast)?;
-        let sig = fast.send_transaction(&tx)?;
-        // Watch the context itself: public devnet reports signature statuses later
-        // than max_ref_age_slots, while the account read is current.
-        let t0 = std::time::Instant::now();
-        // A refresh in the same slot as the previous one leaves ref_slot unchanged;
-        // the (slower) signature status covers that case.
-        while ref_slot(&fast)? == before {
-            if let Some(status) = fast.get_signature_status(&sig)? {
-                status?;
-                break;
-            }
-            if t0.elapsed() > std::time::Duration::from_secs(30) {
-                bail!("reference refresh {sig} not processed in 30 s");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-        println!("{sig}");
-    }
     ixs.push(trade(
         wrapper,
         market,
