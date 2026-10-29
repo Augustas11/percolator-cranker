@@ -10,9 +10,9 @@ lp_portfolio = "GKJHRYBKwtswFHK5oyGknpcXxYEMjh7rDDR9f1KU9T5P"
 asset = 0
 
 [venue]
-# Hyperliquid SOL perp. The dry-run prices off mainnet's public book even
-# with a devnet market; "testnet" is for a live rehearsal with test funds.
-network = "mainnet"
+# Devnet/local markets can only pair with testnet (enforced from the RPC
+# genesis hash at startup); mainnet needs a mainnet-beta market.
+network = "testnet"
 coin = "SOL"
 # Base tier (tier 0) perp taker, as the replay assumed. Check yours in the
 # Hyperliquid fee page before going live (staking/volume tiers lower it).

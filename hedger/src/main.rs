@@ -14,7 +14,8 @@ use anyhow::{bail, Context, Result};
 use policy::{Decision, Guard, Policy};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use solana_client::rpc_client::RpcClient;
+use solana_client::rpc_client::{RpcClient, RpcClientConfig};
+use solana_rpc_client::http_sender::HttpSender;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
 use std::{
     io::{Read, Write},
@@ -24,6 +25,17 @@ use std::{
     time::{Duration, Instant},
 };
 use venue::{now_ms, Hyperliquid, Venue};
+
+const MAINNET_BETA_GENESIS: &str = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
+
+fn check_pairing(genesis: &str, network: &str) -> Result<()> {
+    match network {
+        "testnet" => Ok(()),
+        "mainnet" if genesis == MAINNET_BETA_GENESIS => Ok(()),
+        "mainnet" => bail!("Hyperliquid mainnet requires a mainnet-beta Percolator market; RPC genesis is {genesis}"),
+        _ => bail!("unknown Hyperliquid network {network}; expected mainnet or testnet"),
+    }
+}
 
 #[derive(Deserialize)]
 struct Config {
@@ -96,15 +108,24 @@ fn real_main() -> Result<()> {
     if cfg.run.tick_ms == 0 {
         bail!("run.tick_ms must be positive");
     }
-    let mut hl = Hyperliquid::connect(&cfg.venue.network, &cfg.venue.coin)?;
     if cost_check {
+        // Testnet's book is not a cost reference; use mainnet's public book.
+        let hl = Hyperliquid::connect("mainnet", &cfg.venue.coin)?;
         return run_cost_check(&hl, cfg.venue.taker_fee_bps);
     }
+    // Use system roots, not the bundled webpki-roots 0.25.
+    let client = reqwest::Client::builder().use_native_tls().timeout(Duration::from_secs(30)).build()?;
+    let sender = HttpSender::new_with_client(&cfg.chain.rpc, client);
+    let rpc = RpcClient::new_sender(sender, RpcClientConfig::with_commitment(CommitmentConfig::confirmed()));
+    let genesis = rpc.get_genesis_hash().context("read chain genesis hash")?.to_string();
+    check_pairing(&genesis, &cfg.venue.network)?;
+    let mut hl = Hyperliquid::connect(&cfg.venue.network, &cfg.venue.coin)?;
     if live {
         let (key, account) = credentials()?;
         hl = hl.with_signer(&key, &account)?;
+        hl.check_agent()?;
     }
-    run(cfg, hl, live, minutes)
+    run(cfg, rpc, &genesis, hl, live, minutes)
 }
 
 /// Live credentials: HL_ACCOUNT_ADDRESS plus the API wallet key from
@@ -168,14 +189,13 @@ struct Stats {
     killed: bool,
 }
 
-fn run(cfg: Config, hl: Hyperliquid, live: bool, minutes: Option<u64>) -> Result<()> {
-    let rpc = RpcClient::new_with_commitment(cfg.chain.rpc.clone(), CommitmentConfig::confirmed());
+fn run(cfg: Config, rpc: RpcClient, genesis: &str, hl: Hyperliquid, live: bool, minutes: Option<u64>) -> Result<()> {
     let market: Pubkey = cfg.chain.market.parse().context("chain.market")?;
     let lp: Pubkey = cfg.chain.lp_portfolio.parse().context("chain.lp_portfolio")?;
     let metrics = Arc::new(RwLock::new(String::new()));
     serve(&cfg.run.metrics_listen, metrics.clone())?;
     log("start", json!({"mode": if live {"live"} else {"dry_run"}, "venue": hl.name(),
-        "network": cfg.venue.network, "agent": hl.agent_address(), "market": market.to_string(),
+        "network": cfg.venue.network, "genesis": genesis, "agent": hl.agent_address(), "market": market.to_string(),
         "lp_portfolio": lp.to_string(), "policy": format!("{:?}", cfg.policy),
         "max_loss_usd": cfg.safety.max_loss_usd, "kill_file": cfg.safety.kill_file}));
     let (started, mut guard, mut s) = (Instant::now(), Guard::default(), Stats::default());
@@ -207,6 +227,13 @@ fn avg_bps(s: &Stats) -> Option<f64> {
     (s.volume_usd > 0.0).then(|| s.cost_usd / s.volume_usd * 1e4)
 }
 
+fn halt_on_loss(guard: &Guard, s: &mut Stats, max_loss_usd: f64) {
+    if guard.breached(max_loss_usd) && !s.halted {
+        s.halted = true;
+        log("halt", json!({"reason": "max_loss", "guard_pnl_usd": guard.pnl_usd}));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn step(
     cfg: &Config,
@@ -233,10 +260,7 @@ fn step(
     (s.lp_sol, s.hedge_sol, s.mid, s.mark) = (c.net_sol, hedge, book.mid, c.mark_px);
     let residual = c.net_sol + hedge;
     guard.mark(residual, book.mid);
-    if guard.breached(cfg.safety.max_loss_usd) && !s.halted {
-        s.halted = true;
-        log("halt", json!({"reason": "max_loss", "guard_pnl_usd": guard.pnl_usd}));
-    }
+    halt_on_loss(guard, s, cfg.safety.max_loss_usd);
     let gap_bps = (c.mark_px / book.mid - 1.0).abs() * 1e4;
     let since = last_order.map(|t| t.elapsed().as_millis() as u64);
     let mut d = policy::decide(&cfg.policy, c.net_sol, hedge, book.mid, hl.step(), since);
@@ -279,23 +303,38 @@ fn step(
     };
     let slip = cfg.venue.limit_slippage_bps / 1e4;
     let limit = hl.round_px(if sol > 0.0 { worst * (1.0 + slip) } else { worst * (1.0 - slip) });
+    if cfg.safety.kill_file.exists() {
+        s.killed = true;
+        let mut t = tick;
+        t["hold"] = json!("kill_switch");
+        log("tick", t);
+        return Ok(());
+    }
     *last_order = Some(Instant::now());
     let (filled, px) = if live {
-        let f = hl.ioc(sol, limit)?;
+        let f = match hl.ioc(sol, limit) {
+            Ok(f) => f,
+            Err(e) => {
+                s.halted = true;
+                log("halt", json!({"reason": "ambiguous_order", "error": format!("{e:#}")}));
+                return Err(e);
+            }
+        };
         (f.sol, f.avg_px)
     } else {
         *sim_hedge += sol;
         (sol, avg)
     };
     let notional = filled.abs() * px;
-    let cost_bps = if filled != 0.0 { policy::cost_bps(px, book.mid, cfg.venue.taker_fee_bps) } else { 0.0 };
-    let cost_usd = notional * cost_bps / 1e4;
+    let cost_usd = filled * (px - book.mid) + notional * cfg.venue.taker_fee_bps / 1e4;
+    let cost_bps = if notional > 0.0 { cost_usd / notional * 1e4 } else { 0.0 };
     s.orders += 1;
     s.volume_usd += notional;
     s.cost_usd += cost_usd;
     s.last_cost_bps = cost_bps;
     s.hedge_sol = hedge + filled;
     guard.fill(c.net_sol + hedge + filled, cost_usd);
+    halt_on_loss(guard, s, cfg.safety.max_loss_usd);
     let mut t = tick;
     t["order"] = json!({"live": live, "would_place": !live, "sol": sol, "limit_px": limit,
         "filled_sol": filled, "avg_px": px, "notional_usd": notional, "cost_bps": cost_bps, "cost_usd": cost_usd,
@@ -343,4 +382,21 @@ fn serve(addr: &str, body: Arc<RwLock<String>>) -> Result<()> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pairing_rule() {
+        let devnet = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
+        assert!(check_pairing(MAINNET_BETA_GENESIS, "mainnet").is_ok());
+        assert!(check_pairing(MAINNET_BETA_GENESIS, "testnet").is_ok());
+        assert!(check_pairing(devnet, "mainnet").is_err());
+        assert!(check_pairing(devnet, "testnet").is_ok());
+        assert!(check_pairing("local-genesis", "mainnet").is_err());
+        assert!(check_pairing("local-genesis", "testnet").is_ok());
+        assert!(check_pairing(MAINNET_BETA_GENESIS, "foo").is_err());
+    }
 }

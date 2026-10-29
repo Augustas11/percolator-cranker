@@ -11,12 +11,13 @@ percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "4db11a8
 percolator-prog = { path = "../repo-prog" }
 solana-sdk = "1.18"
 solana-client = "1.18"
+solana-rpc-client = "1.18"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.5"
 # Venue HTTP; already in the graph through solana-client.
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "native-tls"] }
 # Hyperliquid order signing (venue.rs): msgpack action hash, keccak, secp256k1.
 # sha3 and libsecp256k1 are already in the graph through solana-sdk.
 rmp-serde = "1"

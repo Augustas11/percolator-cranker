@@ -57,7 +57,8 @@ impl Hyperliquid {
             "testnet" => ("https://api.hyperliquid-testnet.xyz", false),
             n => bail!("venue.network must be mainnet or testnet, not {n:?}"),
         };
-        let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build()?;
+        // Use system roots, not the bundled webpki-roots 0.25.
+        let http = reqwest::blocking::Client::builder().use_native_tls().timeout(Duration::from_secs(5)).build()?;
         let mut v = Self {
             http,
             url: url.into(),
@@ -88,6 +89,15 @@ impl Hyperliquid {
         }
         self.signer = Some((sk, account));
         Ok(self)
+    }
+
+    pub fn check_agent(&self) -> Result<()> {
+        let (sk, account) = self.signer.as_ref().context("agent check needs live credentials")?;
+        let role = self.info(json!({"type": "userRole", "user": address(sk).to_lowercase()}))?;
+        if role["role"] != "agent" || role["data"]["user"].as_str().map(str::to_lowercase).as_ref() != Some(account) {
+            bail!("API wallet must be an agent for HL_ACCOUNT_ADDRESS");
+        }
+        Ok(())
     }
 
     pub fn agent_address(&self) -> Option<String> {

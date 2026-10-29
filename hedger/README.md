@@ -13,7 +13,10 @@ Hyperliquid's SOL perp.
   Hyperliquid's public order book. It sends nothing and needs no keys.
 - **Safety:**
   - live needs `--live` *and* credentials;
+  - the bot reads the cluster's genesis hash at startup and refuses Hyperliquid
+    mainnet unless the market is on mainnet-beta, in every mode, with no override;
   - `touch` the `kill_file` to stop all orders;
+  - any live IOC error halts ordering until restart because it may have filled;
   - a max-loss guard stops ordering once the residual's P&L less hedge costs
     passes `-max_loss_usd`. It stays stopped until restart;
   - it holds when the market is not Live, or when our mark and the venue mid
@@ -66,6 +69,9 @@ cargo run --release -- cost-check            # fee + book slippage at $1k-$1M
 cargo run --release -- --minutes 60          # dry-run against hedger.toml
 ```
 
+The default dry-run uses the testnet book. `cost-check` pairs with no market
+and always reads mainnet's public book, regardless of `venue.network`.
+
 ## Going live (owner)
 
 1. **Account.** Open a Hyperliquid account from a wallet you control (the
@@ -83,12 +89,14 @@ cargo run --release -- --minutes 60          # dry-run against hedger.toml
    commit it.
 4. **Check the fee.** If your tier's taker fee is not 4.5 bps, set
    `venue.taker_fee_bps`.
-5. **Point at mainnet.** In `hedger.toml`, set `chain.rpc`, `chain.market` and
-   `chain.lp_portfolio` to the mainnet market and LP. Size `policy.threshold_usd`
+5. **Point at mainnet.** In `hedger.toml`, set `venue.network = "mainnet"` together
+   with `chain.rpc`, `chain.market` and `chain.lp_portfolio` for the mainnet-beta
+   market and LP. The bot refuses otherwise. Size `policy.threshold_usd`
    to 1% of real daily volume. Leave the caps as they are until it has run for a
    week.
 6. **Rehearse on testnet first** (optional): set `venue.network = "testnet"` with a
-   testnet API wallet and test USDC.
+   testnet API wallet and test USDC. This is how to use `--live` with a devnet/local
+   market before a mainnet market exists.
 7. **Start.**
    ```bash
    HL_ACCOUNT_ADDRESS=0xYourMainAccount \

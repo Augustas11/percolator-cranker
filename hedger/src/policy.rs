@@ -44,10 +44,11 @@ pub fn decide(
     if since_last_ms.is_some_and(|t| t < p.cooldown_ms) {
         return Decision::Hold("cooldown");
     }
-    let want = (-residual).clamp(-p.max_order_sol, p.max_order_sol);
+    let want = -residual;
     let target = (hedge_sol + want).clamp(-p.max_hedge_sol, p.max_hedge_sol);
-    let order = round_toward_zero(target - hedge_sol, step);
-    if order == 0.0 {
+    let order = (target - hedge_sol).clamp(-p.max_order_sol, p.max_order_sol);
+    let order = round_toward_zero(order, step);
+    if order == 0.0 || order.signum() != want.signum() {
         return Decision::Hold("max_hedge");
     }
     if order.abs() * px < p.min_order_usd {
@@ -152,6 +153,15 @@ mod tests {
         assert_eq!(decide(&p(), 123.456, 0.0, 100.0, 0.01, None), Decision::Order(-123.45));
         assert_eq!(round_toward_zero(0.29, 0.01), 0.29);
         assert_eq!(round_toward_zero(-0.004, 0.01), 0.0);
+    }
+
+    #[test]
+    fn hedge_outside_cap_respects_order_cap_and_residual_direction() {
+        let mut p = p();
+        p.max_order_sol = 100.0;
+        p.max_hedge_sol = 500.0;
+        assert_eq!(decide(&p, 0.0, 1_000.0, 100.0, 0.01, None), Decision::Order(-100.0));
+        assert_eq!(decide(&p, -1_000.0, 800.0, 100.0, 0.01, None), Decision::Hold("max_hedge"));
     }
 
     #[test]
