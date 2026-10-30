@@ -51,7 +51,7 @@ groups:
           severity: warning
         annotations:
           summary: 'Pushed mark p95 lag exceeds 400 ms (last 300 pushes)'
-      # The lag gauge keeps its last value when pushes stop; the age does not.
+      # Pusher price_stall_stats (every 60 s, rolling hour, open gap included).
       - alert: PusherPriceStalls
         expr: percolator_keeper_price_gap_over_10s_pct > 1
         for: 15m
@@ -59,6 +59,7 @@ groups:
           severity: warning
         annotations:
           summary: 'Price gaps over 10 seconds exceed 1% of the watched hour'
+      # The lag gauge keeps its last value when pushes stop; the age does not.
       - alert: PusherMarkStale
         expr: percolator_keeper_mark_push_age_seconds > 120
         for: 2m
