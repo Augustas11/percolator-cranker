@@ -15,6 +15,9 @@ struct StallStats {
 }
 
 impl StallStats {
+    // Polling start counts as the last good read, so an outage from startup is an open gap.
+    fn new(now: u64) -> Self { Self { first: Some(now), last: Some(now), gaps: VecDeque::new() } }
+
     fn record_ok(&mut self, now: u64) -> Option<u64> {
         self.first.get_or_insert(now);
         let gap = self.last.replace(now).map(|last| now.saturating_sub(last));
@@ -148,7 +151,7 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
         let mut last_slot = 0;
         let mut market = Pubkey::default();
         let mut read_error = None;
-        let mut stalls = StallStats::default();
+        let mut stalls = StallStats::new(launch::now_ms());
         let mut stats_at = launch::now_ms();
         loop {
             let started = Instant::now();
@@ -160,7 +163,7 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
             if s.live {
                 if market != s.market {
                     market = s.market;
-                    stalls = StallStats::default();
+                    stalls = StallStats::new(launch::now_ms());
                     stats_at = launch::now_ms();
                     last_slot = 0;
                     last_landed = None;
@@ -340,7 +343,7 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                     stats_at = now;
                 }
             } else {
-                stalls = StallStats::default();
+                stalls = StallStats::new(launch::now_ms());
                 stats_at = launch::now_ms();
                 drop(s);
             }
@@ -409,7 +412,7 @@ pub fn prices(args: &[String]) -> Result<()> {
     let cluster = cfg.cluster.get(&args[1]).context("unknown cluster")?;
     if cluster.price_source != "exchanges" { bail!("prices requires price_source = exchanges (no chain access)"); }
     let mut source = Exchanges::new(&cfg.oracle)?;
-    let mut stalls = StallStats::default();
+    let mut stalls = StallStats::new(launch::now_ms());
     let mut printed = None::<u64>;
     let mut stats_at = launch::now_ms();
     loop {
@@ -476,6 +479,10 @@ mod tests {
         stats.record_ok(7_213_001);
         assert_eq!(stats.gaps.len(), 1);
         assert_eq!(stats.summary(7_213_001), (STALL_WINDOW_MS, 100.0));
+        // No good read since polling started: the whole wait is an open gap.
+        let mut stats = StallStats::new(0);
+        assert_eq!(stats.summary(1_200_000), (1_200_000, 100.0));
+        assert_eq!(stats.record_ok(1_200_000), Some(1_200_000));
     }
 
     #[test]
