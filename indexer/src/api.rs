@@ -96,7 +96,7 @@ fn query(c: &Connection, cfg: &Config, q: Query) -> Result<(u16, Value)> {
                 "backfill_complete":db::meta(c,"backfill_complete")?.as_deref()==Some("true"),"lag_secs":lag})
             }
             Query::Stats => db::cached_stats(c, cfg)?,
-            Query::Leaderboard => db::leaderboard(c, cfg)?,
+            Query::Leaderboard => db::cached_leaderboard(c, cfg)?,
             Query::Fills {
                 portfolio,
                 limit,

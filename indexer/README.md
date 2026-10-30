@@ -102,7 +102,8 @@ effective engine OI.
 ```
 
 `GET /leaderboard` — up to 100 wallets, sorted by PnL descending then wallet ascending,
-with 1-based ranks. Aggregates current portfolios' latest snapshots; equity is
+with 1-based ranks. Computed each ingest pass and cached; includes closed portfolios with zero equity.
+Aggregates latest snapshots; current equity is
 capital plus engine PnL, net deposits are successful deposits minus withdrawals,
 and PnL is equity minus net deposits. Amounts are collateral atoms as decimal
 strings. Trades count all stored fill rows (executed and requested) per portfolio;
