@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS cranks(signature TEXT,ix_index INTEGER,slot INTEGER,b
 CREATE TABLE IF NOT EXISTS fills(signature TEXT,ix_index INTEGER,leg INTEGER,slot INTEGER,block_time INTEGER,taker_portfolio TEXT,taker_portfolio_id TEXT,maker_portfolio TEXT,maker_portfolio_id TEXT,asset_index INTEGER,market_id TEXT,size_q TEXT,reported_price TEXT,limit_price TEXT,requested_fee_bps TEXT,status TEXT,PRIMARY KEY(signature,ix_index,leg));
 CREATE TABLE IF NOT EXISTS marks(signature TEXT,ix_index INTEGER,slot INTEGER,asset_index INTEGER,price TEXT,observation_sequence TEXT,market_id TEXT,PRIMARY KEY(signature,ix_index));
 CREATE INDEX IF NOT EXISTS marks_asset_slot ON marks(asset_index,slot DESC);
+CREATE INDEX IF NOT EXISTS marks_asset_market_slot ON marks(asset_index,market_id,slot DESC);
 CREATE TABLE IF NOT EXISTS current_portfolios(portfolio TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS transfers(signature TEXT,ix_index INTEGER,slot INTEGER,block_time INTEGER,kind TEXT CHECK(kind IN ('deposit','withdraw')),portfolio TEXT,portfolio_id TEXT,signer TEXT,amount TEXT,ok INTEGER,PRIMARY KEY(signature,ix_index));
 CREATE TABLE IF NOT EXISTS portfolio_snapshots(portfolio TEXT,slot INTEGER,taken_at INTEGER,owner TEXT,capital TEXT,pnl TEXT,positions_json TEXT,PRIMARY KEY(portfolio,slot));
@@ -620,6 +621,11 @@ pub fn cached_season(c: &Connection, cfg: &Config) -> Result<Value> {
         }))
 }
 
+// Same-slot marks pick any one (volume estimate only).
+const SEASON_FILLS_SQL: &str = "SELECT f.size_q,COALESCE(f.reported_price,
+    (SELECT price FROM marks WHERE asset_index=f.asset_index AND market_id=f.market_id AND slot<=f.slot ORDER BY slot DESC LIMIT 1))
+    FROM fills f WHERE f.taker_portfolio=?1 AND f.status IN ('executed','requested')";
+
 pub fn season(c: &Connection, cfg: &Config, agents: &BTreeMap<String, String>) -> Result<Value> {
     let mut wallets = std::collections::BTreeSet::new();
     let mut trades = 0u64;
@@ -627,9 +633,7 @@ pub fn season(c: &Connection, cfg: &Config, agents: &BTreeMap<String, String>) -
     let mut oi = 0i128;
     let mut liquidations = 0u64;
     let mut marks = BTreeMap::new();
-    let mut fills = c.prepare(
-        "SELECT size_q,reported_price FROM fills WHERE taker_portfolio=?1 AND status='executed'",
-    )?;
+    let mut fills = c.prepare(SEASON_FILLS_SQL)?;
     let mut positions = c.prepare(
         "SELECT s.positions_json FROM current_portfolios c
         JOIN portfolio_snapshots s ON s.portfolio=c.portfolio
@@ -644,7 +648,9 @@ pub fn season(c: &Connection, cfg: &Config, agents: &BTreeMap<String, String>) -
             wallets.insert(owner);
             trades += 1;
             if let Some(price) = price.and_then(|s| s.parse::<u64>().ok()) {
-                add_notional(&mut volume, &size, &price.to_string())?;
+                if size.parse::<i128>().is_ok() {
+                    add_notional(&mut volume, &size, &price.to_string())?;
+                }
             }
         }
         let positions: Option<String> =
@@ -1503,7 +1509,7 @@ mod tests {
                 .all(|f| f["taker_portfolio"] != "orphan"));
             assert_eq!(
                 season(&c, cfg, &agents).unwrap()["trades"],
-                if cfg.start_slot.is_some() { 4 } else { 6 }
+                if cfg.start_slot.is_some() { 6 } else { 8 }
             );
         }
         // The per-portfolio candidate query uses a covering ordering index.
@@ -1589,8 +1595,8 @@ mod tests {
         for owner in ["alice", "bob", "carol"] {
             assert!(owners.contains(&owner));
         }
-        let expected = json!({"season":0,"since_slot":10,"since":100,"agents":2,"trades":4,
-            "volume_usd":"8000000","open_interest_usd":"16000000","liquidations":1});
+        let expected = json!({"season":0,"since_slot":10,"since":100,"agents":3,"trades":6,
+            "volume_usd":"12000000","open_interest_usd":"16000000","liquidations":1});
         assert_eq!(
             season(&c, &cfg, &agent_portfolios(&c, &cfg).unwrap()).unwrap(),
             expected
@@ -1621,6 +1627,101 @@ mod tests {
             .unwrap()
             .iter()
             .any(|r| r["wallet"] == "old"));
+    }
+
+    #[test]
+    fn season_requested_fill_uses_latest_mark_at_or_before_slot() {
+        let (c, cfg) = season_fixture();
+        c.execute("DELETE FROM fills", []).unwrap();
+        c.execute("INSERT INTO fills(signature,ix_index,leg,slot,taker_portfolio,asset_index,market_id,size_q,status)
+            VALUES('cpi',0,0,20,'a',0,'1','-2000000','requested')", []).unwrap();
+        c.execute(
+            "INSERT INTO marks VALUES
+            ('before',0,18,0,'5000000','3','1'),
+            ('other-market',0,19,0,'9000000','4','2'),
+            ('other-asset',0,19,1,'9000000','4','1')",
+            [],
+        )
+        .unwrap();
+        let out = season(&c, &cfg, &agent_portfolios(&c, &cfg).unwrap()).unwrap();
+        assert_eq!(out["agents"], 1);
+        assert_eq!(out["trades"], 1);
+        assert_eq!(out["volume_usd"], "10000000");
+        assert_eq!(stats(&c, &cfg, 100).unwrap()["fills"], 0);
+
+        c.execute("UPDATE fills SET reported_price='2000000'", [])
+            .unwrap();
+        assert_eq!(
+            season(&c, &cfg, &agent_portfolios(&c, &cfg).unwrap()).unwrap()["volume_usd"],
+            "4000000"
+        );
+        for (size, price) in [("bad", "2000000"), ("2000000", "bad")] {
+            c.execute(
+                "UPDATE fills SET size_q=?1,reported_price=?2",
+                params![size, price],
+            )
+            .unwrap();
+            assert_eq!(
+                season(&c, &cfg, &agent_portfolios(&c, &cfg).unwrap()).unwrap()["volume_usd"],
+                "0"
+            );
+        }
+    }
+
+    #[test]
+    fn season_fill_mark_picks_any_same_slot_mark() {
+        let (c, cfg) = season_fixture();
+        c.execute("DELETE FROM fills", []).unwrap();
+        c.execute("DELETE FROM marks", []).unwrap();
+        c.execute("INSERT INTO fills(signature,ix_index,leg,slot,taker_portfolio,asset_index,market_id,size_q,status)
+            VALUES('cpi',0,0,20,'a',0,'1','1000000','requested')", []).unwrap();
+        for (signature, ix_index, sequence, price) in [
+            ("z", 0, "9", "1000000"),
+            ("z", 1, "10", "2000000"),
+            ("a", 0, "18446744073709551614", "3000000"),
+            ("b", 0, "18446744073709551614", "4000000"),
+            ("b", 1, "18446744073709551614", "5000000"),
+        ] {
+            c.execute(
+                "INSERT INTO marks VALUES(?1,?2,20,0,?3,?4,'1')",
+                params![signature, ix_index, price, sequence],
+            )
+            .unwrap();
+        }
+        let out = season(&c, &cfg, &agent_portfolios(&c, &cfg).unwrap()).unwrap();
+        assert!(["1000000", "2000000", "3000000", "4000000", "5000000"]
+            .contains(&out["volume_usd"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn season_requested_fill_without_mark_counts_without_volume() {
+        let (c, cfg) = season_fixture();
+        c.execute("DELETE FROM fills", []).unwrap();
+        c.execute("INSERT INTO fills(signature,ix_index,leg,slot,taker_portfolio,asset_index,market_id,size_q,status)
+            VALUES('cpi',0,0,10,'a',0,'1','2000000','requested')", []).unwrap();
+        let out = season(&c, &cfg, &agent_portfolios(&c, &cfg).unwrap()).unwrap();
+        assert_eq!(out["agents"], 1);
+        assert_eq!(out["trades"], 1);
+        assert_eq!(out["volume_usd"], "0");
+    }
+
+    #[test]
+    fn season_fill_mark_uses_asset_market_slot_index() {
+        let c = memory();
+        let mut stmt = c
+            .prepare(&format!("EXPLAIN QUERY PLAN {SEASON_FILLS_SQL}"))
+            .unwrap();
+        let plan = stmt
+            .query_map(["a"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|s| s.contains("marks_asset_market_slot")),
+            "{plan:?}"
+        );
+        assert!(!plan.iter().any(|s| s.contains("SCAN")), "{plan:?}");
+        assert!(!plan.iter().any(|s| s.contains("TEMP B-TREE")), "{plan:?}");
     }
 
     #[test]

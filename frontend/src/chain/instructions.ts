@@ -6,6 +6,9 @@ import type { Integer } from "./bytes";
 import { layout } from "./layout";
 import { TOKEN_PROGRAM_ID } from "./pda";
 
+// Standard rent: 3480 lamports/byte-year * 2 years, including 128 bytes of overhead.
+export const PORTFOLIO_LAMPORTS = (layout.PORTFOLIO_ACCOUNT_LEN + 128) * 6960;
+
 export interface DepositArgs { portfolioId: Integer; expectedSequence: Integer; amount: Integer }
 export type WithdrawArgs = DepositArgs;
 export interface PermissionlessCrankArgs {
@@ -82,10 +85,8 @@ export function createPortfolioIxs(
   programId: PublicKey, owner: PublicKey, market: PublicKey, portfolio: PublicKey,
 ): [TransactionInstruction, TransactionInstruction] {
   const space = layout.PORTFOLIO_ACCOUNT_LEN;
-  // Standard rent: 3480 lamports/byte-year * 2 years, including 128 bytes of overhead.
-  const lamports = (space + 128) * 6960;
   return [
-    SystemProgram.createAccount({ fromPubkey: owner, newAccountPubkey: portfolio, space, lamports, programId }),
+    SystemProgram.createAccount({ fromPubkey: owner, newAccountPubkey: portfolio, space, lamports: PORTFOLIO_LAMPORTS, programId }),
     initPortfolioIx(programId, owner, market, portfolio),
   ];
 }

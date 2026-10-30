@@ -11,6 +11,8 @@ import { tools as registeredTools } from "./tools";
 import * as tx from "../../frontend/src/chain/tx";
 import closePosition, { closeChunk } from "./tools/close_position";
 import claimTestFunds from "./tools/claim_test_funds";
+import deposit from "./tools/deposit";
+import { PORTFOLIO_LAMPORTS } from "../../frontend/src/chain/instructions";
 
 const homes: string[] = [];
 function home() { const path = mkdtempSync(join(tmpdir(), "drip-mcp-test-")); homes.push(path); return path; }
@@ -199,6 +201,22 @@ describe("backend availability", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+});
+
+describe("deposit", () => {
+  it.each([-1, 0])("requires portfolio lamports plus fees without a rent RPC: %s", async offset => {
+    const drip = new Drip(env);
+    vi.spyOn(drip, "tokenBalance").mockResolvedValue(1_000_000n);
+    vi.spyOn(drip, "portfolio").mockResolvedValue(null);
+    vi.spyOn(drip.conn, "getBalance").mockResolvedValue(PORTFOLIO_LAMPORTS + 20000 + offset);
+    const rent = vi.spyOn(drip.conn, "getMinimumBalanceForRentExemption");
+    const build = vi.spyOn(tx, "buildCreatePortfolio").mockRejectedValue(new Error("creation reached"));
+    await expect(deposit.run(drip, { amount_usdc: 1 })).rejects.toThrow(offset < 0
+      ? `Creating a portfolio costs rent (${PORTFOLIO_LAMPORTS / 1_000_000_000} SOL) plus fees; call claim_test_funds`
+      : "creation reached");
+    expect(build).toHaveBeenCalledTimes(offset < 0 ? 0 : 1);
+    expect(rent).not.toHaveBeenCalled();
+  });
 });
 
 describe("matcher", () => {

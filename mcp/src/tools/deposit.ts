@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { parsePortfolio } from "../../../frontend/src/chain/accounts";
-import { layout } from "../../../frontend/src/chain/layout";
+import { PORTFOLIO_LAMPORTS } from "../../../frontend/src/chain/instructions";
 import { createAtaIdempotentIx } from "../../../frontend/src/chain/pda";
 import { buildCreatePortfolio, buildDeposit } from "../../../frontend/src/chain/tx";
 import { atoms } from "../drip";
@@ -17,12 +17,11 @@ export default tool({
     let pf = await drip.portfolio();
     let created;
     if (!pf) {
-      const rent = await drip.conn.getMinimumBalanceForRentExemption(layout.PORTFOLIO_ACCOUNT_LEN);
-      if (await drip.conn.getBalance(drip.wallet.publicKey) < Math.max(rent, (layout.PORTFOLIO_ACCOUNT_LEN + 128) * 6960) + 20000) {
-        throw new Error(`Creating a portfolio costs rent (${rent / LAMPORTS_PER_SOL} SOL) plus fees; call claim_test_funds`);
+      if (await drip.conn.getBalance(drip.wallet.publicKey) < PORTFOLIO_LAMPORTS + 20000) {
+        throw new Error(`Creating a portfolio costs rent (${PORTFOLIO_LAMPORTS / LAMPORTS_PER_SOL} SOL) plus fees; call claim_test_funds`);
       }
       const portfolio = await buildCreatePortfolio(drip.cfg, drip.wallet.publicKey);
-      created = { ...await drip.send(async () => portfolio.ixs, [portfolio.portfolio]), note: "Portfolio created; rent paid from your SOL", rent_lamports: rent };
+      created = { ...await drip.send(async () => portfolio.ixs, [portfolio.portfolio]), note: "Portfolio created; rent paid from your SOL", rent_lamports: PORTFOLIO_LAMPORTS };
       pf = { key: portfolio.portfolio.publicKey, ...parsePortfolio((await drip.account(portfolio.portfolio.publicKey)).data) };
     }
     const key = pf.key;
