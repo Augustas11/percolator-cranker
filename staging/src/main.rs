@@ -854,11 +854,17 @@ fn r2_setup() -> Result<Staging> {
     Staging::setup(cfg, rpc, program_id, payer)
 }
 
+fn trade_due(last: Option<Instant>, now: Instant, every_secs: u64, roll_close: bool) -> bool {
+    // A backing roll must not wait on the trader cadence to close.
+    roll_close || every_secs == 0 || last.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(every_secs))
+}
+
 /// The bots loop. `bots`: an existing launch market, run until stopped
 /// (no lifecycle); else the R2 run of `STAGING_HOURS` with its lifecycle.
 fn run(mut st: Staging, bots: bool) -> Result<()> {
     let hours: f64 = env_or("STAGING_HOURS", if bots { 24.0 * 365.0 } else { 6.0 });
     let tick_ms: u64 = env_or("STAGING_TICK_MS", st.cfg.oracle.push_interval_ms);
+    let trade_every_secs: u64 = env_or("STAGING_TRADE_EVERY_SECS", if bots { 300 } else { 0 });
     let summary_every: u64 = env_or("STAGING_SUMMARY_EVERY", 100);
     let insurance_every: u64 = env_or("STAGING_INSURANCE_EVERY", st.cfg.amounts.insurance_every);
     let max_consec: u64 = env_or("STAGING_MAX_CONSEC_FAIL", 10);
@@ -886,6 +892,7 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
     let started = Instant::now();
     let deadline = started + Duration::from_secs_f64(hours * 3600.0);
     let mut tick = 0u64;
+    let mut last_trade = None;
     let mut abnormal = false;
     while Instant::now() < deadline && !abnormal {
         tick += 1;
@@ -916,7 +923,11 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         drop(push_state);
         drop(in_flight);
         let p = "thread";
-        let t = if live { trade.record(st.match_trade(&push_lifecycle)) } else { "-".into() };
+        let trade_now = Instant::now();
+        let t = if live && trade_due(last_trade, trade_now, trade_every_secs, st.rolling && st.open.is_some()) {
+            last_trade = Some(trade_now);
+            trade.record(st.match_trade(&push_lifecycle))
+        } else { "-".into() };
         let b = if live { backing.record(st.manage_backing()) } else { "-".into() };
         let i = if live && tick % insurance_every == 0 { insurance.record(st.top_up_insurance(st.cfg.amounts.insurance_topup)) } else { "-".into() };
 
@@ -991,7 +1002,7 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         println!("t{tick} SOL={} push={p} accrual={} trade={t} backing={b} insurance={i} keeper={k}{l}", st.mark, accrual.json());
 
         let roles = [("push", &push), ("accrual", &accrual), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
-        abnormal = roles.iter().any(|(name, r)| *name != "accrual" && r.abnormal(max_consec)) || keeper.role.abnormal(max_consec);
+        abnormal = roles.iter().any(|(name, r)| *name != "accrual" && *name != "trade" && r.abnormal(max_consec)) || keeper.role.abnormal(max_consec);
         if tick % summary_every == 0 {
             println!("{}", summary(tick, started, &st, &roles, &keeper, false));
         }
@@ -1065,6 +1076,17 @@ fn fill_allowed(size_q: i128, effective_price: u64, target_price: u64, lp_positi
 #[cfg(test)]
 mod fill_tests {
     use super::*;
+    #[test]
+    fn trade_cadence() {
+        let last = Instant::now();
+        assert!(trade_due(Some(last), last, 0, false));
+        assert!(trade_due(None, last, 300, false));
+        assert!(!trade_due(Some(last), last + Duration::from_secs(299), 300, false));
+        assert!(trade_due(Some(last), last + Duration::from_secs(300), 300, false));
+        assert!(trade_due(Some(last), last + Duration::from_secs(301), 300, false));
+        assert!(trade_due(Some(last), last, 300, true));
+    }
+
     #[test]
     fn keeper_transport_vs_program_errors() {
         for error in ["Error processing Instruction 3: custom program error: 0x17",
