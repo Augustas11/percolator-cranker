@@ -12,7 +12,8 @@
 .site .nav-links { gap: var(--site-md); }
 .site .site-nav a { text-decoration: none; }
 .site .site-nav a[aria-current="page"] { text-decoration: underline; }
-.site .brand { font-family: var(--site-display); font-size: var(--site-text-xl); font-weight: 700; color: var(--site-text); }
+.site .brand { display: inline-flex; align-items: flex-end; gap: 0.05em; font-family: var(--site-display); font-size: var(--site-text-xl); font-weight: 700; line-height: 1; color: var(--site-text); }
+.site .brand img { height: 1.12em; width: auto; }
 .site h1, .site h2, .site h3 { font-family: var(--site-display); line-height: var(--site-heading-leading); }
 .site h1 { margin: 0; font-size: var(--site-text-xl); }
 .site h2 { margin: 0 0 var(--site-md); font-size: var(--site-text-lg); }
