@@ -1,8 +1,8 @@
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { Connection, Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID } from "../../frontend/src/chain/pda";
-import { ClaimError, DEFAULT_MINT, DEVNET_GENESIS, Faucet, checkGetBody, checkTokenAccount, mintTo, parseState, parseWallet, readBody, type State } from "./faucet";
+import { Connection, Keypair, PublicKey, SystemProgram, Transaction, VersionedTransaction } from "@solana/web3.js";
+import { createAtaIdempotentIx, TOKEN_PROGRAM_ID } from "../../frontend/src/chain/pda";
+import { ClaimError, DEFAULT_MINT, DEVNET_GENESIS, Faucet, checkGetBody, checkTokenAccount, mintTo, needsSol, parseState, parseWallet, readBody, type State } from "./faucet";
 
 function integer(name: string, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
   const value = process.env[name] ?? String(fallback);
@@ -41,21 +41,25 @@ async function main() {
   const dailyCap = integer("FAUCET_DAILY_CAP", 200);
   const amountUsdc = integer("FAUCET_AMOUNT_USDC", 1000, 100000);
   const minLamports = integer("FAUCET_MIN_PAYER_LAMPORTS", 3_000_000_000);
+  const solLamports = integer("FAUCET_SOL_LAMPORTS", 80_000_000);
+  const solDailyCap = integer("FAUCET_SOL_DAILY_CAP", 12);
   const bind = process.env.FAUCET_BIND ?? "127.0.0.1:8092";
   const match = /^(\[[\da-fA-F:]+\]|[^\s:/]+):(\d+)$/.exec(bind);
   if (!match || Number(match[2]) < 1 || Number(match[2]) > 65535) throw new Error("Invalid FAUCET_BIND (expected host:port)");
   const statePath = process.env.FAUCET_STATE ?? "faucet-state.json";
   if (!statePath.trim()) throw new Error("Invalid FAUCET_STATE");
-  let state: State = { wallets: {}, day: new Date().toISOString().slice(0, 10), count: 0 };
+  let state: State = { wallets: {}, day: new Date().toISOString().slice(0, 10), count: 0, sol_count: 0 };
   try { state = parseState(JSON.parse(await readFile(statePath, "utf8"))); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Cannot read valid FAUCET_STATE");
   }
   let genesis: string;
   let mintAccount;
+  let payerLamports;
   try {
     genesis = await connection.getGenesisHash();
     mintAccount = await connection.getAccountInfo(mint);
+    payerLamports = await connection.getBalance(payer.publicKey);
   } catch { throw new Error("Startup RPC check failed (<rpc>)"); }
   if (genesis !== DEVNET_GENESIS) throw new Error("RPC genesis is not devnet");
   if (!mintAccount || !mintAccount.owner.equals(TOKEN_PROGRAM_ID) || mintAccount.data.length !== 82 ||
@@ -64,19 +68,28 @@ async function main() {
     throw new Error("Mint must be initialized classic SPL Token with 6 decimals and payer as mint authority");
   }
   const faucet = new Faucet(state, {
-    mint, dailyCap, amountUsdc, now: () => Math.floor(Date.now() / 1000),
+    mint, dailyCap, amountUsdc, solDailyCap, solLamports, minPayerLamports: minLamports, payerLamports, now: () => Math.floor(Date.now() / 1000),
     save: async value => {
       await writeFile(`${statePath}.tmp`, JSON.stringify(value), { mode: 0o600 });
       await rename(`${statePath}.tmp`, statePath);
     },
-    send: async (wallet, destination) => {
+    send: async (wallet, destination, allowSol) => {
       let submitted = false;
+      let dripLamports = 0;
       try {
-        if (await connection.getBalance(payer.publicKey) < minLamports) throw new ClaimError(503, "Payer below minimum SOL balance");
-        checkTokenAccount(await connection.getAccountInfo(destination), wallet, mint);
+        const payerBalance = await connection.getBalance(payer.publicKey);
+        faucet.observePayer(payerBalance);
+        const walletBalance = await connection.getBalance(wallet);
+        dripLamports = needsSol(walletBalance, payerBalance, solLamports, minLamports, allowSol) ? solLamports : 0;
+        const account = await connection.getAccountInfo(destination);
+        const instructions = [];
+        if (dripLamports && !account) instructions.push(createAtaIdempotentIx(payer.publicKey, wallet, mint));
+        else checkTokenAccount(account, wallet, mint);
+        if (dripLamports) instructions.push(SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: wallet, lamports: dripLamports }));
+        instructions.push(mintTo(mint, destination, payer.publicKey, amountUsdc));
         const block = await connection.getLatestBlockhash();
         const tx = new VersionedTransaction(new Transaction({ feePayer: payer.publicKey, ...block })
-          .add(mintTo(mint, destination, payer.publicKey, amountUsdc)).compileMessage());
+          .add(...instructions).compileMessage());
         tx.sign([payer]);
         const simulation = await connection.simulateTransaction(tx, { sigVerify: true, commitment: "confirmed" });
         if (simulation.value.err) throw new ClaimError(503, "Mint transaction simulation failed");
@@ -89,9 +102,11 @@ async function main() {
           const confirmation = await connection.confirmTransaction({ signature, ...block, abortSignal: controller.signal }, "confirmed");
           if (confirmation.value.err) throw new ClaimError(503, "Mint transaction was not confirmed");
         } finally { clearTimeout(timer); }
-        return signature;
+        try { faucet.observePayer(await connection.getBalance(payer.publicKey)); }
+        catch { faucet.observePayer(payerBalance - dripLamports); }
+        return { signature, solLamports: dripLamports };
       } catch (error) {
-        if (submitted) throw new ClaimError(503, "Mint outcome unknown", undefined, true);
+        if (submitted) throw new ClaimError(503, "Mint outcome unknown", undefined, true, dripLamports);
         if (error instanceof ClaimError) throw error;
         throw new ClaimError(503, "RPC unavailable or transaction not confirmed");
       }

@@ -12,6 +12,8 @@ Without either, `.config/drip/devnet-agent.json` in your home directory is gener
 ## Tools
 perps_markets, market_stats, get_position, deposit, open_position, close_position, withdraw, trade_history, leaderboard, claim_test_funds.
 ## Quick start
+`claim_test_funds` includes 0.08 devnet SOL while available.
+
 claim_test_funds → deposit → open_position → close_position → withdraw
 ## Add a tool
 Copy a file in `src/tools/`.
