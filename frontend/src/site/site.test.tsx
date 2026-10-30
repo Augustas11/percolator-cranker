@@ -251,6 +251,19 @@ test("home renders recent fills and live season totals", async () => {
   expect(season.textContent).toContain("Season 0 · devnet · since " + new Date(1793232000 * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }));
 });
 
+test("home shows at most five recent fills while fetching twenty", async () => {
+  const indexer = new MockIndexerClient();
+  const { fills } = await indexer.recentFills(20);
+  const recentFills = vi.spyOn(indexer, "recentFills").mockResolvedValue({
+    fills: Array.from({ length: 7 }, (_, i) => ({ ...fills[0], signature: `fill-${i}` })),
+  });
+  const container = await render(site.paths.home, indexer);
+  expect(recentFills).toHaveBeenCalledWith(20);
+  expect(Array.from(container.querySelectorAll(".recent-trades li a"), el => el.getAttribute("href"))).toEqual(
+    Array.from({ length: 5 }, (_, i) => `https://explorer.solana.com/tx/fill-${i}?cluster=devnet`),
+  );
+});
+
 test.each(["rejects", "missing", "none", "empty"])("home handles unavailable data: %s", async mode => {
   const indexer: IndexerClient = new MockIndexerClient();
   indexer.recentFills = mode === "missing" ? undefined : mode === "empty" ? vi.fn().mockResolvedValue({ fills: [] }) : vi.fn().mockRejectedValue(new Error("indexer 404"));
