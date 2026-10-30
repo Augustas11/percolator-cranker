@@ -126,7 +126,7 @@ pub struct OracleCfg {
     pub open_max_mark_age_ms: u64,
 }
 
-fn default_exchange_binance_url() -> String { "wss://stream.binance.com:9443/ws/solusdt@bookTicker".into() }
+fn default_exchange_binance_url() -> String { "wss://stream.binance.com:9443/ws/solusdt@ticker".into() }
 fn default_exchange_clock_skew() -> u64 { 500 }
 fn default_exchange_max_age() -> u64 { 5000 }
 fn default_exchange_max_dev() -> u64 { 50 }
@@ -1020,6 +1020,6 @@ mod config_tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../launch/sol-perp.toml");
         let cfg = super::load(path).expect("launch/sol-perp.toml loads");
         assert_eq!(cfg.cluster["devnet"].matcher_max_ref_age_slots, 80);
-        assert_eq!(cfg.oracle.exchange_binance_url, "wss://stream.binance.com:9443/ws/solusdt@bookTicker");
+        assert_eq!(cfg.oracle.exchange_binance_url, "wss://stream.binance.com:9443/ws/solusdt@ticker");
     }
 }

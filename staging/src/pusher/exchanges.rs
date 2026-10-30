@@ -6,6 +6,7 @@ use std::time::Instant;
 use tungstenite::{client::IntoClientRequest, Message};
 
 const IDLE_RECONNECT: Duration = Duration::from_secs(60);
+const MAX_BOOK_LEVELS: usize = 100_000;
 const VENUES: [&str; 3] = ["coinbase", "kraken", "binance"];
 const URLS: [&str; 2] = [
     "wss://ws-feed.exchange.coinbase.com",
@@ -27,7 +28,7 @@ pub struct Exchanges {
     quotes: Arc<Mutex<Quotes>>,
     cfg: launch::OracleCfg,
     last_drops: Vec<String>,
-    anchor: Option<Quote>,
+    anchor: Option<(u64, Instant)>,
     fallback: bool,
 }
 
@@ -54,7 +55,7 @@ fn cache_quote(cached: &mut Option<Quote>, q: Quote, now: u64, skew_ms: u64) {
     }
 }
 
-fn filter(quotes: &Quotes, now: u64, cfg: &launch::OracleCfg, anchor: Option<Quote>) -> (Result<Reading>, Vec<String>) {
+fn filter(quotes: &Quotes, now: u64, cfg: &launch::OracleCfg, anchor: Option<(u64, u64)>) -> (Result<Reading>, Vec<String>) {
     let mut drops = Vec::new();
     let fresh: Vec<_> = quotes.iter().enumerate().filter_map(|(i, q)| {
         let reason = match q {
@@ -79,9 +80,9 @@ fn filter(quotes: &Quotes, now: u64, cfg: &launch::OracleCfg, anchor: Option<Quo
         if used.is_empty() || used.len() < cfg.exchange_min_venues {
             // Only a lone fresh venue: other fresh venues that disagree mean no push.
             if fresh_count == 1 && cfg.exchange_fallback_ms > 0 {
-                if let Some(anchor) = anchor.filter(|a| now.saturating_sub(a.timestamp) <= cfg.exchange_fallback_ms) {
+                if let Some((price, _)) = anchor.filter(|(_, age_ms)| *age_ms <= cfg.exchange_fallback_ms) {
                     let (i, q) = used[0];
-                    if q.price.abs_diff(anchor.price) as u128 * 10_000 <= anchor.price as u128 * cfg.exchange_fallback_max_dev_bps as u128 {
+                    if q.price.abs_diff(price) as u128 * 10_000 <= price as u128 * cfg.exchange_fallback_max_dev_bps as u128 {
                         return Ok(Reading { price: q.price, publish_time_ms: q.timestamp,
                             venues: vec![VENUES[i]], spread_bps: 0.0, fallback: true });
                     }
@@ -117,7 +118,7 @@ fn quote(price: &Value, timestamp: u64) -> Option<Quote> {
 }
 
 #[derive(Default)]
-struct Book { bids: BTreeSet<u64>, asks: BTreeSet<u64> }
+struct Book { bids: BTreeSet<u64>, asks: BTreeSet<u64>, bad: bool }
 
 fn mid(bid: u64, ask: u64, timestamp: u64) -> Option<Quote> {
     (bid < ask).then(|| Quote { price: bid + (ask - bid) / 2, timestamp })
@@ -128,25 +129,29 @@ fn level(side: &mut BTreeSet<u64>, price: &Value, size: &Value) -> Option<()> {
     let size = size.as_str()?.parse::<f64>().ok()?;
     if !size.is_finite() || size < 0.0 { return None; }
     if size == 0.0 { side.remove(&price); } else { side.insert(price); }
-    Some(())
+    (side.len() <= MAX_BOOK_LEVELS).then_some(())
 }
 
 fn parse(venue: usize, text: &str, book: &mut Book) -> Option<Quote> {
     let v: Value = serde_json::from_str(text).ok()?;
     match venue {
-        0 if v["product_id"] == "SOL-USD" => {
-            match v["type"].as_str()? {
-                "snapshot" => {
-                    *book = Book::default();
-                    for row in v["bids"].as_array()? { level(&mut book.bids, &row[0], &row[1])?; }
-                    for row in v["asks"].as_array()? { level(&mut book.asks, &row[0], &row[1])?; }
-                },
-                "l2update" => for row in v["changes"].as_array()? {
-                    let side = match row[0].as_str()? { "buy" => &mut book.bids, "sell" => &mut book.asks, _ => return None };
-                    level(side, &row[1], &row[2])?;
-                },
-                _ => return None,
-            }
+        0 if v["product_id"] == "SOL-USD" && matches!(v["type"].as_str(), Some("snapshot" | "l2update")) => {
+            let valid = (|| {
+                match v["type"].as_str()? {
+                    "snapshot" => {
+                        *book = Book::default();
+                        for row in v["bids"].as_array()? { level(&mut book.bids, &row[0], &row[1])?; }
+                        for row in v["asks"].as_array()? { level(&mut book.asks, &row[0], &row[1])?; }
+                    },
+                    "l2update" => for row in v["changes"].as_array()? {
+                        let side = match row[0].as_str()? { "buy" => &mut book.bids, "sell" => &mut book.asks, _ => return None };
+                        level(side, &row[1], &row[2])?;
+                    },
+                    _ => return Some(()),
+                }
+                Some(())
+            })();
+            if valid.is_none() { book.bad = true; return None; }
             mid(*book.bids.last()?, *book.asks.first()?, timestamp(&v["time"])?)
         },
         1 if v["channel"] == "ticker" => v["data"].as_array()?.iter()
@@ -155,7 +160,7 @@ fn parse(venue: usize, text: &str, book: &mut Book) -> Option<Quote> {
             .max_by_key(|q| q.timestamp),
         // Binance SOL/USDT is treated as SOL/USD; no USDT/USD conversion.
         2 if v["e"] == "trade" && v["s"] == "SOLUSDT" => quote(&v["p"], v["T"].as_u64()?),
-        2 if v["s"] == "SOLUSDT" => mid(quote(&v["b"], 0)?.price, quote(&v["a"], 0)?.price, launch::now_ms()),
+        2 if v["e"] == "24hrTicker" && v["s"] == "SOLUSDT" => mid(quote(&v["b"], 0)?.price, quote(&v["a"], 0)?.price, v["E"].as_u64()?),
         _ => None,
     }
 }
@@ -169,6 +174,15 @@ impl Exchanges {
     pub fn new(cfg: &launch::OracleCfg) -> Result<Self> {
         if !(1..=3).contains(&cfg.exchange_min_venues) { bail!("exchange_min_venues must be 1..=3"); }
         if !cfg.exchange_binance_url.starts_with("wss://") { bail!("exchange_binance_url must start with wss://"); }
+        if cfg.exchange_binance_url.contains("@bookTicker") {
+            bail!("exchange config: exchange_binance_url is a bookTicker stream; use .../solusdt@ticker");
+        }
+        if cfg.exchange_binance_url.contains("@trade") {
+            eprintln!("exchange config: exchange_binance_url is a trade stream; use .../solusdt@ticker");
+        }
+        if cfg.exchange_max_age_ms < 5000 {
+            eprintln!("exchange config: exchange_max_age_ms < 5000 stalls on quiet books");
+        }
         let quotes: Arc<Mutex<Quotes>> = Arc::new(Mutex::new([None; 3]));
         for i in 0..3 {
             // Weak ownership lets readers stop after the last source is dropped.
@@ -207,7 +221,12 @@ impl Exchanges {
                             };
                             match message {
                                 Message::Text(text) => {
-                                    if let Some(q) = parse(i, &text, &mut book) {
+                                    let parsed = parse(i, &text, &mut book);
+                                    if book.bad {
+                                        if let Some(shared) = shared.upgrade() { shared.lock().unwrap()[i] = None; }
+                                        bail!("coinbase book invalid");
+                                    }
+                                    if let Some(q) = parsed {
                                         if let Some(shared) = shared.upgrade() {
                                             let mut quotes = shared.lock().unwrap();
                                             cache_quote(&mut quotes[i], q, launch::now_ms(), skew_ms);
@@ -242,12 +261,13 @@ impl Exchanges {
     pub fn latest(&mut self) -> Result<Reading> {
         let quotes = *self.quotes.lock().unwrap();
         let now = launch::now_ms();
-        let (result, drops) = filter(&quotes, now, &self.cfg, self.anchor);
+        let anchor = self.anchor.map(|(price, at)| (price, at.elapsed().as_millis().min(u64::MAX as u128) as u64));
+        let (result, drops) = filter(&quotes, now, &self.cfg, anchor);
         let fallback = result.as_ref().is_ok_and(|r| r.fallback);
         if let Ok(r) = &result {
-            if !r.fallback { self.anchor = Some(Quote { price: r.price, timestamp: now }); }
+            if !r.fallback { self.anchor = Some((r.price, Instant::now())); }
             else if !self.fallback {
-                eprintln!("exchange fallback: {} alone, {} ms since quorum", r.venues[0], now.saturating_sub(self.anchor.unwrap().timestamp));
+                eprintln!("exchange fallback: {} alone, {} ms since quorum", r.venues[0], anchor.unwrap().1);
             }
         }
         self.fallback = fallback;
@@ -284,7 +304,7 @@ mod tests {
         let cfg: launch::Config = toml::from_str(&old).unwrap();
         assert_eq!(cfg.oracle.exchange_clock_skew_ms, 500);
         assert_eq!((cfg.oracle.exchange_fallback_ms, cfg.oracle.exchange_fallback_max_dev_bps), (10_000, 25));
-        assert_eq!(cfg.oracle.exchange_binance_url, "wss://stream.binance.com:9443/ws/solusdt@bookTicker");
+        assert_eq!(cfg.oracle.exchange_binance_url, "wss://stream.binance.com:9443/ws/solusdt@ticker");
         assert_eq!((cfg.oracle.exchange_max_age_ms, cfg.oracle.exchange_max_dev_bps, cfg.oracle.exchange_min_venues), (5000, 50, 2));
     }
     #[test]
@@ -293,6 +313,48 @@ mod tests {
         cfg.exchange_binance_url = "ws://stream.binance.us:9443/ws/solusdt@trade".into();
         let error = Exchanges::new(&cfg).err().expect("non-wss Binance URL rejected");
         assert_eq!(error.to_string(), "exchange_binance_url must start with wss://");
+    }
+    #[test]
+    fn legacy_exchange_config() {
+        let text = include_str!("../../../launch/sol-perp.toml")
+            .replace("@ticker", "@trade").replace("exchange_max_age_ms = 5000", "exchange_max_age_ms = 2000");
+        let cfg: launch::Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.oracle.exchange_max_age_ms, 2000);
+        drop(Exchanges::new(&cfg.oracle).unwrap());
+        let mut cfg = cfg.oracle;
+        cfg.exchange_binance_url = cfg.exchange_binance_url.replace("@trade", "@bookTicker");
+        let error = Exchanges::new(&cfg).err().expect("bookTicker rejected");
+        assert_eq!(error.to_string(), "exchange config: exchange_binance_url is a bookTicker stream; use .../solusdt@ticker");
+    }
+    #[test]
+    fn invalid_coinbase_rows() {
+        for message in [
+            r#"{"type":"snapshot","product_id":"SOL-USD","bids":[["97","1"],["bad","1"]],"asks":[["98","1"]]}"#,
+            r#"{"type":"snapshot","product_id":"SOL-USD","bids":[["97","1"]],"asks":[["98","-1"]]}"#,
+            r#"{"type":"snapshot","product_id":"SOL-USD","bids":[],"asks":null}"#,
+            r#"{"type":"l2update","product_id":"SOL-USD","changes":[["buy","97","NaN"]]}"#,
+            r#"{"type":"l2update","product_id":"SOL-USD","changes":[["sell","bad","1"]]}"#,
+            r#"{"type":"l2update","product_id":"SOL-USD","changes":[["other","97","1"]]}"#,
+            r#"{"type":"l2update","product_id":"SOL-USD","changes":[["buy","97"]]}"#,
+        ] {
+            let mut book = Book::default();
+            parse(0, include_str!("fixtures/coinbase_l2_snapshot.json"), &mut book).unwrap();
+            assert!(parse(0, message, &mut book).is_none());
+            assert!(book.bad, "{message}");
+        }
+    }
+    #[test]
+    fn coinbase_level_limit() {
+        for side in ["buy", "sell"] {
+            let mut book = Book::default();
+            let levels = (1..=MAX_BOOK_LEVELS as u64).collect();
+            if side == "buy" { book.bids = levels; } else { book.asks = levels; }
+            let update = |size| format!(r#"{{"type":"l2update","product_id":"SOL-USD","changes":[["{side}","97","{size}"]]}}"#);
+            assert!(parse(0, &update("0"), &mut book).is_none());
+            assert!(!book.bad); // Exactly the cap is allowed.
+            assert!(parse(0, &update("1"), &mut book).is_none());
+            assert!(book.bad);
+        }
     }
     #[test]
     fn future_quote_recovers() {
@@ -364,10 +426,11 @@ mod tests {
         assert!(parse(0, &update("97.07", "1"), &mut book).is_none());
         assert_eq!(parse(1, include_str!("fixtures/kraken_ticker.json"), &mut book).unwrap(),
             Quote { price: 97_065_000, timestamp: 1_793_350_854_416 });
-        let before = launch::now_ms();
-        let q = parse(2, include_str!("fixtures/binance_book.json"), &mut book).unwrap();
-        assert_eq!(q.price, 97_270_000);
-        assert!((before..=launch::now_ms()).contains(&q.timestamp));
+        let ticker = parse(2, include_str!("fixtures/binance_ticker.json"), &mut book).unwrap();
+        assert_eq!(ticker, Quote { price: 97_200_000, timestamp: 1_793_352_000_123 });
+        let (_, drops) = filter(&[None, None, Some(ticker)], ticker.timestamp + 5001, &cfg(), None);
+        assert!(drops.iter().any(|drop| drop == "binance: stale"));
+        assert!(parse(2, r#"{"s":"SOLUSDT","b":"97.19","a":"97.21"}"#, &mut book).is_none());
         assert_eq!(parse(2, include_str!("fixtures/binance.json"), &mut book).unwrap(),
             Quote { price: 99_680_000, timestamp: 1_793_245_344_802 });
     }
@@ -375,7 +438,7 @@ mod tests {
     #[test]
     fn fallback_does_not_refresh_anchor() {
         let now = launch::now_ms();
-        let anchor = Some(Quote { price: 100_000_000, timestamp: now - 6000 });
+        let anchor = Some((100_000_000, Instant::now() - Duration::from_millis(6000)));
         let mut source = Exchanges {
             quotes: Arc::new(Mutex::new([q(100_000_000, now), None, None])),
             cfg: cfg(), last_drops: Vec::new(), anchor, fallback: false,
@@ -384,20 +447,25 @@ mod tests {
         assert_eq!(source.anchor, anchor);
         assert!(source.latest().unwrap().fallback);
         assert_eq!(source.anchor, anchor);
+        source.anchor = Some((100_000_000, Instant::now() - Duration::from_millis(10_001)));
+        assert!(source.latest().is_err());
     }
 
     #[test]
     fn fallback_window_and_deviation() {
         let mut cfg = cfg();
-        let anchor = Some(Quote { price: 100_000_000, timestamp: 0 });
+        // Wall-clock changes do not extend or shorten the monotonic fallback age.
+        assert!(filter(&[q(100_000_000, 0), None, None], 0, &cfg, Some((100_000_000, 10_001))).0.is_err());
+        assert!(filter(&[q(100_000_000, 1_000_000), None, None], 1_000_000, &cfg, Some((100_000_000, 6000))).0.is_ok());
+        let anchor = Some((100_000_000, 6000));
         let reading = filter(&[q(100_250_000, 6000), None, None], 6000, &cfg, anchor).0.unwrap();
         assert!(reading.fallback);
         assert_eq!((reading.price, reading.publish_time_ms, reading.spread_bps), (100_250_000, 6000, 0.0));
         assert_eq!(reading.venues, ["coinbase"]);
         assert!(filter(&[q(90_000_000, 6000), q(100_000_000, 6000), q(110_000_000, 6000)], 6000, &cfg, anchor).0.is_err());
-        assert!(filter(&[q(100_000_000, 10_000), None, None], 10_000, &cfg, anchor).0.is_ok());
-        assert!(filter(&[q(100_000_000, 10_001), None, None], 10_001, &cfg, anchor).0.is_err());
-        assert!(filter(&[q(100_000_000, 12000), None, None], 12000, &cfg, anchor).0.is_err());
+        assert!(filter(&[q(100_000_000, 10_000), None, None], 10_000, &cfg, Some((100_000_000, 10_000))).0.is_ok());
+        assert!(filter(&[q(100_000_000, 10_001), None, None], 10_001, &cfg, Some((100_000_000, 10_001))).0.is_err());
+        assert!(filter(&[q(100_000_000, 12000), None, None], 12000, &cfg, Some((100_000_000, 12000))).0.is_err());
         assert!(filter(&[q(100_250_001, 6000), None, None], 6000, &cfg, anchor).0.is_err());
         assert!(filter(&[q(99_600_000, 6000), q(100_400_000, 6000), None], 6000, &cfg, anchor).0.is_err());
         cfg.exchange_fallback_ms = 0;

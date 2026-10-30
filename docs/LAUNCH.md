@@ -181,11 +181,14 @@ the tick with `accrual_behind` while the snapshot exceeds `oracle.accrual_lag_sl
   Hermes has required a paid key since 2026-08-26. One reconnecting thread
   per venue reads Coinbase Exchange SOL-USD `level2_batch` (reported as
   `level2_50`), Kraken v2 SOL/USD ticker with `event_trigger: bbo`, and Binance
-  SOLUSDT `bookTicker`. Prices are best bid/ask midpoints. Binance
+  SOLUSDT `ticker` (every second). Prices are best bid/ask midpoints. Binance
   USDT is treated as USD, without conversion. No exchange keys are used.
-  The Binance websocket URL is `oracle.exchange_binance_url`.
+  The Binance websocket URL is `oracle.exchange_binance_url`, defaulting to
+  `wss://stream.binance.com:9443/ws/solusdt@ticker`. Old `@trade` URLs warn
+  but still work; `@bookTicker` URLs are rejected. An `exchange_max_age_ms`
+  below 5,000 warns because quiet books can stall.
   `oracle.exchange_max_age_ms` (5,000) gives quotes 5 seconds of validity;
-  Coinbase and Kraken use event time, Binance bookTicker uses receipt time;
+  all venues use event time;
   future timestamps tolerate `exchange_clock_skew_ms` (500 ms). Prices farther than `exchange_max_dev_bps` (50)
   from the median of all fresh venues are excluded; the remaining median
   (midpoint for two) needs `exchange_min_venues` (2). If exactly one venue
@@ -197,12 +200,13 @@ the tick with `accrual_behind` while the snapshot exceeds `oracle.accrual_lag_sl
   `PusherMarkStale` catches staleness.
   Dropped venues and reasons log only when the filter state changes.
   Lag runs from the **newest exchange timestamp among venues used** to push
-  landed (receipt time for Binance). It does not represent every venue's age.
+  landed. It does not represent every venue's age.
   Fallback pushes add `fallback: true` to `mark_lag`. `price_gap` logs closed
-  gaps of at least 2 seconds between successful reads. Hourly `price_stall_stats`
-  includes the open gap and reports the longest gap and percent of the rolling
-  hour spent in gaps longer than 10 seconds. `PusherPriceStalls` warns when
-  that percent exceeds 1 for 15 minutes, using closed gaps from keeper logs.
+  gaps of at least 2 seconds between successful reads. `price_stall_stats`
+  updates every 60 seconds and includes an ongoing gap. It reports the longest
+  gap and percent of the rolling hour spent in gaps longer than 10 seconds,
+  using a minimum 10-minute denominator during warm-up. `PusherPriceStalls`
+  uses these stats and warns when that percent exceeds 1 for 15 minutes.
 - `"mock"` remains local's seeded walk; mainnet stays `"pyth"`, reading the
   SOL/USD PriceUpdateV2 account (`oracle.pyth_price_account`) over RPC with
   owner, feed, age and confidence checks. The sponsored account was ~70 s old
@@ -219,7 +223,7 @@ the tick with `accrual_behind` while the snapshot exceeds `oracle.accrual_lag_sl
   Stop with Ctrl-C. Public feed formats:
   [Coinbase level2](https://docs.cdp.coinbase.com/exchange/websocket-feed/channels),
   [Kraken ticker](https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/ticker),
-  [Binance bookTicker](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams).
+  [Binance ticker](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams).
 - **The matcher refuses fills while the mark lags; keep it.** The engine
   refuses a risk-increasing trade while an asset's AuthMark target differs
   from its effective price (`trade_preflight_risk_gate`, engine `v16.rs`

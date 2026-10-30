@@ -38,7 +38,7 @@ impl StallStats {
             longest = longest.max(clipped);
             if ms > 10_000 { over += clipped; }
         }
-        (longest, if window == 0 { 0.0 } else { 100.0 * over as f64 / window as f64 })
+        (longest, 100.0 * over as f64 / window.max(600_000) as f64)
     }
 
     fn print_summary(&self, now: u64) {
@@ -335,7 +335,7 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                 }
 
                 let now = launch::now_ms();
-                if now.saturating_sub(stats_at) >= STALL_WINDOW_MS {
+                if now.saturating_sub(stats_at) >= 60_000 {
                     if keeper_log { stalls.print_summary(now); }
                     stats_at = now;
                 }
@@ -469,9 +469,9 @@ mod tests {
         assert_eq!(stats.summary(1000), (1000, 0.0));
         assert_eq!(stats.record_ok(3000), Some(2000));
         assert_eq!(stats.summary(13_000), (10_000, 0.0));
-        assert_eq!(stats.summary(23_000), (20_000, 100.0 * 20_000.0 / 23_000.0));
+        assert_eq!(stats.summary(23_000), (20_000, 100.0 * 20_000.0 / 600_000.0));
         assert_eq!(stats.record_ok(23_000), Some(20_000));
-        assert_eq!(stats.summary(23_000), (20_000, 100.0 * 20_000.0 / 23_000.0));
+        assert_eq!(stats.summary(23_000), (20_000, 100.0 * 20_000.0 / 600_000.0));
         assert_eq!(stats.summary(3_613_000), (3_590_000, 100.0));
         stats.record_ok(7_213_001);
         assert_eq!(stats.gaps.len(), 1);

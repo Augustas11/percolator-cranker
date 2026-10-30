@@ -24,7 +24,7 @@ pub struct KeeperLog {
     /// Unix ms when this log was first read: before any push lands, the push
     /// age counts from here, so a pusher that never succeeds still alerts.
     watch_start_ms: Option<u64>,
-    price_gaps: VecDeque<(u64, u64)>,
+    price_stall_stats: Option<Value>,
     last_cycle: u64,
     summary: BTreeMap<String, u64>,
     attempts: [u64; 3],
@@ -113,12 +113,8 @@ impl KeeperLog {
                                 "error":v["error"],"strike":v["strike"],"until_cycle":v["until_cycle"],"last_event_slot":slot}));
                         }
                     }
-                    Some("price_gap") => {
-                        if let (Some(at), Some(ms)) = (v["at_ms"].as_u64(), v["ms"].as_u64()) {
-                            let start = at.saturating_sub(3_600_000);
-                            self.price_gaps.retain(|(end, _)| *end > start);
-                            self.price_gaps.push_back((at, ms));
-                        }
+                    Some("price_stall_stats") => {
+                        self.price_stall_stats = Some(v);
                     }
                     Some("mark_lag") => {
                         self.mark_lag_ms = v["ms"].as_u64();
@@ -200,19 +196,6 @@ impl KeeperLog {
             .as_secs_f64())
     }
 
-    fn price_gap_stats(&self, now: u64) -> (u64, f64) {
-        let window = now.saturating_sub(self.watch_start_ms.unwrap_or(now)).min(3_600_000);
-        let start = now.saturating_sub(window);
-        let mut longest = 0;
-        let mut over = 0;
-        for &(at, ms) in &self.price_gaps {
-            let clipped = at.min(now).saturating_sub(at.saturating_sub(ms).max(start));
-            longest = longest.max(clipped);
-            if ms > 10_000 { over += clipped; }
-        }
-        (longest, if window == 0 { 0.0 } else { 100.0 * over as f64 / window as f64 })
-    }
-
     pub fn snapshot(&self, slot: u64, ok: bool, age: Option<f64>, error: Option<String>) -> Value {
         let (p50, max) = cu_stats(&self.cu);
         let outcomes = |v: [u64; 3]| json!({"progress":v[0],"idle":v[1],"failed":v[2]});
@@ -234,8 +217,8 @@ impl KeeperLog {
                 q
             })
             .collect();
-        let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-        let (gap_longest, gap_over) = self.price_gap_stats(now);
+        let gap_longest = self.price_stall_stats.as_ref().and_then(|v| v["longest_ms"].as_u64());
+        let gap_over = self.price_stall_stats.as_ref().and_then(|v| v["over_10s_pct"].as_f64());
         let (lag_p50, lag_p95) = lag_percentiles(&self.mark_lags);
         json!({"price_gap_longest_ms":gap_longest,"price_gap_over_10s_pct":gap_over,"mark_lag_p50_ms":lag_p50,"mark_lag_p95_ms":lag_p95,"log_ok":ok,"log_age_seconds":age,"log_error":error,"last_cycle":self.last_cycle,
             "last_cycle_summary":self.summary,"last_cycle_attempts":last,"last_cycle_cu":self.summary.get("cu").copied().unwrap_or(0),
@@ -267,21 +250,23 @@ mod tests {
         assert_eq!(lag_percentiles(&k.mark_lags), (Some(150), Some(285)));
     }
     #[test]
-    fn price_gap_window() {
+    fn authoritative_price_stalls() {
         let mut k = KeeperLog::default();
-        k.watch_start_ms = Some(0);
-        assert_eq!(k.price_gap_stats(1000), (0, 0.0));
-        k.line(r#"{"event":"price_gap","ms":10000,"at_ms":10000}"#);
-        assert_eq!(k.price_gap_stats(10000), (10000, 0.0));
+        let s = k.snapshot(0, true, None, None);
+        assert!(s["price_gap_longest_ms"].is_null());
+        assert!(s["price_gap_over_10s_pct"].is_null());
         k.line(r#"{"event":"price_gap","ms":20000,"at_ms":30000}"#);
-        assert_eq!(k.price_gap_stats(40000), (20000, 50.0));
-        k.watch_start_ms = Some(20_000);
-        assert_eq!(k.price_gap_stats(40_000), (10_000, 50.0));
-        k.watch_start_ms = Some(0);
-        assert_eq!(k.price_gap_stats(3_620_000), (10000, 100.0 * 10000.0 / 3_600_000.0));
-        assert_eq!(k.price_gap_stats(3_630_000), (0, 0.0));
-        k.line(r#"{"event":"price_gap","ms":2000,"at_ms":4000000}"#);
-        assert_eq!(k.price_gaps.len(), 1);
+        assert!(k.snapshot(0, true, None, None)["price_gap_longest_ms"].is_null());
+        k.line(r#"{"event":"price_stall_stats","window_s":60,"longest_ms":20000,"over_10s_pct":3.33,"at_ms":60000}"#);
+        let s = k.snapshot(0, true, None, None);
+        assert_eq!(s["price_gap_longest_ms"], 20000);
+        assert_eq!(s["price_gap_over_10s_pct"], 3.33);
+        // The pusher includes an ongoing gap even without a closed price_gap event.
+        k.line(r#"{"event":"price_stall_stats","window_s":120,"longest_ms":80000,"over_10s_pct":13.33,"at_ms":120000}"#);
+        k.line(r#"{"event":"price_gap","ms":100000,"at_ms":130000}"#);
+        let s = k.snapshot(0, true, None, None);
+        assert_eq!(s["price_gap_longest_ms"], 80000);
+        assert_eq!(s["price_gap_over_10s_pct"], 13.33);
     }
 
     const SUMMARY: &str="cycle 7 summary: progressed=2 idle=3 failed=1 unconfirmed=0 quarantined_skipped=4 deferred=5 new_quarantine=1 idle_pending_stuck=0 txs=6 cu=100 max_attempt_cu=50";
