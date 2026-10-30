@@ -47,9 +47,7 @@ public/docs/ARCHITECTURE.md docs/ARCHITECTURE.md
 public/docs/RUNBOOK.md docs/RUNBOOK.md
 public/scripts/env.sh scripts/env.sh
 # drip.tech site + devnet trade app
-frontend/.env.example frontend/.env.example
 frontend/.gitignore frontend/.gitignore
-frontend/.npmrc frontend/.npmrc
 frontend/PRIOR_ART.md frontend/PRIOR_ART.md
 frontend/README.md frontend/README.md
 frontend/index.html frontend/index.html
