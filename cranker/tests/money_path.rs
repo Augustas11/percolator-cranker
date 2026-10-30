@@ -7,7 +7,7 @@
 //! health certificate, refreshes, and never reaches the Liquidate arm.
 //! Two cranks in one transaction share the slot and price: the first
 //! refreshes, the second sees a current certificate and liquidates.
-//! Self-skips locally when the SBF is not built; CI requires it.
+//! Self-skips without the SBF unless MONEY_PATH_REQUIRE_SBF=1 (e2e CI).
 
 mod common;
 
@@ -88,7 +88,11 @@ impl Env {
             });
         let path = root.join("target/deploy/percolator_prog.so");
         if !path.exists() {
-            assert!(std::env::var_os("CI").is_none(), "{test}: pinned wrapper SBF not built: {}", path.display());
+            assert!(
+                std::env::var("MONEY_PATH_REQUIRE_SBF").as_deref() != Ok("1"),
+                "{test}: pinned wrapper SBF not built: {}",
+                path.display()
+            );
             eprintln!("SKIP {test}: pinned wrapper SBF not built");
             return Ok(None);
         }

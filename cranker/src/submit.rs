@@ -506,7 +506,7 @@ pub fn submit_crank_routed(
                         }
                         Ok(Some(Err(te))) => {
                             let error = format!("{te}");
-                            let error_name = wrapper_error_name_for_ix(&error, crank_ix_index);
+                            let error_name = wrapper_error_name_for_crank(&error, crank_ix_index, paired);
                             return Ok(CrankOutcome::HardReject { error, error_name, program_cu, tx_cu });
                         }
                         _ => return Err(Unconfirmed { signature, error: msg }.into()),
@@ -521,7 +521,7 @@ pub fn submit_crank_routed(
                         continue;
                     }
                 }
-                let error_name = wrapper_error_name_for_ix(&msg, crank_ix_index);
+                let error_name = wrapper_error_name_for_crank(&msg, crank_ix_index, paired);
                 return Ok(CrankOutcome::HardReject { error: msg, error_name, program_cu, tx_cu });
             }
         }
@@ -639,6 +639,21 @@ pub fn single_crank_retry_instructions(
 /// Pairing is on unless explicitly disabled, like CRANKER_MEASURE_CU.
 fn paired_crank_enabled() -> bool {
     std::env::var("CRANKER_PAIRED_CRANK").ok().as_deref() != Some("0")
+}
+
+/// Attribute either crank in a pair, including failures confirmed on chain.
+fn wrapper_error_name_for_crank(
+    msg: &str,
+    crank_ix_index: usize,
+    paired: bool,
+) -> Option<&'static str> {
+    wrapper_error_name_for_ix(msg, crank_ix_index).or_else(|| {
+        if paired {
+            wrapper_error_name_for_ix(msg, crank_ix_index + 1)
+        } else {
+            None
+        }
+    })
 }
 
 /// Like [`wrapper_error_name`], but only when the error came from the
@@ -894,6 +909,21 @@ mod tests {
         ] {
             assert!(!should_fallback_to_single(true, msg, 2), "{msg}");
         }
+    }
+
+    #[test]
+    fn paired_on_chain_second_crank_nonprogress_is_idle_without_retry() {
+        for ix in [2, 3] {
+            let msg = format!("Error processing Instruction {ix}: custom program error: 0x16");
+            let error_name = wrapper_error_name_for_crank(&msg, 2, true);
+            assert_eq!(error_name, Some("EngineNonProgress"));
+            assert_eq!(reject(error_name).class(), OutcomeClass::Idle);
+            assert!(!should_fallback_to_single(false, &msg, 2));
+        }
+        let second = "Error processing Instruction 3: custom program error: 0x16";
+        assert_eq!(wrapper_error_name_for_crank(second, 2, false), None);
+        let other = "Error processing Instruction 1: custom program error: 0x16";
+        assert_eq!(wrapper_error_name_for_crank(other, 2, true), None);
     }
 
     #[test]
