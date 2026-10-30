@@ -24,7 +24,7 @@
 //! the wrapper's resolved branch and the Hybrid same-slot rule return it
 //! atomically when there is nothing to do. Only other reverts are failures.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use percolator_prog::ix::{CrankObservationHint, Instruction as ProgInstruction};
 use solana_client::{
     client_error::{ClientError, ClientErrorKind},
@@ -317,7 +317,8 @@ pub fn submit_crank_routed(
         CrankRoute::Live { reward_portfolio } => *reward_portfolio,
         CrankRoute::Resolved { .. } => None,
     };
-    let (ixs, crank_ix_index) = build_crank_instructions(
+    let mut paired = matches!(route, CrankRoute::Live { .. }) && paired_crank_enabled();
+    let (mut ixs, crank_ix_index) = build_crank_instructions(
         program_id,
         &payer.pubkey(),
         market,
@@ -325,6 +326,7 @@ pub fn submit_crank_routed(
         route,
         observations,
         now_slot,
+        paired,
     );
     // On the Resolved route a backing hint can make market-only progress
     // (expiring a bucket) without touching the target, so the market
@@ -368,8 +370,8 @@ pub fn submit_crank_routed(
     // instructions with a fresh blockhash and stays within the one budget
     // reservation the caller took. The deadline is re-checked before every
     // send.
-    let mut last_err: Option<String> = None;
-    for attempt in 0..5 {
+    let mut attempt = 0;
+    loop {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Err(DeadlineReached.into());
         }
@@ -458,7 +460,7 @@ pub fn submit_crank_routed(
                 let msg = format!("{e}");
                 if msg.contains("Blockhash not found") && attempt < 4 {
                     std::thread::sleep(std::time::Duration::from_millis(400));
-                    last_err = Some(msg);
+                    attempt += 1;
                     continue;
                 }
                 // Definitive: the preflight simulation rejected it, or the tx
@@ -492,23 +494,34 @@ pub fn submit_crank_routed(
                         }
                         Ok(Some(Err(te))) => {
                             let error = format!("{te}");
+                            if paired && should_fallback_to_single(true, &error, crank_ix_index) {
+                                paired = false;
+                                ixs.truncate(crank_ix_index + 1);
+                                continue;
+                            }
                             let error_name = wrapper_error_name_for_ix(&error, crank_ix_index);
                             return Ok(CrankOutcome::HardReject { error, error_name, program_cu, tx_cu });
                         }
                         _ => return Err(Unconfirmed { signature, error: msg }.into()),
                     }
                 }
+                if paired && should_fallback_to_single(definitive, &msg, crank_ix_index) {
+                    paired = false;
+                    ixs.truncate(crank_ix_index + 1);
+                    continue;
+                }
                 let error_name = wrapper_error_name_for_ix(&msg, crank_ix_index);
                 return Ok(CrankOutcome::HardReject { error: msg, error_name, program_cu, tx_cu });
             }
         }
     }
-    Err(anyhow!(last_err.unwrap_or_else(|| "unknown submit error".to_string())))
 }
 
 /// The tx's instruction list: compute-budget ixs, (Resolved route) an
-/// idempotent owner-ATA create, then the crank. Returns the crank's index,
+/// idempotent owner-ATA create, then the crank (twice when Live and paired).
+/// Returns the first crank's index,
 /// which error attribution needs. Pure: no RPC.
+#[allow(clippy::too_many_arguments)]
 pub fn build_crank_instructions(
     program_id: &Pubkey,
     payer: &Pubkey,
@@ -517,6 +530,7 @@ pub fn build_crank_instructions(
     route: &CrankRoute<'_>,
     observations: &[FetchedObservation],
     now_slot: u64,
+    paired: bool,
 ) -> (Vec<Instruction>, usize) {
     // Hint counts must match the fetched oracle accounts, otherwise the
     // wrapper consumes the wrong number of tail accounts per hint.
@@ -583,7 +597,24 @@ pub fn build_crank_instructions(
         }
         .encode(),
     });
+    if paired && matches!(route, CrankRoute::Live { .. }) {
+        ixs.push(ixs[crank_index].clone());
+    }
     (ixs, crank_index)
+}
+
+/// Retry only a known atomic failure of the second crank, never an uncertain send.
+pub fn should_fallback_to_single(definitive: bool, msg: &str, crank_ix_index: usize) -> bool {
+    let Some((_, rest)) = msg.split_once("Error processing Instruction ") else {
+        return false;
+    };
+    let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    definitive && n.parse::<usize>().ok() == Some(crank_ix_index + 1)
+}
+
+/// Pairing is on unless explicitly disabled, like CRANKER_MEASURE_CU.
+fn paired_crank_enabled() -> bool {
+    std::env::var("CRANKER_PAIRED_CRANK").ok().as_deref() != Some("0")
 }
 
 /// Like [`wrapper_error_name`], but only when the error came from the
@@ -732,7 +763,7 @@ mod tests {
         );
         let route = CrankRoute::Resolved { owner, mint, vault, vault_authority: vault_auth };
         let hint = FetchedObservation { asset_index: 2, oracle_accounts: vec![] };
-        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route, &[hint], 9);
+        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route, &[hint], 9, true);
         assert_eq!(idx, 3, "cu, heap, ATA create, crank");
         assert_eq!(ixs[2].program_id, spl_associated_token_account::ID);
         let crank = &ixs[idx];
@@ -753,12 +784,12 @@ mod tests {
         );
         // Payer is not a signer of the crank unless it owns the portfolio.
         let route_self = CrankRoute::Resolved { owner: payer, mint, vault, vault_authority: vault_auth };
-        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route_self, &[], 9);
+        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route_self, &[], 9, true);
         assert!(ixs[idx].accounts[0].is_signer);
         // Wire: one oracle-less hint for asset 2.
         let (ixs, idx) = build_crank_instructions(
             &program, &payer, &market, &target, &route,
-            &[FetchedObservation { asset_index: 2, oracle_accounts: vec![] }], 9,
+            &[FetchedObservation { asset_index: 2, oracle_accounts: vec![] }], 9, true,
         );
         assert_eq!(&ixs[idx].data[9..], &[1, 2, 0, 0]);
     }
@@ -775,11 +806,66 @@ mod tests {
         );
         let route = CrankRoute::Live { reward_portfolio: Some(&reward) };
         let obs = FetchedObservation { asset_index: 0, oracle_accounts: vec![oracle] };
-        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route, &[obs], 1);
+        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route, &[obs], 1, false);
         assert_eq!(idx, 2);
         let keys: Vec<_> = ixs[idx].accounts.iter().map(|m| m.pubkey).collect();
         assert_eq!(keys, vec![payer, market, target, oracle, reward]);
         assert!(ixs[idx].accounts[0].is_signer);
+    }
+
+    #[test]
+    fn pairing_duplicates_only_live_cranks() {
+        let program = Pubkey::new_unique();
+        let payer = Pubkey::new_unique();
+        let market = Pubkey::new_unique();
+        let target = Pubkey::new_unique();
+        let live = CrankRoute::Live {
+            reward_portfolio: None,
+        };
+        let (single, idx) =
+            build_crank_instructions(&program, &payer, &market, &target, &live, &[], 7, false);
+        let (paired, paired_idx) =
+            build_crank_instructions(&program, &payer, &market, &target, &live, &[], 7, true);
+        assert_eq!(idx, 2);
+        assert_eq!(paired_idx, idx);
+        assert_eq!(single.len(), 3);
+        assert_eq!(paired.len(), 4);
+        assert_eq!(&paired[..single.len()], single.as_slice());
+        assert_eq!(paired[idx], paired[idx + 1]);
+        let resolved = CrankRoute::Resolved {
+            owner: payer,
+            mint: Pubkey::new_unique(),
+            vault: Pubkey::new_unique(),
+            vault_authority: Pubkey::new_unique(),
+        };
+        let (off, idx) =
+            build_crank_instructions(&program, &payer, &market, &target, &resolved, &[], 7, false);
+        let (on, _) =
+            build_crank_instructions(&program, &payer, &market, &target, &resolved, &[], 7, true);
+        assert_eq!(idx, 3);
+        assert_eq!(off.len(), 4);
+        assert_eq!(on, off);
+    }
+
+    #[test]
+    fn fallback_requires_definitive_second_instruction_attribution() {
+        for suffix in [
+            "custom program error: 0x16",
+            "Computational budget exceeded",
+        ] {
+            let msg = format!("Error processing Instruction 3: {suffix}");
+            assert!(should_fallback_to_single(true, &msg, 2));
+            assert!(!should_fallback_to_single(false, &msg, 2));
+            assert!(!should_fallback_to_single(true, &msg, 3));
+        }
+        for msg in [
+            "custom program error: 0x16",
+            "Error processing Instruction x: error",
+            "Error processing Instruction 30: error",
+            "Error processing Instruction 1: error",
+        ] {
+            assert!(!should_fallback_to_single(true, msg, 2), "{msg}");
+        }
     }
 
     #[test]

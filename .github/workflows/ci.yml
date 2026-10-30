@@ -172,6 +172,8 @@ jobs:
       # ~/.cache/solana/v1.52 before building. The Solana cache keeps both.)
       - name: SBF build + local bring-up
         run: ./scripts/m1_bringup.sh
+      - name: local money-path tests
+        run: cargo test --release --manifest-path "$CRANKER_MANIFEST" --test money_path
       - name: keeper dry-run (3 cycles)
         run: |
           export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
