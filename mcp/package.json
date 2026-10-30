@@ -1,0 +1,26 @@
+{
+  "name": "drip-mcp",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "description": "MCP server for the drip devnet SOL-PERP market (Percolator v16). Devnet, test tokens only.",
+  "keywords": ["mcp", "solana", "perps", "percolator", "devnet"],
+  "type": "module",
+  "bin": { "drip-mcp": "dist/drip-mcp.js" },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc --noEmit && esbuild src/index.ts --bundle --platform=node --format=esm --packages=external --external:@solana/web3.js --banner:js='#!/usr/bin/env node' --outfile=dist/drip-mcp.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32",
+    "@solana/web3.js": "1.98.4",
+    "zod": "^4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.28.0",
+    "typescript": "6.0.3",
+    "vitest": "5.0.3"
+  }
+}
