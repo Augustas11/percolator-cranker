@@ -13,6 +13,7 @@ pub fn cors<'a>(origin: Option<&'a str>, allowed: &[String]) -> Option<&'a str> 
 pub enum Query {
     Health,
     Stats,
+    Leaderboard,
     Fills {
         portfolio: String,
         limit: u64,
@@ -25,7 +26,10 @@ pub enum Query {
 }
 pub fn parse(url: &str) -> Result<Query> {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
-    if !matches!(path, "/health" | "/stats" | "/fills" | "/positions") {
+    if !matches!(
+        path,
+        "/health" | "/stats" | "/leaderboard" | "/fills" | "/positions"
+    ) {
         return Ok(Query::NotFound);
     }
     let mut pairs = BTreeMap::new();
@@ -52,6 +56,7 @@ pub fn parse(url: &str) -> Result<Query> {
     Ok(match path {
         "/health" => Query::Health,
         "/stats" => Query::Stats,
+        "/leaderboard" => Query::Leaderboard,
         "/positions" => Query::Positions {
             owner: pubkey("owner")?,
         },
@@ -91,6 +96,7 @@ fn query(c: &Connection, cfg: &Config, q: Query) -> Result<(u16, Value)> {
                 "backfill_complete":db::meta(c,"backfill_complete")?.as_deref()==Some("true"),"lag_secs":lag})
             }
             Query::Stats => db::cached_stats(c, cfg)?,
+            Query::Leaderboard => db::cached_leaderboard(c, cfg)?,
             Query::Fills {
                 portfolio,
                 limit,
@@ -251,6 +257,7 @@ mod tests {
     #[test]
     fn query_validation() {
         let p = "11111111111111111111111111111111";
+        assert_eq!(parse("/leaderboard").unwrap(), Query::Leaderboard);
         assert_eq!(
             parse(&format!("/fills?portfolio={p}")).unwrap(),
             Query::Fills {
@@ -276,6 +283,7 @@ mod tests {
             "/positions?owner=bad",
             "/fills?portfolio=bad",
             "/stats?x=1",
+            "/leaderboard?x=1",
         ] {
             assert!(parse(url).is_err(), "{url}");
         }

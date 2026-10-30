@@ -20,6 +20,7 @@ pub struct Config {
     pub db: PathBuf,
     pub bind: String,
     pub cors_origins: Vec<String>,
+    pub leaderboard_exclude: Vec<String>,
     pub poll_secs: u64,
     pub rpc_delay_ms: u64,
     pub cycle_secs: u64,
@@ -38,6 +39,7 @@ impl Config {
                 "cors-origins",
                 "http://localhost:5173,http://127.0.0.1:5173",
             ),
+            ("leaderboard-exclude", "6wH2d4CARhEWeGC2deBDb9pVT1a7Tgd48VUiFmkTNAHY,TVA9xtfvX8uiFAqDHCpeD4HzwT6CYb5iwD6J16cba46,GUvzajrrfWpizSGj38iCC7TfB7rbbWxTgCszPAh1VRyh,Fxi2q4iFrhPpfemCzkCK2haseAuoh6GvK7h7zwmaNZeu,CUJ86gVNfnTowKt3k7QVbCa589hpUtZhiypEnt9Ben8B,ANNQ2dksYNTWJG33jo5okUPb7AqpjUu6gcMN62bWdJc7"),
             ("poll-secs", "10"),
             ("rpc-delay-ms", "250"),
             ("cycle-secs", "3"),
@@ -79,6 +81,15 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
                 .collect(),
+            leaderboard_exclude: get("leaderboard-exclude")
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    Pubkey::from_str(s).context("invalid leaderboard-exclude pubkey")?;
+                    Ok(s.to_owned())
+                })
+                .collect::<Result<Vec<_>>>()?,
             poll_secs: number("poll-secs")?,
             rpc_delay_ms: number("rpc-delay-ms")?,
             cycle_secs: number("cycle-secs")?,
@@ -152,6 +163,23 @@ fn run(command: &str, cfg: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn leaderboard_exclude_validates_pubkeys_and_accepts_empty_override() {
+        let (_, cfg) =
+            Config::parse(["serve".into(), "--leaderboard-exclude".into(), "".into()]).unwrap();
+        assert!(cfg.leaderboard_exclude.is_empty());
+        let p = "11111111111111111111111111111111";
+        let (_, cfg) = Config::parse([
+            "serve".into(),
+            "--leaderboard-exclude".into(),
+            format!(" {p}, {p} "),
+        ])
+        .unwrap();
+        assert_eq!(cfg.leaderboard_exclude, vec![p, p]);
+        assert!(
+            Config::parse(["serve".into(), "--leaderboard-exclude".into(), "bad".into()]).is_err()
+        );
+    }
     #[test]
     fn rpc_redaction_covers_error_chains_and_repeated_urls() {
         let url = "https://rpc.invalid/private-key";

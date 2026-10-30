@@ -1,4 +1,4 @@
-import type { Fills, IndexerClient, Positions, Stats } from "./client";
+import type { Fills, IndexerClient, Leaderboard, Positions, Stats } from "./client";
 
 export class MockIndexerClient implements IndexerClient {
   readonly mock = true;
@@ -9,6 +9,13 @@ export class MockIndexerClient implements IndexerClient {
       cranks: { total: 200, success_rate: 0.98 }, uptime: { uptime_pct: 99.5 },
       liquidations_observed: 2, liquidations_since_slot: 800,
       open_interest: { asset_0: { long_q: "2500000", short_q: "2500000", lifecycle: "active" } },
+    };
+  }
+
+  async leaderboard(): Promise<Leaderboard> {
+    return { as_of_slot: 1000,
+      note: "devnet, test tokens. PnL = equity (capital + engine PnL at the last indexed change, open positions marked at the last crank) minus net deposits.",
+      entries: [{ rank: 1, wallet: "mock-trader-wallet", pnl: "12500000", equity: "1012500000", net_deposits: "1000000000", trades: 4, open_positions: 1, portfolios: ["mock-portfolio"] }],
     };
   }
 
