@@ -18,9 +18,8 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function render(path: string, indexer: IndexerClient | null = new MockIndexerClient()) {
+async function render(path: string, indexer: IndexerClient | null = new MockIndexerClient(), client = new MockMarketClient({ autoTick: false })) {
   window.history.pushState({}, "", path);
-  const client = new MockMarketClient({ autoTick: false });
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -104,6 +103,36 @@ test("arena shows the placeholder when no leaderboard file exists", async () => 
   if (Object.keys(import.meta.glob("../arena/Leaderboard.tsx")).length) return;
   const container = await render(site.paths.arena);
   expect(container.textContent).toContain("Leaderboard coming soon.");
+});
+
+test("keeps collateral disabled across navigation while a deposit is pending", async () => {
+  vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+  const client = new MockMarketClient({ autoTick: false });
+  const deposit = vi.spyOn(client, "deposit").mockImplementation(() => new Promise(() => {}));
+  const container = await render(site.paths.home, null, client);
+  expect(container.querySelector("#amount")).toBeNull();
+  async function navigate(path: string) {
+    const link = container.querySelector<HTMLAnchorElement>(`nav a[href="${path}"]`)!;
+    await act(async () => { link.click(); });
+  }
+  await navigate(site.paths.trade);
+  await act(async () => { container.querySelector<HTMLButtonElement>('[title="Connect wallet"]')!.click(); });
+  const amount = container.querySelector<HTMLInputElement>("#amount")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(amount, "100");
+    amount.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const button = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Deposit")!;
+  await act(async () => { button.click(); });
+  expect(deposit).toHaveBeenCalledWith(100);
+  await navigate(site.paths.tools);
+  expect(container.querySelector(".site-page h1")?.textContent).toBe("Tools");
+  expect(container.querySelector("#amount")?.closest("[hidden]")).not.toBeNull();
+  await navigate(site.paths.trade);
+  expect(container.querySelector("#amount")?.closest("[hidden]")).toBeNull();
+  expect(container.querySelector<HTMLFieldSetElement>('[aria-labelledby="collateral-heading"] fieldset')!.disabled).toBe(true);
+  await act(async () => { button.click(); });
+  expect(deposit).toHaveBeenCalledTimes(1);
 });
 
 test("copy writes the MCP install command and resets after two seconds", async () => {

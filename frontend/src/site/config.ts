@@ -1,5 +1,7 @@
+import { devnetConfig } from "../chain/config";
+
 const repo = "https://github.com/Augustas11/drip";
-const market = "HyMKxfct1S9aFtq21GG3FUYUViQkmpZdk5pwGRtAz48C";
+const market = devnetConfig.market.toBase58();
 
 export const site = {
   heroLine: null as string | null, // TODO-OWNER: hero line slot. null = not rendered.
@@ -9,7 +11,7 @@ export const site = {
   runbook: `${repo}/blob/main/docs/RUNBOOK.md`,
   officialSite: "https://drip-devnet.vercel.app",
   explorerAddress: (id: string) => `https://explorer.solana.com/address/${id}?cluster=devnet`,
-  programId: "GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS",
+  programId: devnetConfig.programId.toBase58(),
   market,
   mcp: {
     final: false, // TODO-MCP: flip when the MCP package ships

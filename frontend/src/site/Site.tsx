@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import App from "../App";
 import type { MarketClient } from "../market/types";
 import type { IndexerClient } from "../indexer/client";
@@ -14,6 +14,8 @@ import "./site.css";
 
 export default function Site({ client, indexer, indexerBase = null }: { client: MarketClient; indexer: IndexerClient | null; indexerBase?: string | null }) {
   const path = usePath();
+  const [tradeMounted, setTradeMounted] = useState(path === site.paths.trade);
+  useEffect(() => { if (path === site.paths.trade) setTradeMounted(true); }, [path]);
   const titles: Record<string, string> = { [site.paths.home]: "drip", [site.paths.tools]: "Tools · drip", [site.paths.arena]: "Arena · drip", [site.paths.build]: "Build · drip", [site.paths.trade]: "Trade · drip" };
   const title = titles[path] ?? "Page not found · drip";
   useEffect(() => { document.title = title; }, [title]);
@@ -25,7 +27,8 @@ export default function Site({ client, indexer, indexerBase = null }: { client: 
 
   return <div className="site">
     <Nav />
-    {path === site.paths.trade ? <App client={client} indexer={indexer} /> : <main className="site-page">{page}</main>}
+    {tradeMounted && <div hidden={path !== site.paths.trade}><App client={client} indexer={indexer} /></div>}
+    {path !== site.paths.trade && <main className="site-page">{page}</main>}
     <Footer />
   </div>;
 }
