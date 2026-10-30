@@ -112,6 +112,10 @@ pub struct OracleCfg {
     pub push_poll_ms: u64,
     #[serde(default = "default_confirm_poll_ms")]
     pub confirm_poll_ms: u64,
+    /// A push not seen this long after send was dropped: resend with a fresh
+    /// mark instead of holding the price thread (pushes land in ~0.5 s).
+    #[serde(default = "default_push_confirm_timeout_ms")]
+    pub push_confirm_timeout_ms: u64,
     #[serde(default = "default_accrual_lag_slots")]
     pub accrual_lag_slots: u64,
     #[serde(default = "default_accrual_max_cranks")]
@@ -136,6 +140,7 @@ fn default_exchange_min_venues() -> usize { 2 }
 fn default_accrual_lag_slots() -> u64 { 32 }
 fn default_accrual_max_cranks() -> u64 { 10 }
 fn default_confirm_poll_ms() -> u64 { 500 }
+fn default_push_confirm_timeout_ms() -> u64 { 5000 }
 fn default_push_poll_ms() -> u64 { 400 }
 fn default_push_min_move_bps() -> u64 { 1 }
 fn default_priority_fee() -> u64 { 10_000 }
