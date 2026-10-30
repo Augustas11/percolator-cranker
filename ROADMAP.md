@@ -175,7 +175,9 @@ open, close, withdraw) with test USDC from a faucet.
 2. **Solvency:** unowned collateral stays bounded; every resolved claimant
    is paid.
 3. **Lifecycle:** SOL goes listing → Live → Recovery → Resolved → relisted
-   under real trading.
+   under real trading. *Drill passed on devnet 2026-10-30, every account
+   closed or paid, 0.0226 SOL net (`docs/LIFECYCLE_DRILL.md`). Not yet
+   covered: SHUTDOWN during live fills, and a backing roll (F1).*
 4. **Operations:** the pusher, matcher and backing manager run unattended;
    every incident is handled from the playbook.
 5. **Economics:** measured operator income (LP spread, backing fees,
