@@ -14,6 +14,10 @@ pub enum Query {
     Health,
     Stats,
     Leaderboard,
+    Season,
+    RecentFills {
+        limit: u64,
+    },
     Fills {
         portfolio: String,
         limit: u64,
@@ -28,7 +32,13 @@ pub fn parse(url: &str) -> Result<Query> {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
     if !matches!(
         path,
-        "/health" | "/stats" | "/leaderboard" | "/fills" | "/positions"
+        "/health"
+            | "/stats"
+            | "/leaderboard"
+            | "/fills"
+            | "/fills/recent"
+            | "/season"
+            | "/positions"
     ) {
         return Ok(Query::NotFound);
     }
@@ -42,6 +52,7 @@ pub fn parse(url: &str) -> Result<Query> {
     }
     let allowed: &[&str] = match path {
         "/fills" => &["portfolio", "limit", "before"],
+        "/fills/recent" => &["limit"],
         "/positions" => &["owner"],
         _ => &[],
     };
@@ -57,6 +68,16 @@ pub fn parse(url: &str) -> Result<Query> {
         "/health" => Query::Health,
         "/stats" => Query::Stats,
         "/leaderboard" => Query::Leaderboard,
+        "/season" => Query::Season,
+        "/fills/recent" => {
+            let limit = pairs
+                .get("limit")
+                .unwrap_or(&"20")
+                .parse::<u64>()
+                .context("invalid limit")?;
+            anyhow::ensure!((1..=100).contains(&limit), "limit must be 1..100");
+            Query::RecentFills { limit }
+        }
         "/positions" => Query::Positions {
             owner: pubkey("owner")?,
         },
@@ -97,6 +118,8 @@ fn query(c: &Connection, cfg: &Config, q: Query) -> Result<(u16, Value)> {
             }
             Query::Stats => db::cached_stats(c, cfg)?,
             Query::Leaderboard => db::cached_leaderboard(c, cfg)?,
+            Query::Season => db::cached_season(c, cfg)?,
+            Query::RecentFills { limit } => db::cached_recent_fills(c, limit)?,
             Query::Fills {
                 portfolio,
                 limit,
@@ -253,6 +276,41 @@ mod tests {
         ] {
             assert_eq!(cors(origin, &allowed), None);
         }
+    }
+    #[test]
+    fn season_and_recent_queries() {
+        assert_eq!(parse("/season").unwrap(), Query::Season);
+        assert_eq!(
+            parse("/fills/recent").unwrap(),
+            Query::RecentFills { limit: 20 }
+        );
+        assert_eq!(
+            parse("/fills/recent?limit=100").unwrap(),
+            Query::RecentFills { limit: 100 }
+        );
+        for url in [
+            "/season?limit=1",
+            "/season?x=1",
+            "/fills/recent?portfolio=x",
+            "/fills/recent?before=x",
+            "/fills/recent?limit=0",
+            "/fills/recent?limit=101",
+            "/fills/recent?limit=-1",
+            "/fills/recent?limit=no",
+            "/fills/recent?limit=1&limit=2",
+        ] {
+            assert!(parse(url).is_err(), "{url}");
+        }
+        let c = db::open(std::path::Path::new(":memory:")).unwrap();
+        let (_, cfg) = Config::parse(["serve".into()]).unwrap();
+        assert_eq!(
+            query(&c, &cfg, Query::Season).unwrap().1,
+            db::cached_season(&c, &cfg).unwrap()
+        );
+        assert_eq!(
+            query(&c, &cfg, Query::RecentFills { limit: 20 }).unwrap().1,
+            json!({"fills":[]})
+        );
     }
     #[test]
     fn query_validation() {

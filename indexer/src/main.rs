@@ -21,6 +21,7 @@ pub struct Config {
     pub bind: String,
     pub cors_origins: Vec<String>,
     pub leaderboard_exclude: Vec<String>,
+    pub start_slot: Option<u64>,
     pub poll_secs: u64,
     pub rpc_delay_ms: u64,
     pub cycle_secs: u64,
@@ -40,6 +41,7 @@ impl Config {
                 "http://localhost:5173,http://127.0.0.1:5173",
             ),
             ("leaderboard-exclude", "6wH2d4CARhEWeGC2deBDb9pVT1a7Tgd48VUiFmkTNAHY,TVA9xtfvX8uiFAqDHCpeD4HzwT6CYb5iwD6J16cba46,GUvzajrrfWpizSGj38iCC7TfB7rbbWxTgCszPAh1VRyh,Fxi2q4iFrhPpfemCzkCK2haseAuoh6GvK7h7zwmaNZeu,CUJ86gVNfnTowKt3k7QVbCa589hpUtZhiypEnt9Ben8B,ANNQ2dksYNTWJG33jo5okUPb7AqpjUu6gcMN62bWdJc7"),
+            ("start-slot", ""),
             ("poll-secs", "10"),
             ("rpc-delay-ms", "250"),
             ("cycle-secs", "3"),
@@ -90,6 +92,11 @@ impl Config {
                     Ok(s.to_owned())
                 })
                 .collect::<Result<Vec<_>>>()?,
+            start_slot: if get("start-slot").is_empty() {
+                None
+            } else {
+                Some(number("start-slot")?)
+            },
             poll_secs: number("poll-secs")?,
             rpc_delay_ms: number("rpc-delay-ms")?,
             cycle_secs: number("cycle-secs")?,
@@ -125,6 +132,7 @@ fn main() -> Result<()> {
 }
 fn run(command: &str, cfg: &Config) -> Result<()> {
     let mut conn = db::open(&cfg.db)?;
+    db::check_start_slot(&conn, cfg.start_slot)?;
     // Refuse mixing programs/markets; an RPC provider may change on the same network.
     for (key, value) in [
         ("program", cfg.program.to_string()),
@@ -178,6 +186,43 @@ mod tests {
         assert_eq!(cfg.leaderboard_exclude, vec![p, p]);
         assert!(
             Config::parse(["serve".into(), "--leaderboard-exclude".into(), "bad".into()]).is_err()
+        );
+    }
+    #[test]
+    fn start_slot_parses_optional_u64() {
+        for (value, expected) in [
+            ("", None),
+            ("0", Some(0)),
+            ("123", Some(123)),
+            ("18446744073709551615", Some(u64::MAX)),
+        ] {
+            let (_, cfg) =
+                Config::parse(["serve".into(), "--start-slot".into(), value.into()]).unwrap();
+            assert_eq!(cfg.start_slot, expected);
+        }
+        for value in ["-1", "bad", "18446744073709551616"] {
+            assert!(Config::parse(["serve".into(), "--start-slot".into(), value.into()]).is_err());
+        }
+    }
+    #[test]
+    fn empty_start_slot_environment_is_unset() {
+        // Keep environment overrides in a child so parallel config tests are unaffected.
+        const CHILD: &str = "INDEXER_TEST_EMPTY_START_SLOT";
+        if std::env::var_os(CHILD).is_some() {
+            let (_, cfg) = Config::parse(["serve".into()]).unwrap();
+            assert_eq!(cfg.start_slot, None);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::empty_start_slot_environment_is_unset"])
+            .env(CHILD, "1")
+            .env("INDEXER_START_SLOT", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
         );
     }
     #[test]

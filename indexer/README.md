@@ -4,7 +4,8 @@ A synchronous, read-only Solana poller for the devnet SOL-PERP market. It decode
 landed top-level wrapper instructions, keeps SQLite WAL history and portfolio
 snapshots, and serves frontend history/positions plus honest keeper statistics.
 It never submits transactions. Executed NoCpi fill count is reported; CPI requests
-are retained separately. Volume/notional is not reported.
+are retained separately. Season volume uses each fill's reported price; open
+interest uses the latest mark.
 
 From the repository root:
 
@@ -43,6 +44,7 @@ Flags override environment variables. All flags take a separate value.
 | `--bind` | `INDEXER_BIND` | `127.0.0.1:8090` |
 | `--cors-origins` | `INDEXER_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` |
 | `--leaderboard-exclude` | `INDEXER_LEADERBOARD_EXCLUDE` | Six devnet matcher/bot portfolio and owner pubkeys listed below |
+| `--start-slot` | `INDEXER_START_SLOT` | Unset (full history); use a fresh DB per season |
 | `--poll-secs` | `INDEXER_POLL_SECS` | `10` |
 | `--rpc-delay-ms` | `INDEXER_RPC_DELAY_MS` | `250` |
 | `--cycle-secs` | `INDEXER_CYCLE_SECS` | `3` |
@@ -144,6 +146,10 @@ Every fill includes:
 ```json
 {"fills":[],"next_before":null}
 ```
+
+`GET /fills/recent?limit=20` — newest agent taker fills, executed or requested; limit 1..100.
+
+`GET /season` — season 0 totals, cached per ingest pass; no query parameters.
 
 `GET /positions?owner=EdcNDZxPK6NPSQW4Yo8Di1veA9PRpVo9cr4Zgq99tSXo`
 — latest changed snapshot per currently existing portfolio, with capital, pnl and active legs.

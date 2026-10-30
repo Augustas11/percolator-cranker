@@ -50,6 +50,7 @@ services:
       INDEXER_PROGRAM_ID: ${PERCOLATOR_PROGRAM_ID}
       INDEXER_MARKET: ${INDEXER_MARKET:?set INDEXER_MARKET}
       INDEXER_DB: /data/indexer.sqlite
+      INDEXER_START_SLOT: ${INDEXER_START_SLOT:-}
     volumes: ["${INDEXER_DATA_DIR:?set INDEXER_DATA_DIR}:/data"]
     ports:
       - "${INDEXER_PUBLIC_PORT:-127.0.0.1:8091}:8091"

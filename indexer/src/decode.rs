@@ -780,6 +780,12 @@ pub(crate) mod tests {
             fixture("init_portfolio").instructions[0].name,
             "InitPortfolio"
         );
+        assert_eq!(
+            fixture("init_portfolio").instructions[0]
+                .portfolio
+                .as_deref(),
+            Some(A)
+        );
         assert_eq!(fixture("push_mark").instructions[0].name, "PushAuthMark");
         assert_eq!(fixture("push_mark").instructions[0].tag, Some(63));
     }

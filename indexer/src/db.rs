@@ -32,7 +32,11 @@ CREATE TABLE IF NOT EXISTS transfers(signature TEXT,ix_index INTEGER,slot INTEGE
 CREATE TABLE IF NOT EXISTS portfolio_snapshots(portfolio TEXT,slot INTEGER,taken_at INTEGER,owner TEXT,capital TEXT,pnl TEXT,positions_json TEXT,PRIMARY KEY(portfolio,slot));
 CREATE TABLE IF NOT EXISTS liquidations(portfolio TEXT,slot INTEGER,signature TEXT,before_json TEXT,after_json TEXT,PRIMARY KEY(portfolio,signature));
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT);
+CREATE INDEX IF NOT EXISTS txs_slot ON txs(slot,signature);
+CREATE INDEX IF NOT EXISTS fills_slot ON fills(slot DESC,signature DESC,ix_index DESC,leg DESC);
+CREATE INDEX IF NOT EXISTS instructions_portfolio ON instructions(portfolio, name);
 CREATE INDEX IF NOT EXISTS fills_taker_slot ON fills(taker_portfolio,slot);
+CREATE INDEX IF NOT EXISTS fills_taker_slot_order ON fills(taker_portfolio,slot DESC,signature DESC,ix_index DESC,leg DESC);
 CREATE INDEX IF NOT EXISTS fills_maker_slot ON fills(maker_portfolio,slot);
 CREATE INDEX IF NOT EXISTS transfers_portfolio ON transfers(portfolio);
 CREATE INDEX IF NOT EXISTS snapshots_latest ON portfolio_snapshots(portfolio,slot DESC);
@@ -49,6 +53,22 @@ pub fn set_meta(c: &Connection, key: &str, value: &str) -> Result<()> {
     c.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,value])?;
     Ok(())
 }
+pub fn check_start_slot(c: &Connection, start_slot: Option<u64>) -> Result<()> {
+    if let Some(existing) = meta(c, "start_slot")? {
+        anyhow::ensure!(
+            Some(existing.parse::<u64>()?) == start_slot,
+            "database start_slot differs from configuration; use a fresh DB for a new season"
+        );
+    } else if let Some(slot) = start_slot {
+        anyhow::ensure!(
+            meta(c, "oldest_signature")?.is_none(),
+            "database already has ingested history; use a fresh DB for a new season"
+        );
+        set_meta(c, "start_slot", &slot.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn contains(c: &Connection, signature: &str) -> Result<bool> {
     Ok(c.query_row(
         "SELECT EXISTS(SELECT 1 FROM txs WHERE signature=?1)",
@@ -233,7 +253,7 @@ pub fn stats(c: &Connection, cfg: &Config, now: i64) -> Result<Value> {
         r.get(0)
     })?;
     Ok(
-        json!({"market":cfg.market.to_string(),"program":cfg.program.to_string(),
+        json!({"since_slot":cfg.start_slot,"market":cfg.market.to_string(),"program":cfg.program.to_string(),
         "as_of_slot":meta(c,"last_ingest_slot")?.and_then(|s|s.parse::<u64>().ok()),
         "as_of":meta(c,"last_ingest_at")?.and_then(|s|s.parse::<i64>().ok()),"cranks":cranks,"uptime":uptime,
         "liquidations_observed":count("SELECT COUNT(*) FROM liquidations")?,"liquidations_since_slot":since,
@@ -278,25 +298,27 @@ pub fn cached_stats(c: &Connection, cfg: &Config) -> Result<Value> {
     let (cranks, uptime) =
         stats::cranks_and_uptime(&[], 0, cfg.cycle_secs, cfg.uptime_slack_cycles);
     Ok(
-        json!({"market":cfg.market.to_string(),"program":cfg.program.to_string(),
+        json!({"since_slot":cfg.start_slot,"market":cfg.market.to_string(),"program":cfg.program.to_string(),
         "as_of_slot":null,"as_of":null,"cranks":cranks,"uptime":uptime,
         "liquidations_observed":0,"liquidations_since_slot":null,"open_interest":{},
         "depositors":0,"portfolios":0,"fills":0,"mode":null,
         "materialized_portfolio_count":null,"insurance":null,"vault":null}),
     )
 }
+const FILL_MARK: &str = "(SELECT m.price FROM marks m WHERE m.asset_index=f.asset_index AND m.market_id=f.market_id
+         AND (m.slot<f.slot OR (m.signature=f.signature AND m.ix_index<f.ix_index))
+         ORDER BY m.slot DESC,length(m.observation_sequence) DESC,m.observation_sequence DESC,m.signature DESC,m.ix_index DESC LIMIT 1)";
+
 pub fn fills(c: &Connection, portfolio: &str, limit: u64, before: Option<&str>) -> Result<Value> {
     let cursor = before.map(fill_cursor).transpose()?;
     let (slot, signature, ix, leg) = cursor.unwrap_or((i64::MAX, String::new(), 0, 0));
-    let mut stmt = c.prepare(
+    let mut stmt = c.prepare(&format!(
         "SELECT f.*,
-        (SELECT m.price FROM marks m WHERE m.asset_index=f.asset_index AND m.market_id=f.market_id
-         AND (m.slot<f.slot OR (m.signature=f.signature AND m.ix_index<f.ix_index))
-         ORDER BY m.slot DESC,length(m.observation_sequence) DESC,m.observation_sequence DESC,m.signature DESC,m.ix_index DESC LIMIT 1)
+        {FILL_MARK}
         FROM fills f WHERE (taker_portfolio=?1 OR maker_portfolio=?1)
         AND (?2 IS NULL OR (f.slot,f.signature,f.ix_index,f.leg)<(?3,?4,?5,?6))
         ORDER BY f.slot DESC,f.signature DESC,f.ix_index DESC,f.leg DESC LIMIT ?7",
-    )?;
+    ))?;
     let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Value> {
         let size: String = r.get(11)?;
         let taker: String = r.get(5)?;
@@ -359,6 +381,18 @@ pub fn cached_leaderboard(c: &Connection, cfg: &Config) -> Result<Value> {
     leaderboard(c, cfg)
 }
 
+// All arena queries use the same owner resolution, exclusions and season entrants.
+fn agent_portfolio(portfolio: &str) -> String {
+    format!("SELECT owner FROM (SELECT COALESCE(
+        (SELECT owner FROM portfolio_snapshots WHERE portfolio={portfolio} ORDER BY slot DESC LIMIT 1),
+        (SELECT signer FROM transfers WHERE portfolio={portfolio} AND kind='deposit' AND ok=1
+         AND slot<=?1 ORDER BY slot,signature,ix_index LIMIT 1)) AS owner)
+    WHERE {portfolio} NOT IN (SELECT value FROM json_each(?3))
+    AND owner IS NOT NULL AND owner NOT IN (SELECT value FROM json_each(?3))
+    AND (?2=0 OR EXISTS(SELECT 1 FROM instructions i JOIN txs t ON t.signature=i.signature
+        WHERE i.portfolio={portfolio} AND i.name='InitPortfolio' AND t.ok=1))")
+}
+
 pub fn leaderboard(c: &Connection, cfg: &Config) -> Result<Value> {
     #[derive(Default)]
     struct Entry {
@@ -372,36 +406,34 @@ pub fn leaderboard(c: &Connection, cfg: &Config) -> Result<Value> {
         .map(|s| s.parse::<u64>())
         .transpose()?;
     let mut wallets: BTreeMap<String, Entry> = BTreeMap::new();
-    let mut stmt = c.prepare(
-        "SELECT p.portfolio,
-            COALESCE(s.owner, (SELECT signer FROM transfers WHERE portfolio=p.portfolio
-                AND kind='deposit' AND ok=1 AND slot<=?1 ORDER BY slot,signature,ix_index LIMIT 1)),
-            COALESCE(s.capital,'0'),COALESCE(s.pnl,'0'),COALESCE(s.positions_json,'[]'),
-            c.portfolio IS NOT NULL
-         FROM (SELECT portfolio FROM portfolio_snapshots
-               UNION SELECT portfolio FROM transfers WHERE ok=1 AND slot<=?1) p
-         LEFT JOIN portfolio_snapshots s ON s.portfolio=p.portfolio
-            AND s.slot=(SELECT MAX(slot) FROM portfolio_snapshots WHERE portfolio=p.portfolio)
-         LEFT JOIN current_portfolios c ON c.portfolio=p.portfolio
-         WHERE ?1 IS NOT NULL ORDER BY p.portfolio",
+    let agent = agent_portfolio("a.portfolio");
+    let mut stmt = c.prepare(&format!(
+        "SELECT a.portfolio,({agent}),COALESCE(s.capital,'0'),COALESCE(s.pnl,'0'),
+            COALESCE(s.positions_json,'[]'),c.portfolio IS NOT NULL
+        FROM (SELECT portfolio FROM portfolio_snapshots
+              UNION SELECT portfolio FROM transfers WHERE ok=1 AND slot<=?1) a
+        LEFT JOIN portfolio_snapshots s ON s.portfolio=a.portfolio
+            AND s.slot=(SELECT MAX(slot) FROM portfolio_snapshots WHERE portfolio=a.portfolio)
+        LEFT JOIN current_portfolios c ON c.portfolio=a.portfolio
+        WHERE ?1 IS NOT NULL AND EXISTS({agent}) ORDER BY a.portfolio"
+    ))?;
+    let excluded = serde_json::to_string(&cfg.leaderboard_exclude)?;
+    let rows = stmt.query_map(
+        params![observed_slot, cfg.start_slot.is_some(), excluded],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, bool>(5)?,
+            ))
+        },
     )?;
-    let rows = stmt.query_map([observed_slot], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, Option<String>>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, bool>(5)?,
-        ))
-    })?;
     for row in rows {
         let (portfolio, owner, capital, pnl, positions, current) = row?;
         let Some(owner) = owner else { continue };
-        if cfg.leaderboard_exclude.contains(&portfolio) || cfg.leaderboard_exclude.contains(&owner)
-        {
-            continue;
-        }
         let entry = wallets.entry(owner).or_default();
         let equity = if current {
             capital
@@ -480,7 +512,183 @@ pub fn leaderboard(c: &Connection, cfg: &Config) -> Result<Value> {
         .map(|s| s.parse::<u64>())
         .transpose()?;
     Ok(
-        json!({"as_of_slot":slot,"note":"devnet, test tokens. PnL = equity (capital + engine PnL at the last indexed change, open positions marked at the last crank) minus net deposits.","entries":entries}),
+        json!({"since_slot":cfg.start_slot,"as_of_slot":slot,"note":"devnet, test tokens. PnL = equity (capital + engine PnL at the last indexed change, open positions marked at the last crank) minus net deposits.","entries":entries}),
+    )
+}
+
+pub fn agent_portfolios(c: &Connection, cfg: &Config) -> Result<BTreeMap<String, String>> {
+    let observed = meta(c, "observed_slot")?
+        .map(|s| s.parse::<u64>())
+        .transpose()?;
+    let agent = agent_portfolio("a.portfolio");
+    let mut stmt = c.prepare(&format!(
+        "SELECT a.portfolio,({agent}) FROM
+        (SELECT portfolio FROM portfolio_snapshots UNION SELECT portfolio FROM transfers WHERE ok=1 AND slot<=?1) a
+        WHERE ?1 IS NOT NULL AND EXISTS({agent})"
+    ))?;
+    let rows = stmt.query_map(
+        params![
+            observed,
+            cfg.start_slot.is_some(),
+            serde_json::to_string(&cfg.leaderboard_exclude)?
+        ],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn cached_recent_fills(c: &Connection, limit: u64) -> Result<Value> {
+    let mut value: Value = meta(c, "recent_fills_json")?
+        .map(|s| serde_json::from_str(&s))
+        .transpose()?
+        .unwrap_or_else(|| json!({"fills":[]}));
+    if let Some(fills) = value["fills"].as_array_mut() {
+        fills.truncate(limit as usize);
+    }
+    Ok(value)
+}
+
+pub fn recent_fills(c: &Connection, agents: &BTreeMap<String, String>) -> Result<Value> {
+    // Each portfolio contributes at most 100 candidates through its ordering index.
+    // Resolve historical marks only for the final 100 rows after merging.
+    let mut stmt = c.prepare(
+        "SELECT signature,ix_index,leg,slot FROM fills
+        WHERE taker_portfolio=?1 AND status IN ('executed','requested')
+        ORDER BY slot DESC,signature DESC,ix_index DESC,leg DESC LIMIT 100",
+    )?;
+    let mut candidates = Vec::new();
+    for portfolio in agents.keys() {
+        for row in stmt.query_map([portfolio], |r| {
+            Ok((
+                r.get::<_, u64>(3)?,
+                r.get::<_, String>(0)?,
+                r.get::<_, u64>(1)?,
+                r.get::<_, u64>(2)?,
+            ))
+        })? {
+            candidates.push(row?);
+        }
+    }
+    candidates.sort_unstable_by(|a, b| b.cmp(a));
+    candidates.truncate(100);
+    let mut stmt = c.prepare(&format!(
+        "SELECT f.block_time,f.size_q,{FILL_MARK},f.taker_portfolio,f.status
+        FROM fills f WHERE f.signature=?1 AND f.ix_index=?2 AND f.leg=?3"
+    ))?;
+    let mut fills = Vec::new();
+    for (slot, signature, ix_index, leg) in candidates {
+        let (block_time, size, mark, taker, status) =
+            stmt.query_row(params![signature, ix_index, leg], |r| {
+                Ok((
+                    r.get::<_, Option<i64>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })?;
+        let size = size.parse::<i128>().ok();
+        let mark = mark.and_then(|s| s.parse::<u64>().ok());
+        fills.push(json!({"signature":signature,"ix_index":ix_index,"leg":leg,"slot":slot,
+            "block_time":block_time,"side":if size.is_some_and(|n| n>0) {"buy"} else {"sell"},
+            "size_q":size.map(|n| n.unsigned_abs().to_string()),"mark_price":mark,"wallet":agents.get(&taker),
+            "taker_portfolio":taker,"status":status}));
+    }
+    Ok(json!({"fills":fills}))
+}
+
+fn add_notional(total: &mut i128, size: &str, price: &str) -> Result<()> {
+    let amount = size
+        .parse::<i128>()?
+        .checked_abs()
+        .and_then(|q| q.checked_mul(price.parse::<i128>().ok()?))
+        .and_then(|n| n.checked_div(1_000_000))
+        .context("season notional overflow or invalid price")?;
+    *total = total
+        .checked_add(amount)
+        .context("season notional overflow")?;
+    Ok(())
+}
+
+pub fn cached_season(c: &Connection, cfg: &Config) -> Result<Value> {
+    Ok(meta(c, "season_json")?
+        .map(|s| serde_json::from_str(&s))
+        .transpose()?
+        .unwrap_or_else(|| {
+            json!({"season":0,"since_slot":cfg.start_slot,"since":null,
+            "agents":0,"trades":0,"volume_usd":"0","open_interest_usd":"0","liquidations":0})
+        }))
+}
+
+pub fn season(c: &Connection, cfg: &Config, agents: &BTreeMap<String, String>) -> Result<Value> {
+    let mut wallets = std::collections::BTreeSet::new();
+    let mut trades = 0u64;
+    let mut volume = 0i128;
+    let mut oi = 0i128;
+    let mut liquidations = 0u64;
+    let mut marks = BTreeMap::new();
+    let mut fills = c.prepare(
+        "SELECT size_q,reported_price FROM fills WHERE taker_portfolio=?1 AND status='executed'",
+    )?;
+    let mut positions = c.prepare(
+        "SELECT s.positions_json FROM current_portfolios c
+        JOIN portfolio_snapshots s ON s.portfolio=c.portfolio
+        AND s.slot=(SELECT MAX(slot) FROM portfolio_snapshots WHERE portfolio=c.portfolio)
+        WHERE c.portfolio=?1",
+    )?;
+    for (portfolio, owner) in agents {
+        for row in fills.query_map([portfolio], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })? {
+            let (size, price) = row?;
+            wallets.insert(owner);
+            trades += 1;
+            if let Some(price) = price.and_then(|s| s.parse::<u64>().ok()) {
+                add_notional(&mut volume, &size, &price.to_string())?;
+            }
+        }
+        let positions: Option<String> =
+            positions.query_row([portfolio], |r| r.get(0)).optional()?;
+        if let Some(positions) = positions {
+            let positions: Value = serde_json::from_str(&positions)?;
+            for leg in positions.as_array().context("invalid season positions")? {
+                let asset = leg["asset_index"].as_u64().context("invalid asset_index")?;
+                let market = leg["market_id"].as_u64().context("invalid market_id")?;
+                let mark = match marks.entry((asset, market)) {
+                    std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(e) => e.insert(c.query_row(
+                        "SELECT price FROM marks WHERE asset_index=?1 AND market_id=?2
+                        ORDER BY slot DESC,length(observation_sequence) DESC,observation_sequence DESC,signature DESC,ix_index DESC LIMIT 1",
+                        params![asset, market.to_string()], |r| r.get::<_, Option<String>>(0)
+                    ).optional()?.flatten().and_then(|s| s.parse::<u64>().ok())),
+                };
+                if let Some(mark) = mark {
+                    add_notional(
+                        &mut oi,
+                        leg["basis_pos_q"].as_str().context("invalid basis_pos_q")?,
+                        &mark.to_string(),
+                    )?;
+                }
+            }
+        }
+        liquidations += c.query_row(
+            "SELECT COUNT(*) FROM liquidations WHERE portfolio=?1",
+            [portfolio],
+            |r| r.get::<_, u64>(0),
+        )?;
+    }
+    let since: Option<i64> = c
+        .query_row(
+            "SELECT block_time FROM txs WHERE (?1 IS NULL OR slot>=?1)
+        ORDER BY slot,signature LIMIT 1",
+            [cfg.start_slot],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(
+        json!({"season":0,"since_slot":cfg.start_slot,"since":since,"agents":wallets.len(),
+        "trades":trades,"volume_usd":volume.to_string(),"open_interest_usd":oi.to_string(),"liquidations":liquidations}),
     )
 }
 
@@ -1100,6 +1308,341 @@ mod tests {
         for n in ["01", "+1", "9223372036854775808", " 1"] {
             assert!(fill_cursor(&format!("{n}.{sig}.0.0")).is_err());
         }
+    }
+    #[test]
+    fn start_slot_is_bound_to_a_fresh_database() {
+        let c = memory();
+        check_start_slot(&c, None).unwrap();
+        assert_eq!(meta(&c, "start_slot").unwrap(), None);
+        set_meta(&c, "oldest_signature", "old").unwrap();
+        assert!(check_start_slot(&c, Some(100))
+            .unwrap_err()
+            .to_string()
+            .contains("fresh DB"));
+        assert_eq!(meta(&c, "start_slot").unwrap(), None);
+        let c = memory();
+        check_start_slot(&c, Some(100)).unwrap();
+        set_meta(&c, "oldest_signature", "new").unwrap();
+        check_start_slot(&c, Some(100)).unwrap();
+        assert!(check_start_slot(&c, Some(101)).is_err());
+        assert!(check_start_slot(&c, None).is_err());
+        let c = memory();
+        check_start_slot(&c, Some(u64::MAX)).unwrap();
+        check_start_slot(&c, Some(u64::MAX)).unwrap();
+    }
+
+    fn season_fixture() -> (Connection, Config) {
+        let c = memory();
+        let (_, mut cfg) = Config::parse(["serve".into()]).unwrap();
+        cfg.start_slot = Some(10);
+        cfg.leaderboard_exclude = vec!["bot-owner".into(), "excluded".into()];
+        set_meta(&c, "observed_slot", "30").unwrap();
+        for (portfolio, owner, created, current) in [
+            ("a", "alice", true, true),
+            ("a2", "alice", true, false),
+            ("b", "bob", true, true),
+            ("bot", "bot-owner", true, true),
+            ("excluded", "other", true, true),
+            ("preseason", "old", false, true),
+            ("failed-init", "failed", false, true),
+        ] {
+            let mut s = snap(20, -2_000_000);
+            s.portfolio = portfolio.into();
+            s.owner = owner.into();
+            snapshot(&c, &s).unwrap();
+            if current {
+                c.execute("INSERT INTO current_portfolios VALUES(?1)", [portfolio])
+                    .unwrap();
+            }
+            if created {
+                c.execute(
+                    "INSERT INTO txs(signature,slot,block_time,ok) VALUES(?1,10,100,1)",
+                    [portfolio],
+                )
+                .unwrap();
+                c.execute("INSERT INTO instructions(signature,ix_index,name,portfolio) VALUES(?1,0,'InitPortfolio',?1)", [portfolio]).unwrap();
+            }
+        }
+        c.execute(
+            "INSERT INTO txs(signature,slot,ok) VALUES('failed-init',10,0)",
+            [],
+        )
+        .unwrap();
+        c.execute("INSERT INTO instructions(signature,ix_index,name,portfolio) VALUES('failed-init',0,'InitPortfolio','failed-init')", []).unwrap();
+        c.execute(
+            "INSERT INTO transfers(signature,ix_index,slot,kind,portfolio,signer,amount,ok) VALUES
+            ('fallback',0,10,'deposit','fallback','carol','10',1),
+            ('failed',0,9,'deposit','fallback','wrong','10',0),
+            ('later',0,11,'deposit','fallback','wrong','10',1)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO txs(signature,slot,ok) VALUES('fallback',10,1)",
+            [],
+        )
+        .unwrap();
+        c.execute("INSERT INTO instructions(signature,ix_index,name,portfolio) VALUES('fallback',0,'InitPortfolio','fallback')", []).unwrap();
+        c.execute("INSERT INTO marks VALUES('mark',0,11,0,'3000000','1','1'),('latest',0,25,0,'4000000','2','1')", []).unwrap();
+        // Newest-first ties exercise signature, instruction and leg ordering.
+        for (sig, ix, leg, slot, portfolio, size, status, asset) in [
+            ("older", 0, 0, 12, "a", "2000000", "executed", 0),
+            ("tie", 0, 0, 20, "b", "-1000000", "executed", 0),
+            ("tie", 0, 1, 20, "a2", "1000000", "executed", 0),
+            ("tie", 1, 0, 20, "fallback", "-1000000", "requested", 0),
+            ("z", 0, 0, 20, "a", "1000000", "requested", 0),
+            ("no-mark", 0, 0, 21, "a", "1000000", "executed", 1),
+            ("bot-trade", 0, 0, 30, "bot", "999999999", "executed", 0),
+            (
+                "excluded-trade",
+                0,
+                0,
+                30,
+                "excluded",
+                "999999999",
+                "executed",
+                0,
+            ),
+            (
+                "old-trade",
+                0,
+                0,
+                30,
+                "preseason",
+                "999999999",
+                "executed",
+                0,
+            ),
+            (
+                "failed-trade",
+                0,
+                0,
+                30,
+                "failed-init",
+                "999999999",
+                "executed",
+                0,
+            ),
+        ] {
+            c.execute("INSERT INTO fills(signature,ix_index,leg,slot,block_time,taker_portfolio,asset_index,market_id,size_q,status)
+                VALUES(?1,?2,?3,?4,NULL,?5,?6,'1',?7,?8)", params![sig,ix,leg,slot,portfolio,asset,size,status]).unwrap();
+        }
+        c.execute(
+            "UPDATE fills SET reported_price='2000000' WHERE signature!='no-mark'",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE fills SET reported_price='bad' WHERE signature='no-mark'",
+            [],
+        )
+        .unwrap();
+        for portfolio in ["a", "bot", "excluded", "preseason", "failed-init"] {
+            c.execute(
+                "INSERT INTO liquidations(portfolio,slot,signature) VALUES(?1,30,'liq')",
+                [portfolio],
+            )
+            .unwrap();
+        }
+        (c, cfg)
+    }
+
+    #[test]
+    fn recent_fills_order_limit_eligibility_and_taker_side() {
+        let (c, cfg) = season_fixture();
+        let out = recent_fills(&c, &agent_portfolios(&c, &cfg).unwrap()).unwrap();
+        let rows = out["fills"].as_array().unwrap();
+        assert_eq!(rows.len(), 6);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (
+                    r["signature"].as_str().unwrap(),
+                    r["ix_index"].as_u64().unwrap(),
+                    r["leg"].as_u64().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("no-mark", 0, 0),
+                ("z", 0, 0),
+                ("tie", 1, 0),
+                ("tie", 0, 1),
+                ("tie", 0, 0),
+                ("older", 0, 0)
+            ]
+        );
+        assert_eq!(
+            rows[2],
+            json!({"signature":"tie","ix_index":1,"leg":0,"slot":20,"block_time":null,
+            "side":"sell","size_q":"1000000","mark_price":3000000,"wallet":"carol","taker_portfolio":"fallback","status":"requested"})
+        );
+        assert_eq!(rows[0]["mark_price"], Value::Null);
+        assert_eq!(rows[1]["side"], "buy");
+        assert_eq!(rows[1]["wallet"], "alice");
+        assert_eq!(cached_recent_fills(&c, 100).unwrap(), json!({"fills":[]}));
+        set_meta(&c, "recent_fills_json", &out.to_string()).unwrap();
+        assert_eq!(
+            cached_recent_fills(&c, 2).unwrap()["fills"],
+            json!(&rows[..2])
+        );
+        let mut unscoped = cfg.clone();
+        unscoped.start_slot = None;
+        c.execute(
+            "INSERT INTO txs(signature,slot,ok) VALUES('orphan',10,1)",
+            [],
+        )
+        .unwrap();
+        c.execute("INSERT INTO instructions(signature,ix_index,name,portfolio) VALUES('orphan',0,'InitPortfolio','orphan')", []).unwrap();
+        c.execute("INSERT INTO fills(signature,ix_index,leg,slot,taker_portfolio,size_q,reported_price,status) VALUES('orphan',0,0,40,'orphan','-1000000','999999999','executed')", []).unwrap();
+        for cfg in [&cfg, &unscoped] {
+            let agents = agent_portfolios(&c, cfg).unwrap();
+            assert!(!agents.contains_key("orphan"));
+            assert!(recent_fills(&c, &agents).unwrap()["fills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["taker_portfolio"] != "orphan"));
+            assert_eq!(
+                season(&c, cfg, &agents).unwrap()["trades"],
+                if cfg.start_slot.is_some() { 4 } else { 6 }
+            );
+        }
+        // The per-portfolio candidate query uses a covering ordering index.
+        let mut stmt = c
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT signature,ix_index,leg,slot FROM fills
+            WHERE taker_portfolio=?1 AND status IN ('executed','requested')
+            ORDER BY slot DESC,signature DESC,ix_index DESC,leg DESC LIMIT 100",
+            )
+            .unwrap();
+        let plan = stmt
+            .query_map(["a"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|s| s.contains("fills_taker_slot_order")),
+            "{plan:?}"
+        );
+        assert!(!plan.iter().any(|s| s.contains("TEMP B-TREE")), "{plan:?}");
+    }
+
+    #[test]
+    fn recent_cache_is_bounded_and_bad_prices_are_null() {
+        let (c, cfg) = season_fixture();
+        for i in 0..150 {
+            c.execute("INSERT INTO fills(signature,ix_index,leg,slot,taker_portfolio,size_q,status,asset_index,market_id)
+                VALUES(?1,0,0,50,'a','1','executed',0,'1')", [format!("agent-{i:03}")]).unwrap();
+            c.execute(
+                "INSERT INTO fills(signature,ix_index,leg,slot,taker_portfolio,size_q,status)
+                VALUES(?1,0,0,60,'bot','1','executed')",
+                [format!("bot-{i:03}")],
+            )
+            .unwrap();
+        }
+        c.execute("UPDATE marks SET price='bad'", []).unwrap();
+        let feed = recent_fills(&c, &agent_portfolios(&c, &cfg).unwrap()).unwrap();
+        let rows = feed["fills"].as_array().unwrap();
+        assert_eq!(rows.len(), 100);
+        assert_eq!(rows[0]["signature"], "agent-149");
+        assert_eq!(rows[99]["signature"], "agent-050");
+        assert!(rows.iter().all(|r| r["mark_price"].is_null()));
+        set_meta(&c, "recent_fills_json", &feed.to_string()).unwrap();
+        c.execute("DELETE FROM fills", []).unwrap();
+        assert_eq!(
+            cached_recent_fills(&c, 2).unwrap()["fills"],
+            json!(&rows[..2])
+        );
+    }
+
+    #[test]
+    fn season_since_uses_slot_order_index() {
+        let c = memory();
+        let mut stmt = c
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT block_time FROM txs WHERE (?1 IS NULL OR slot>=?1)
+        ORDER BY slot,signature LIMIT 1",
+            )
+            .unwrap();
+        for start_slot in [None, Some(10u64)] {
+            let plan = stmt
+                .query_map([start_slot], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(plan.iter().any(|s| s.contains("txs_slot")), "{plan:?}");
+            assert!(!plan.iter().any(|s| s.contains("TEMP B-TREE")), "{plan:?}");
+        }
+    }
+
+    #[test]
+    fn season_totals_and_leaderboard_share_entrants_and_exclusions() {
+        let (c, cfg) = season_fixture();
+        let board = leaderboard(&c, &cfg).unwrap();
+        assert_eq!(board["since_slot"], 10);
+        let owners = board["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["wallet"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(owners.len(), 3);
+        for owner in ["alice", "bob", "carol"] {
+            assert!(owners.contains(&owner));
+        }
+        let expected = json!({"season":0,"since_slot":10,"since":100,"agents":2,"trades":4,
+            "volume_usd":"8000000","open_interest_usd":"16000000","liquidations":1});
+        assert_eq!(
+            season(&c, &cfg, &agent_portfolios(&c, &cfg).unwrap()).unwrap(),
+            expected
+        );
+        c.execute(
+            "UPDATE fills SET reported_price=NULL WHERE signature='no-mark'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            season(&c, &cfg, &agent_portfolios(&c, &cfg).unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(stats(&c, &cfg, 100).unwrap()["since_slot"], 10);
+        assert_eq!(cached_stats(&c, &cfg).unwrap()["since_slot"], 10);
+        assert_eq!(cached_season(&c, &cfg).unwrap()["trades"], 0);
+        set_meta(&c, "season_json", &expected.to_string()).unwrap();
+        c.execute("DELETE FROM fills", []).unwrap();
+        assert_eq!(cached_season(&c, &cfg).unwrap(), expected);
+        assert_eq!(
+            season(&c, &cfg, &agent_portfolios(&c, &cfg).unwrap()).unwrap()["trades"],
+            0
+        );
+        let mut unscoped = cfg.clone();
+        unscoped.start_slot = None;
+        assert!(leaderboard(&c, &unscoped).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["wallet"] == "old"));
+    }
+
+    #[test]
+    fn season_empty_and_notional_overflow() {
+        let c = memory();
+        let (_, cfg) = Config::parse(["serve".into()]).unwrap();
+        assert_eq!(
+            season(&c, &cfg, &agent_portfolios(&c, &cfg).unwrap()).unwrap(),
+            cached_season(&c, &cfg).unwrap()
+        );
+        let mut total = 0;
+        add_notional(&mut total, "-2000000", "3000000").unwrap();
+        assert_eq!(total, 6000000);
+        for (size, price) in [
+            (i128::MIN.to_string(), "1"),
+            (i128::MAX.to_string(), "2"),
+            ("1".into(), "bad"),
+        ] {
+            assert!(add_notional(&mut total, &size, price).is_err());
+        }
+        total = i128::MAX;
+        assert!(add_notional(&mut total, "1000000", "1").is_err());
     }
     fn now_for_test() -> i64 {
         2_000_000_000
