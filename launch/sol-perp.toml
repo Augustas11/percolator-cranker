@@ -61,6 +61,8 @@ insurance_authority = ""        # the Squads vault
 asset_admin = ""                # cold hardware wallet C
 
 [oracle]
+# Status polling interval for mark pushes and accrual transactions.
+confirm_poll_ms = 500
 # Public Coinbase + Kraken, plus Binance when reachable without a key.
 # Binance SOL/USDT is treated as USD. Median of fresh prices, then exclude
 # prices >50 bps from that median and recompute; require 2 usable venues.

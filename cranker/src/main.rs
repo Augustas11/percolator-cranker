@@ -124,7 +124,9 @@ fn main() -> Result<()> {
         budget.max_submissions,
         quarantine.config()
     );
+    let blockhash = drip::submit::BlockhashCache::default();
     let ctx = CrankCtx {
+        blockhash: &blockhash,
         rpc: &rpc,
         program_id: &program_id,
         payer: &env.payer,

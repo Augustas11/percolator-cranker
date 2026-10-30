@@ -11,7 +11,7 @@
 //! attempt, bounded by `SOURCE_LIEN_DRAIN_MAX_STEPS`.
 
 use anyhow::{anyhow, Context, Result};
-use percolator::MarketModeV16;
+use percolator::{MarketModeV16, PortfolioAccountV16Account};
 use percolator_prog::state::{read_market, read_portfolio, MarketGroupV16};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
@@ -33,6 +33,7 @@ pub const HINT_BUDGET: usize = 16;
 
 pub struct CrankCtx<'a> {
     pub rpc: &'a RpcClient,
+    pub blockhash: &'a submit::BlockhashCache,
     pub program_id: &'a Pubkey,
     pub payer: &'a Keypair,
     pub market: &'a Pubkey,
@@ -199,6 +200,10 @@ enum Plan {
     HintError(String),
 }
 
+fn renew_refresh_on_idle(portfolio: &PortfolioAccountV16Account) -> bool {
+    !portfolio.legs.iter().any(|leg| leg.active != 0)
+}
+
 /// Run one full cycle against `ctx.market`.
 pub fn run_one_cycle(
     ctx: &CrankCtx<'_>,
@@ -235,14 +240,26 @@ pub fn run_one_cycle(
         && now_slot.saturating_sub(group.resolved_slot) < cfg.force_close_delay_slots;
     let payer = ctx.payer.pubkey();
 
+    let discovered: std::collections::HashSet<_> = ranked.iter().map(|p| p.pubkey).collect();
+    quarantine.schedule_state_mut().refresh.retain(|key, _| discovered.contains(key));
+    let mut quiet_skipped = 0;
+    let mut flat_accounts = std::collections::HashSet::new();
     let mut plans = std::collections::HashMap::new();
     let mut candidates = Vec::with_capacity(ranked.len());
     for p in &ranked {
         let decoded = read_portfolio(&p.account.data).ok();
-        let priority = decoded
-            .as_ref()
-            .map(|pf| work::assess(pf, &group).priority)
-            .unwrap_or(Priority::Pending);
+        if decoded.as_ref().is_some_and(renew_refresh_on_idle) {
+            flat_accounts.insert(p.pubkey);
+        }
+        let work = decoded.as_ref().map(|pf| work::assess(pf, &group));
+        let priority = work.map(|w| w.priority).unwrap_or(Priority::Pending);
+        if decoded.as_ref().is_some_and(|pf| !work::refresh_due(
+            pf, &group, work.expect("decoded portfolio"),
+            quarantine.schedule_state().refresh.get(&p.pubkey), started, now_slot, budget.quiet_refresh_secs,
+        )) {
+            quiet_skipped += 1;
+            continue;
+        }
         // Still owed work: persistent idle on such an account is reported as
         // stuck, not hidden as "idle".
         // * Resolved: capital/PnL left, or a payout receipt not yet fully paid.
@@ -323,8 +340,9 @@ pub fn run_one_cycle(
                 break;
             }
             let deadline = std::time::Instant::now() + ab.time_left();
-            let o = match submit::submit_crank_routed(
+            let o = match submit::submit_crank_routed_cached(
                 ctx.rpc,
+                ctx.blockhash,
                 ctx.program_id,
                 ctx.payer,
                 ctx.market,
@@ -396,6 +414,12 @@ pub fn run_one_cycle(
         }
         Ok(attempt)
     });
+    for key in summary.progressed_accounts.iter().chain(
+        summary.idle_accounts.iter().filter(|key| flat_accounts.contains(key)),
+    ) {
+        quarantine.schedule_state_mut().refresh.insert(*key, work::RefreshRecord::new(started, now_slot, &group));
+    }
+    summary.quiet_skipped = quiet_skipped;
     summary.drain_rpc_errors = drain_rpc_errors;
     Ok(summary)
 }
@@ -404,6 +428,14 @@ pub fn run_one_cycle(
 mod tests {
     use super::*;
     use solana_sdk::signature::Signature;
+
+    #[test]
+    fn idle_refresh_renews_only_flat_accounts() {
+        let mut pf: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
+        assert!(renew_refresh_on_idle(&pf));
+        pf.legs[0].active = 1;
+        assert!(!renew_refresh_on_idle(&pf));
+    }
 
     fn ok(mutated: bool, cu: u64) -> CrankOutcome {
         CrankOutcome::Ok {
