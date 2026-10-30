@@ -8,6 +8,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { atoms, checkMatcher, DEVNET_GENESIS, Drip, genesisGuard, loadKeypair, parseMatcher, redactRpc, safeError } from "./drip";
 import { createServer } from "./index";
 import { tools as registeredTools } from "./tools";
+import * as tx from "../../frontend/src/chain/tx";
+import closePosition, { closeChunk } from "./tools/close_position";
+import claimTestFunds from "./tools/claim_test_funds";
 
 const homes: string[] = [];
 function home() { const path = mkdtempSync(join(tmpdir(), "drip-mcp-test-")); homes.push(path); return path; }
@@ -56,6 +59,14 @@ describe("keypair", () => {
 });
 
 describe("devnet guard", () => {
+  it("retries transient failures and then caches success", async () => {
+    const getGenesisHash = vi.fn().mockRejectedValueOnce(new Error("network error")).mockResolvedValue(DEVNET_GENESIS);
+    const guard = genesisGuard({ getGenesisHash });
+    const results = await Promise.allSettled([guard(), guard()]);
+    expect(results.map(result => result.status)).toEqual(["rejected", "rejected"]);
+    await guard(); await guard();
+    expect(getGenesisHash).toHaveBeenCalledTimes(2);
+  });
   it("checks only once, including concurrent callers", async () => {
     const getGenesisHash = vi.fn().mockResolvedValue(DEVNET_GENESIS), guard = genesisGuard({ getGenesisHash });
     await Promise.all([guard(), guard()]); await guard();
@@ -66,6 +77,88 @@ describe("devnet guard", () => {
     await expect(guard()).rejects.toThrow("Refusing non-devnet");
     await expect(guard()).rejects.toThrow("Refusing non-devnet");
     expect(getGenesisHash).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("closing", () => {
+  it.each([[0n, 10n, 0n], [5n, 10n, 5n], [10n, 10n, 10n], [25n, 10n, 10n]])("caps size %s at %s", (size, cap, expected) => {
+    expect(closeChunk(size, cap)).toBe(expected);
+  });
+  it.each([0n, -1n])("rejects unusable max fill %s", cap => {
+    expect(() => closeChunk(10n, cap)).toThrow("max fill must be positive");
+  });
+  function setup(side: "long" | "short", sizes: bigint[]) {
+    const drip = new Drip(env);
+    const market = { asset0: { marketId: 1n, effectivePrice: 150_000_000n, aLong: 1n, aShort: 1n, epochLong: 0n, epochShort: 0n } } as Awaited<ReturnType<Drip["market"]>>;
+    vi.spyOn(drip, "market").mockResolvedValue(market);
+    const portfolio = vi.spyOn(drip, "portfolio");
+    for (const size of sizes) portfolio.mockResolvedValueOnce({ key: key.publicKey, legs: [{ assetIndex: 0, marketId: 1n, side, basisPosQ: size, aBasis: 1n, epochSnap: 0n }] } as Awaited<ReturnType<Drip["portfolio"]>>);
+    vi.spyOn(drip, "matcher").mockResolvedValue({ state: { maxFill: 10_000_000n } } as Awaited<ReturnType<Drip["matcher"]>>);
+    const trade = vi.spyOn(tx, "buildTrade").mockResolvedValue([]);
+    const close = vi.spyOn(tx, "buildClose").mockResolvedValue([]);
+    let count = 0;
+    const send = vi.spyOn(drip, "send").mockImplementation(async build => {
+      await build(); count++;
+      return { signature: `sig-${count}`, explorer: `explorer-${count}` };
+    });
+    return { drip, portfolio, trade, close, send };
+  }
+  it.each(["long", "short"] as const)("closes a large %s in capped reducing fills", async side => {
+    const { drip, portfolio, trade, close, send } = setup(side, [25_000_000n, 15_000_000n, 5_000_000n]);
+    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1", "sig-2", "sig-3"], explorer: ["explorer-1", "explorer-2", "explorer-3"], closed_sol: 25 });
+    expect(send).toHaveBeenCalledTimes(3); expect(portfolio).toHaveBeenCalledTimes(3);
+    expect(trade).toHaveBeenCalledTimes(2); expect(close).toHaveBeenCalledTimes(1);
+    for (const call of trade.mock.calls) {
+      expect(call.slice(4)).toEqual([side === "long" ? -10_000_000n : 10_000_000n, side === "long" ? 149_250_000n : 150_750_000n, 12n]);
+    }
+    expect(close.mock.calls[0].slice(4)).toEqual([50n, 12n]);
+  });
+  it("keeps the common single-fill buildClose path", async () => {
+    const { drip, trade, close, send } = setup("long", [5_000_000n]);
+    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed_sol: 5 });
+    expect(trade).not.toHaveBeenCalled(); expect(close).toHaveBeenCalledTimes(1); expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("stops when a refreshed position is empty", async () => {
+    const { drip, send } = setup("long", [25_000_000n, 0n]);
+    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed_sol: 10 });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("limits each call to ten fills", async () => {
+    const { drip, send } = setup("short", Array.from({ length: 10 }, (_, i) => BigInt(110 - 10 * i) * 1_000_000n));
+    expect(await closePosition.run(drip, {})).toMatchObject({ closed_sol: 100 });
+    expect(send).toHaveBeenCalledTimes(10);
+  });
+  it("does not send for an empty position", async () => {
+    const { drip, send } = setup("long", [0n]);
+    await expect(closePosition.run(drip, {})).rejects.toThrow("no open position");
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("backend availability", () => {
+  it.each(["/leaderboard", "/faucet/claim", "/faucet/health"])("reports missing endpoint %s even for an HTML response", async path => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("<html>not found</html>", { status: 404 }));
+    await expect(new Drip(env).fetchJson(path)).rejects.toThrow(`drip API endpoint ${path} not available yet`);
+  });
+  it("checks faucet health before any wallet funding or ATA rent", async () => {
+    const drip = new Drip(env);
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("missing", { status: 404 }));
+    const balance = vi.spyOn(drip.conn, "getBalance"), account = vi.spyOn(drip.conn, "getAccountInfo"), send = vi.spyOn(drip, "send");
+    await expect(claimTestFunds.run(drip, {})).rejects.toThrow("drip API endpoint /faucet/health not available yet");
+    expect(fetch).toHaveBeenCalledWith(`${drip.apiUrl}/faucet/health`, expect.not.objectContaining({ method: "POST" }));
+    expect(balance).not.toHaveBeenCalled(); expect(account).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled();
+  });
+  it("creates the ATA only after successful faucet health and before claiming", async () => {
+    const drip = new Drip(env), order: string[] = [];
+    vi.spyOn(drip, "fetchJson").mockImplementation(async path => { order.push(path); return {} as never; });
+    vi.spyOn(drip.conn, "getBalance").mockResolvedValue(1_000_000_000);
+    vi.spyOn(drip.conn, "getAccountInfo").mockResolvedValue(null);
+    vi.spyOn(drip, "send").mockImplementation(async build => {
+      order.push("create ATA"); expect(await build()).toHaveLength(1);
+      return { signature: "sig", explorer: "explorer" };
+    });
+    await claimTestFunds.run(drip, {});
+    expect(order).toEqual(["/faucet/health", "create ATA", "/faucet/claim"]);
   });
 });
 

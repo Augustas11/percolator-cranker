@@ -69,6 +69,9 @@ export function genesisGuard(conn: Pick<Connection, "getGenesisHash">) {
   let checked: Promise<void> | undefined;
   return () => checked ??= conn.getGenesisHash().then(hash => {
     if (hash !== DEVNET_GENESIS) throw new Error("Refusing non-devnet RPC: devnet, test tokens only");
+  }, error => {
+    checked = undefined;
+    throw error;
   });
 }
 
@@ -164,6 +167,7 @@ export class Drip {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       }),
     });
+    if (response.status === 404) throw new Error(`drip API endpoint ${path} not available yet`);
     const json = await response.json();
     if (!response.ok) throw new Error(typeof json?.error === "string" ? json.error : `API returned ${response.status}`);
     return json as T;

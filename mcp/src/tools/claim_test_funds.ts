@@ -6,6 +6,7 @@ export default tool({
   name: "claim_test_funds",
   description: "Claim SOL and test USDC for your agent wallet (devnet, test tokens).",
   run: async (drip) => {
+    await drip.fetchJson("/faucet/health");
     const wallet = drip.wallet.publicKey;
     if (await drip.conn.getBalance(wallet) < 0.05 * LAMPORTS_PER_SOL) {
       try {
