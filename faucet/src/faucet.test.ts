@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { ata, TOKEN_PROGRAM_ID } from "../../frontend/src/chain/pda";
-import { ClaimError, DEFAULT_MINT, Faucet, WINDOW, checkTokenAccount, mintTo, parseState, parseWallet, pruneState, readBody, type State } from "./faucet";
+import { ClaimError, DEFAULT_MINT, Faucet, WINDOW, checkGetBody, checkTokenAccount, mintTo, parseState, parseWallet, pruneState, readBody, withTimeout, type State } from "./faucet";
 
 const wallet = Keypair.generate().publicKey;
 const other = Keypair.generate().publicKey;
@@ -18,6 +18,13 @@ function setup(dailyCap = 200) {
 }
 
 describe("request validation", () => {
+  it("rejects declared GET bodies, including chunked bodies, before reading them", () => {
+    for (const headers of [{ "content-length": "1" }, { "transfer-encoding": "chunked" }, { "transfer-encoding": "" }]) {
+      expect(() => checkGetBody("GET", headers)).toThrow(ClaimError);
+    }
+    expect(() => checkGetBody("GET", { "content-length": "0" })).not.toThrow();
+    expect(() => checkGetBody("POST", { "content-length": "1025" })).not.toThrow();
+  });
   it("accepts JSON up to exactly 1024 bytes", async () => {
     expect(await readBody(chunks('"' + "a".repeat(1022) + '"'))).toHaveLength(1022);
   });
@@ -80,12 +87,50 @@ describe("limits and reservations", () => {
     expect(send).not.toHaveBeenCalled();
     await faucet.claim(wallet);
   });
+  it("keeps ambiguous submissions reserved and prevents bypassing a daily cap of one", async () => {
+    const { faucet, save, send } = setup(1);
+    send.mockRejectedValueOnce(new ClaimError(503, "submission failed", undefined, true));
+    await expect(faucet.claim(wallet)).rejects.toMatchObject({
+      status: 503, nextClaimAfter: start + WINDOW, message: `Mint outcome unknown; try again after ${start + WINDOW}`,
+    });
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(faucet.health().claims_today).toBe(1);
+    await expect(faucet.claim(wallet)).rejects.toMatchObject({ status: 429, nextClaimAfter: start + WINDOW });
+    await expect(faucet.claim(other)).rejects.toMatchObject({ status: 429, message: "Global daily cap reached" });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("rejects overflow immediately and releases queue slots after failures", async () => {
+    const { faucet, send } = setup();
+    let release!: () => void;
+    send.mockImplementationOnce(() => new Promise<string>(resolve => { release = () => resolve("signature"); }));
+    const queued = Array.from({ length: 8 }, () => faucet.claim(wallet).catch(error => error));
+    await expect(faucet.claim(other)).rejects.toMatchObject({ status: 503, message: "Faucet busy" });
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    release();
+    await Promise.all(queued);
+    await expect(faucet.claim(other)).resolves.toMatchObject({ ok: true });
+  });
   it("serializes concurrent requests so the cap cannot be raced", async () => {
     const { faucet, send } = setup(1);
     const results = await Promise.allSettled([faucet.claim(wallet), faucet.claim(other)]);
     expect(results.map(result => result.status)).toEqual(["fulfilled", "rejected"]);
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith(wallet, ata(wallet, mint));
+  });
+});
+
+describe("RPC timeouts", () => {
+  it("bounds a stalled RPC and clears timers on success and failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const result = withTimeout(new Promise<never>(() => {}), 60_000);
+      const rejected = expect(result).rejects.toThrow("RPC timed out");
+      await vi.advanceTimersByTimeAsync(60_000);
+      await rejected;
+      expect(await withTimeout(Promise.resolve("ok"), 10_000)).toBe("ok");
+      await expect(withTimeout(Promise.reject(new Error("failed")), 10_000)).rejects.toThrow("failed");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 });
 

@@ -6,7 +6,22 @@ export const DEFAULT_MINT = "Ev8AkZC9pT2QCncYFut8GyGB2ffWN1yvnoVbiUTz77q7";
 export const DEVNET_GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 export interface State { wallets: Record<string, number>; day: string; count: number }
 export class ClaimError extends Error {
-  constructor(public status: number, message: string, public nextClaimAfter?: number) { super(message); }
+  constructor(public status: number, message: string, public nextClaimAfter?: number, public submitted = false) { super(message); }
+}
+
+export async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("RPC timed out")), ms);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+export function checkGetBody(method: string | undefined, headers: { "content-length"?: string; "transfer-encoding"?: string }): void {
+  if (method === "GET" && (Number(headers["content-length"]) > 0 || headers["transfer-encoding"] !== undefined)) {
+    throw new ClaimError(413, "GET requests must not declare a body");
+  }
 }
 
 export async function readBody(chunks: AsyncIterable<Uint8Array>): Promise<unknown> {
@@ -76,6 +91,7 @@ export function mintTo(mint: PublicKey, destination: PublicKey, authority: Publi
 
 export class Faucet {
   private tail: Promise<unknown> = Promise.resolve();
+  private pending = 0;
   constructor(private state: State, private options: {
     mint: PublicKey; dailyCap: number; amountUsdc: number;
     now: () => number; save: (state: State) => Promise<void>;
@@ -88,6 +104,8 @@ export class Faucet {
   }
 
   claim(wallet: PublicKey) {
+    if (this.pending >= 8) return Promise.reject(new ClaimError(503, "Faucet busy"));
+    this.pending++;
     const result = this.tail.then(async () => {
       const now = this.options.now();
       this.state = pruneState(this.state, now);
@@ -102,11 +120,14 @@ export class Faucet {
         const signature = await this.options.send(wallet, ata(wallet, this.options.mint));
         return { ok: true, wallet: key, amount_usdc: this.options.amountUsdc, signature, next_claim_after: now + WINDOW };
       } catch (error) {
+        if (error instanceof ClaimError && error.submitted) {
+          throw new ClaimError(503, `Mint outcome unknown; try again after ${now + WINDOW}`, now + WINDOW, true);
+        }
         this.state = previous;
         await this.options.save(previous);
         throw error;
       }
-    });
+    }).finally(() => { this.pending--; });
     this.tail = result.catch(() => {});
     return result;
   }
