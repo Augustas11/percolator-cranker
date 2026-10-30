@@ -1,8 +1,54 @@
 use super::*;
 use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
 
 mod exchanges;
 pub use exchanges::Exchanges;
+
+const STALL_WINDOW_MS: u64 = 3_600_000;
+
+#[derive(Default)]
+struct StallStats {
+    first: Option<u64>,
+    last: Option<u64>,
+    gaps: VecDeque<(u64, u64)>,
+}
+
+impl StallStats {
+    // Polling start counts as the last good read, so an outage from startup is an open gap.
+    fn new(now: u64) -> Self { Self { first: Some(now), last: Some(now), gaps: VecDeque::new() } }
+
+    fn record_ok(&mut self, now: u64) -> Option<u64> {
+        self.first.get_or_insert(now);
+        let gap = self.last.replace(now).map(|last| now.saturating_sub(last));
+        if let Some(ms) = gap { self.gaps.push_back((now, ms)); }
+        while self.gaps.front().is_some_and(|(at, _)| *at <= now.saturating_sub(STALL_WINDOW_MS)) {
+            self.gaps.pop_front();
+        }
+        gap.filter(|ms| *ms >= 2000)
+    }
+
+    fn window_ms(&self, now: u64) -> u64 { now.saturating_sub(self.first.unwrap_or(now)).min(STALL_WINDOW_MS) }
+
+    fn summary(&self, now: u64) -> (u64, f64) {
+        let window = self.window_ms(now);
+        let start = now.saturating_sub(window);
+        let open = self.last.map(|last| (now, now.saturating_sub(last)));
+        let mut longest = 0;
+        let mut over = 0;
+        for &(at, ms) in self.gaps.iter().chain(open.iter()) {
+            let clipped = at.min(now).saturating_sub(at.saturating_sub(ms).max(start));
+            longest = longest.max(clipped);
+            if ms > 10_000 { over += clipped; }
+        }
+        (longest, 100.0 * over as f64 / window.max(600_000) as f64)
+    }
+
+    fn print_summary(&self, now: u64) {
+        let (longest, over) = self.summary(now);
+        println!("{{\"event\":\"price_stall_stats\",\"window_s\":{},\"longest_ms\":{longest},\"over_10s_pct\":{over:.2},\"at_ms\":{now}}}", self.window_ms(now) / 1000);
+    }
+}
 
 /// Replaceable source boundary, with independent public websocket readers.
 // Later: paid pyth.dourolabs.app/hermes source, Authorization: Bearer from env.
@@ -12,10 +58,10 @@ pub enum PriceSource {
     Pyth { rpc: RpcClient, feed: [u8; 32], cfg: launch::OracleCfg },
 }
 impl PriceSource {
-    pub fn latest(&mut self) -> Result<(u64, u64)> {
+    pub fn latest(&mut self) -> Result<(u64, u64, bool)> {
         match self {
-            Self::Exchanges(source) => source.latest().map(|r| (r.price, r.publish_time_ms)),
-            Self::Pyth { rpc, feed, cfg } => launch::pyth_sol_usd(rpc, feed, cfg),
+            Self::Exchanges(source) => source.latest().map(|r| (r.price, r.publish_time_ms, r.fallback)),
+            Self::Pyth { rpc, feed, cfg } => launch::pyth_sol_usd(rpc, feed, cfg).map(|(price, at)| (price, at, false)),
             Self::Mock { price, initial, rng, max_bps } => {
                 *rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
                 let mut z = *rng;
@@ -24,7 +70,7 @@ impl PriceSource {
                 let step = ((z ^ (z >> 31)) % (2 * *max_bps + 1)) as i128 - *max_bps as i128;
                 *price = ((*price as i128 * (10_000 + step) / 10_000) as u64)
                     .clamp(*initial * 95 / 100, *initial * 105 / 100);
-                Ok((*price, launch::now_ms()))
+                Ok((*price, launch::now_ms(), false))
             }
         }
     }
@@ -105,6 +151,8 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
         let mut last_slot = 0;
         let mut market = Pubkey::default();
         let mut read_error = None;
+        let mut stalls = StallStats::new(launch::now_ms());
+        let mut stats_at = launch::now_ms();
         loop {
             let started = Instant::now();
             // Lifecycle transitions and trades wait for in-flight pushes;
@@ -115,6 +163,8 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
             if s.live {
                 if market != s.market {
                     market = s.market;
+                    stalls = StallStats::new(launch::now_ms());
+                    stats_at = launch::now_ms();
                     last_slot = 0;
                     last_landed = None;
                     last_accrual_read = None;
@@ -133,7 +183,11 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                         let gap = (elapsed.as_millis() / 400).max(1).min(u64::MAX as u128) as u64;
                         *max_bps = max_move_bps_per_slot.saturating_mul(gap).min(50);
                     }
-                    let (mark, published) = source.latest()?;
+                    let (mark, published, fallback) = source.latest()?;
+                    let now = launch::now_ms();
+                    if let Some(gap) = stalls.record_ok(now) {
+                        if keeper_log { println!("{{\"event\":\"price_gap\",\"ms\":{gap},\"at_ms\":{now}}}"); }
+                    }
                     let moved = if last_mark == 0 { u128::MAX }
                         else { mark.abs_diff(last_mark) as u128 * 10_000 / last_mark as u128 };
                     let heartbeat_due = elapsed >= Duration::from_millis(heartbeat.saturating_mul(400));
@@ -197,7 +251,7 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                             last_slot = slot;
                             last_landed = Some(sent);
                             if keeper_log {
-                                println!("{{\"event\":\"mark_lag\",\"ms\":{lag},\"src_age_ms\":{src_age_ms},\"send_ms\":{send_ms},\"confirm_ms\":{confirm_ms},\"target_ms\":{},\"at_ms\":{landed}}}", cfg.lag_target_ms);
+                                println!("{{\"event\":\"mark_lag\",\"ms\":{lag},\"src_age_ms\":{src_age_ms},\"send_ms\":{send_ms},\"confirm_ms\":{confirm_ms},\"target_ms\":{},\"at_ms\":{landed}{}}}", cfg.lag_target_ms, if fallback { ",\"fallback\":true" } else { "" });
                             }
                             return Ok(Some(format!("ok({lag}ms)")));
                         }
@@ -283,7 +337,14 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                     if outcome != "-" { println!("accrual={outcome}"); }
                 }
 
+                let now = launch::now_ms();
+                if now.saturating_sub(stats_at) >= 60_000 {
+                    if keeper_log { stalls.print_summary(now); }
+                    stats_at = now;
+                }
             } else {
+                stalls = StallStats::new(launch::now_ms());
+                stats_at = launch::now_ms();
                 drop(s);
             }
             drop(in_flight);
@@ -351,16 +412,33 @@ pub fn prices(args: &[String]) -> Result<()> {
     let cluster = cfg.cluster.get(&args[1]).context("unknown cluster")?;
     if cluster.price_source != "exchanges" { bail!("prices requires price_source = exchanges (no chain access)"); }
     let mut source = Exchanges::new(&cfg.oracle)?;
+    let mut stalls = StallStats::new(launch::now_ms());
+    let mut printed = None::<u64>;
+    let mut stats_at = launch::now_ms();
     loop {
-        match source.latest() {
-            Ok(r) => println!("{}", serde_json::json!({
-                "price_e6": r.price, "publish_time_ms": r.publish_time_ms,
-                "age_ms": launch::now_ms().saturating_sub(r.publish_time_ms),
-                "venues": r.venues, "spread_bps": r.spread_bps,
-            })),
-            Err(e) => println!("{}", serde_json::json!({"error": e.to_string()})),
+        let result = source.latest();
+        let now = launch::now_ms();
+        if result.is_ok() {
+            if let Some(gap) = stalls.record_ok(now) {
+                println!("{{\"event\":\"price_gap\",\"ms\":{gap},\"at_ms\":{now}}}");
+            }
         }
-        std::thread::sleep(Duration::from_secs(1));
+        if printed.is_none_or(|at| now.saturating_sub(at) >= 1000) {
+            match result {
+                Ok(r) => println!("{}", serde_json::json!({
+                    "price_e6": r.price, "publish_time_ms": r.publish_time_ms,
+                    "age_ms": now.saturating_sub(r.publish_time_ms), "fallback": r.fallback,
+                    "venues": r.venues, "spread_bps": r.spread_bps,
+                })),
+                Err(e) => println!("{}", serde_json::json!({"error": e.to_string(), "fallback": false})),
+            }
+            printed = Some(now);
+        }
+        if now.saturating_sub(stats_at) >= 60_000 {
+            stalls.print_summary(now);
+            stats_at = now;
+        }
+        std::thread::sleep(Duration::from_millis(cfg.oracle.push_poll_ms.max(1)));
     }
 }
 
@@ -385,6 +463,28 @@ fn update_ref(program_id: Pubkey, authority: Pubkey, ctx: Pubkey, mark_e6: u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stall_window_closed_and_open() {
+        let mut stats = StallStats::default();
+        assert_eq!(stats.summary(0), (0, 0.0));
+        assert_eq!(stats.record_ok(0), None);
+        assert_eq!(stats.record_ok(1000), None);
+        assert_eq!(stats.summary(1000), (1000, 0.0));
+        assert_eq!(stats.record_ok(3000), Some(2000));
+        assert_eq!(stats.summary(13_000), (10_000, 0.0));
+        assert_eq!(stats.summary(23_000), (20_000, 100.0 * 20_000.0 / 600_000.0));
+        assert_eq!(stats.record_ok(23_000), Some(20_000));
+        assert_eq!(stats.summary(23_000), (20_000, 100.0 * 20_000.0 / 600_000.0));
+        assert_eq!(stats.summary(3_613_000), (3_590_000, 100.0));
+        stats.record_ok(7_213_001);
+        assert_eq!(stats.gaps.len(), 1);
+        assert_eq!(stats.summary(7_213_001), (STALL_WINDOW_MS, 100.0));
+        // No good read since polling started: the whole wait is an open gap.
+        let mut stats = StallStats::new(0);
+        assert_eq!(stats.summary(1_200_000), (1_200_000, 100.0));
+        assert_eq!(stats.record_ok(1_200_000), Some(1_200_000));
+    }
+
     #[test]
     fn accrual_cancels_stalled_rpc() {
         let rpc = RpcClient::new("http://127.0.0.1:1".to_string());

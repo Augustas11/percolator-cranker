@@ -24,6 +24,7 @@ pub struct KeeperLog {
     /// Unix ms when this log was first read: before any push lands, the push
     /// age counts from here, so a pusher that never succeeds still alerts.
     watch_start_ms: Option<u64>,
+    price_stall_stats: Option<Value>,
     last_cycle: u64,
     summary: BTreeMap<String, u64>,
     attempts: [u64; 3],
@@ -111,6 +112,9 @@ impl KeeperLog {
                             self.quarantine.insert(account.into(),json!({"account":account,"first_strike_slot":first,
                                 "error":v["error"],"strike":v["strike"],"until_cycle":v["until_cycle"],"last_event_slot":slot}));
                         }
+                    }
+                    Some("price_stall_stats") => {
+                        self.price_stall_stats = Some(v);
                     }
                     Some("mark_lag") => {
                         self.mark_lag_ms = v["ms"].as_u64();
@@ -213,8 +217,10 @@ impl KeeperLog {
                 q
             })
             .collect();
+        let gap_longest = self.price_stall_stats.as_ref().and_then(|v| v["longest_ms"].as_u64());
+        let gap_over = self.price_stall_stats.as_ref().and_then(|v| v["over_10s_pct"].as_f64());
         let (lag_p50, lag_p95) = lag_percentiles(&self.mark_lags);
-        json!({"mark_lag_p50_ms":lag_p50,"mark_lag_p95_ms":lag_p95,"log_ok":ok,"log_age_seconds":age,"log_error":error,"last_cycle":self.last_cycle,
+        json!({"price_gap_longest_ms":gap_longest,"price_gap_over_10s_pct":gap_over,"mark_lag_p50_ms":lag_p50,"mark_lag_p95_ms":lag_p95,"log_ok":ok,"log_age_seconds":age,"log_error":error,"last_cycle":self.last_cycle,
             "last_cycle_summary":self.summary,"last_cycle_attempts":last,"last_cycle_cu":self.summary.get("cu").copied().unwrap_or(0),
             "attempts_total":outcomes(self.attempts),"cycles_total":outcomes(self.cycles),"crank_cu":{"p50":p50,"max":max},
             "quarantined_accounts":rows,"last_success_signature":self.signature,"last_success_slot":self.last_success_slot,
@@ -243,6 +249,26 @@ mod tests {
         assert_eq!(k.mark_lags.len(), 300);
         assert_eq!(lag_percentiles(&k.mark_lags), (Some(150), Some(285)));
     }
+    #[test]
+    fn authoritative_price_stalls() {
+        let mut k = KeeperLog::default();
+        let s = k.snapshot(0, true, None, None);
+        assert!(s["price_gap_longest_ms"].is_null());
+        assert!(s["price_gap_over_10s_pct"].is_null());
+        k.line(r#"{"event":"price_gap","ms":20000,"at_ms":30000}"#);
+        assert!(k.snapshot(0, true, None, None)["price_gap_longest_ms"].is_null());
+        k.line(r#"{"event":"price_stall_stats","window_s":60,"longest_ms":20000,"over_10s_pct":3.33,"at_ms":60000}"#);
+        let s = k.snapshot(0, true, None, None);
+        assert_eq!(s["price_gap_longest_ms"], 20000);
+        assert_eq!(s["price_gap_over_10s_pct"], 3.33);
+        // The pusher includes an ongoing gap even without a closed price_gap event.
+        k.line(r#"{"event":"price_stall_stats","window_s":120,"longest_ms":80000,"over_10s_pct":13.33,"at_ms":120000}"#);
+        k.line(r#"{"event":"price_gap","ms":100000,"at_ms":130000}"#);
+        let s = k.snapshot(0, true, None, None);
+        assert_eq!(s["price_gap_longest_ms"], 80000);
+        assert_eq!(s["price_gap_over_10s_pct"], 13.33);
+    }
+
     const SUMMARY: &str="cycle 7 summary: progressed=2 idle=3 failed=1 unconfirmed=0 quarantined_skipped=4 deferred=5 new_quarantine=1 idle_pending_stuck=0 txs=6 cu=100 max_attempt_cu=50";
     #[test]
     fn literal_logs_totals_quarantine_and_progress() {

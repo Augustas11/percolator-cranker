@@ -36,6 +36,7 @@ function render(s){
   if(s.mode==='live'&&k?.slots_since_last_success>NO_SUCCESS_SLOTS)alerts.push(`KeeperNoSuccessfulCrank: ${k.slots_since_last_success} slots`);
   if(k&&(k.log_age_seconds>LOG_STALE_SECONDS||!k.log_ok))alerts.push('KeeperLogStale');
   if(k?.mark_lag_p95_ms>MARK_LAG_MS)alerts.push(`PusherMarkLagHigh: p95 ${k.mark_lag_p95_ms} ms`);  // same rule as alerts.yml
+  if(k?.price_gap_over_10s_pct>1)alerts.push(`PusherPriceStalls: ${k.price_gap_over_10s_pct}% of the hour in gaps over 10 s (fires after 15m)`);
   if(k?.mark_push_age_seconds>MARK_STALE_SECONDS)alerts.push(`PusherMarkStale: ${k.mark_push_age_seconds} s since last push`);
   if(s.chain_read_ok===0)alerts.push('MonitorChainReadFailing (fires after 5m)');
   if(Date.now()/1000-s.snapshot_unix_seconds>SNAPSHOT_STALE_SECONDS)alerts.push('MonitorSnapshotStale');
