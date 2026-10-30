@@ -56,3 +56,4 @@ faucet/src/faucet.ts faucet/src/faucet.ts
 faucet/src/faucet.test.ts faucet/src/faucet.test.ts
 faucet/src/main.ts faucet/src/main.ts
 frontend/src/chain/pda.ts frontend/src/chain/pda.ts
+faucet/src/main.test.ts faucet/src/main.test.ts

@@ -2,7 +2,7 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { Connection, Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "../../frontend/src/chain/pda";
-import { ClaimError, DEFAULT_MINT, DEVNET_GENESIS, Faucet, checkGetBody, checkTokenAccount, mintTo, parseState, parseWallet, readBody, withTimeout, type State } from "./faucet";
+import { ClaimError, DEFAULT_MINT, DEVNET_GENESIS, Faucet, checkGetBody, checkTokenAccount, mintTo, parseState, parseWallet, readBody, type State } from "./faucet";
 
 function integer(name: string, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
   const value = process.env[name] ?? String(fallback);
@@ -18,7 +18,13 @@ async function main() {
   let connection: Connection;
   try {
     if (!["http:", "https:"].includes(new URL(rpcUrl).protocol)) throw new Error();
-    connection = new Connection(rpcUrl, { commitment: "confirmed", confirmTransactionInitialTimeout: 30_000 });
+    connection = new Connection(rpcUrl, {
+      commitment: "confirmed",
+      fetch: (input, init) => {
+        const timeout = AbortSignal.timeout(10_000);
+        return fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout });
+      },
+    });
   } catch { throw new Error("Invalid FAUCET_RPC_URL"); }
   const keypairPath = process.env.FAUCET_KEYPAIR;
   if (!keypairPath) throw new Error("FAUCET_KEYPAIR is required");
@@ -47,8 +53,8 @@ async function main() {
   let genesis: string;
   let mintAccount;
   try {
-    genesis = await withTimeout(connection.getGenesisHash(), 10_000);
-    mintAccount = await withTimeout(connection.getAccountInfo(mint), 10_000);
+    genesis = await connection.getGenesisHash();
+    mintAccount = await connection.getAccountInfo(mint);
   } catch { throw new Error("Startup RPC check failed (<rpc>)"); }
   if (genesis !== DEVNET_GENESIS) throw new Error("RPC genesis is not devnet");
   if (!mintAccount || !mintAccount.owner.equals(TOKEN_PROGRAM_ID) || mintAccount.data.length !== 82 ||
@@ -65,19 +71,23 @@ async function main() {
     send: async (wallet, destination) => {
       let submitted = false;
       try {
-        if (await withTimeout(connection.getBalance(payer.publicKey), 10_000) < minLamports) throw new ClaimError(503, "Payer below minimum SOL balance");
-        checkTokenAccount(await withTimeout(connection.getAccountInfo(destination), 10_000), wallet, mint);
-        const block = await withTimeout(connection.getLatestBlockhash(), 10_000);
+        if (await connection.getBalance(payer.publicKey) < minLamports) throw new ClaimError(503, "Payer below minimum SOL balance");
+        checkTokenAccount(await connection.getAccountInfo(destination), wallet, mint);
+        const block = await connection.getLatestBlockhash();
         const tx = new VersionedTransaction(new Transaction({ feePayer: payer.publicKey, ...block })
           .add(mintTo(mint, destination, payer.publicKey, amountUsdc)).compileMessage());
         tx.sign([payer]);
-        const simulation = await withTimeout(connection.simulateTransaction(tx, { sigVerify: true, commitment: "confirmed" }), 10_000);
+        const simulation = await connection.simulateTransaction(tx, { sigVerify: true, commitment: "confirmed" });
         if (simulation.value.err) throw new ClaimError(503, "Mint transaction simulation failed");
         const raw = tx.serialize();
         submitted = true;
-        const signature = await withTimeout(connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3 }), 10_000);
-        const confirmation = await withTimeout(connection.confirmTransaction({ signature, ...block }, "confirmed"), 60_000);
-        if (confirmation.value.err) throw new ClaimError(503, "Mint transaction was not confirmed");
+        const signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3 });
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 60_000);
+        try {
+          const confirmation = await connection.confirmTransaction({ signature, ...block, abortSignal: controller.signal }, "confirmed");
+          if (confirmation.value.err) throw new ClaimError(503, "Mint transaction was not confirmed");
+        } finally { clearTimeout(timer); }
         return signature;
       } catch (error) {
         if (submitted) throw new ClaimError(503, "Mint outcome unknown", undefined, true);

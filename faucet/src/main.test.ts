@@ -62,6 +62,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   process.exitCode = 0;
 });
@@ -100,13 +101,61 @@ it.each(["send", "confirm", "confirmation error"])("preserves ambiguous outcomes
 it("times out confirmation at 60 seconds and keeps the reservation", async () => {
   await start();
   vi.useFakeTimers();
-  mocks.rpc.confirmTransaction.mockReturnValueOnce(new Promise(() => {}));
+  let signal: AbortSignal;
+  mocks.rpc.confirmTransaction.mockImplementationOnce(({ abortSignal }) => {
+    signal = abortSignal;
+    return new Promise((_, reject) => {
+      abortSignal.addEventListener("abort", () => reject(abortSignal.reason), { once: true });
+    });
+  });
   const result = claim();
   await vi.advanceTimersByTimeAsync(59_999);
   expect(mocks.rpc.confirmTransaction).toHaveBeenCalledTimes(1);
+  expect(signal!.aborted).toBe(false);
   await vi.advanceTimersByTimeAsync(1);
   expect(await result).toMatchObject({ status: 503, next_claim_after: expect.any(Number) });
+  expect(signal!.aborted).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
   expect(await claim()).toMatchObject({ status: 429 });
+});
+
+it.each([false, true])("cancels RPC transport at 10 seconds with upstream signal: %s", async upstream => {
+  await start();
+  const timeout = new AbortController();
+  const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeout.signal);
+  const fetchMock = vi.fn((_input, init) => new Promise((_, reject) => {
+    init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+  const rpcFetch = mocks.connection.mock.calls[0][1].fetch;
+  const result = rpcFetch("https://rpc.example", { method: "POST", ...(upstream ? { signal: new AbortController().signal } : {}) });
+  const rejected = expect(result).rejects.toThrow("timed out");
+  expect(timeoutSpy).toHaveBeenCalledWith(10_000);
+  expect(fetchMock.mock.calls[0][1].method).toBe("POST");
+  timeout.abort(new Error("timed out"));
+  await rejected;
+});
+
+it("preserves upstream RPC cancellation", async () => {
+  await start();
+  const fetchMock = vi.fn().mockResolvedValue({});
+  vi.stubGlobal("fetch", fetchMock);
+  const controller = new AbortController();
+  await mocks.connection.mock.calls[0][1].fetch("https://rpc.example", { signal: controller.signal });
+  const signal = fetchMock.mock.calls[0][1].signal;
+  expect(signal.aborted).toBe(false);
+  controller.abort();
+  expect(signal.aborted).toBe(true);
+});
+
+it("clears the confirmation timer after success", async () => {
+  await start();
+  vi.useFakeTimers();
+  expect(await claim()).toMatchObject({ status: 200 });
+  expect(vi.getTimerCount()).toBe(0);
+  const signal = mocks.rpc.confirmTransaction.mock.calls[0][0].abortSignal;
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(signal.aborted).toBe(false);
 });
 
 it("rejects GET bodies before starting a claim", async () => {
