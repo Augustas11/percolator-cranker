@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+umask 077
 # Lifecycle drill: listing -> Live -> Recovery -> Resolved -> relisted,
 # with payouts, portfolio/slab close and rent swept back to the payer.
 # Reference / dry-run only; not a paid live service; M3 NO-GO.
@@ -26,6 +27,10 @@ cfg() { python3 -I -c 'import sys, tomllib
 c = tomllib.load(open(sys.argv[1], "rb"))
 for k in sys.argv[2].split("."): c = c[k]
 print(c)' "$CONFIG" "$1"; }
+python3 -I -c 'import sys, tomllib
+c = tomllib.load(open(sys.argv[1], "rb"))
+if c["cluster"][sys.argv[2]].get("matcher_ctxs", []):
+    sys.exit("lifecycle drill refuses non-empty matcher_ctxs")' "$CONFIG" "$CLUSTER"
 RPC="${LAUNCH_RPC_URL:-$(cfg "cluster.$CLUSTER.rpc")}"
 PROGRAM_ID="$(cfg "cluster.$CLUSTER.program_id")"
 if [ -z "$PROGRAM_ID" ] && [ "$CLUSTER" = local ]; then
@@ -43,6 +48,7 @@ trap cleanup EXIT
 for run in listing relist; do
   mkdir -p "$RUN_DIR/$run/keys"
   payer="$RUN_DIR/$run/keys/payer.json"
+  [ ! -L "$payer" ] || { echo "refusing symlinked payer destination: $payer" >&2; exit 1; }
   if [ ! -f "$payer" ]; then
     if [ -n "${DRILL_PAYER:-}" ]; then
       cp "$DRILL_PAYER" "$payer"
@@ -51,8 +57,8 @@ for run in listing relist; do
     else
       solana-keygen new --no-bip39-passphrase --silent --outfile "$payer"
     fi
-    chmod 0600 "$payer"
   fi
+  chmod 0600 "$payer"
 done
 LPAYER="$RUN_DIR/listing/keys/payer.json"
 RPAYER="$RUN_DIR/relist/keys/payer.json"
@@ -60,9 +66,15 @@ LKEY="$(solana-keygen pubkey "$LPAYER")"
 RKEY="$(solana-keygen pubkey "$RPAYER")"
 balance() {
   local a b=0
-  a="$(solana balance -u "$RPC" -k "$LPAYER" --lamports | awk '{print $1}')"
+  a="$(solana balance -u "$RPC" -k "$LPAYER" --lamports | awk '{print $1}')" || {
+    echo "failed to read listing payer balance" >&2; return 1;
+  }
+  [[ "$a" =~ ^[0-9]+$ ]] || { echo "empty or invalid listing payer balance" >&2; return 1; }
   if [ "$LKEY" != "$RKEY" ]; then
-    b="$(solana balance -u "$RPC" -k "$RPAYER" --lamports | awk '{print $1}')"
+    b="$(solana balance -u "$RPC" -k "$RPAYER" --lamports | awk '{print $1}')" || {
+      echo "failed to read relist payer balance" >&2; return 1;
+    }
+    [[ "$b" =~ ^[0-9]+$ ]] || { echo "empty or invalid relist payer balance" >&2; return 1; }
   fi
   echo "$((a + b))"
 }
@@ -78,10 +90,14 @@ timed() {
 }
 BEFORE="$(balance)"
 echo "payer before: $BEFORE lamports" | tee -a "$RUN_DIR/timings.txt"
-timed listing env LAUNCH_RUN_DIR="$RUN_DIR/listing" "$SCRIPT_DIR/launch_market.sh" "$CONFIG" "$CLUSTER"
+if [ ! -e "$RUN_DIR/listing/lifecycle.jsonl" ]; then
+  timed listing env LAUNCH_RUN_DIR="$RUN_DIR/listing" "$SCRIPT_DIR/launch_market.sh" "$CONFIG" "$CLUSTER"
+fi
 timed stop-bots env LAUNCH_RUN_DIR="$RUN_DIR/listing" "$SCRIPT_DIR/launch_market.sh" stop "$CLUSTER"
 timed lifecycle "$STAGING" lifecycle "$CONFIG" "$CLUSTER" "$RUN_DIR/listing"
-timed relist env LAUNCH_RUN_DIR="$RUN_DIR/relist" "$SCRIPT_DIR/launch_market.sh" "$CONFIG" "$CLUSTER"
+if [ ! -e "$RUN_DIR/relist/lifecycle.jsonl" ]; then
+  timed relist env LAUNCH_RUN_DIR="$RUN_DIR/relist" "$SCRIPT_DIR/launch_market.sh" "$CONFIG" "$CLUSTER"
+fi
 timed stop-bots env LAUNCH_RUN_DIR="$RUN_DIR/relist" "$SCRIPT_DIR/launch_market.sh" stop "$CLUSTER"
 if [ "${DRILL_WIND_DOWN_RELIST:-1}" = 1 ]; then
   timed lifecycle "$STAGING" lifecycle "$CONFIG" "$CLUSTER" "$RUN_DIR/relist"

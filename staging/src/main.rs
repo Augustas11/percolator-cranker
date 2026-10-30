@@ -732,7 +732,7 @@ impl Staging {
 
     /// Live -> Recovery: SHUTDOWN of SOL (asset 0). Fresh cranks go first:
     /// shutdown accrues committed funding up to now.
-    fn shutdown(&mut self) -> Result<Option<String>> {
+    fn shutdown_ixs(&self) -> Result<Vec<Instruction>> {
         let (data, g, s) = self.read()?;
         let mut ixs = self.fresh_cranks(&data, &[self.trader_pf, self.lp_pf], self.rpc.get_slot()?)?;
         // Mirrors v16_svm.rs `shutdown_asset` (the role keys are ignored by
@@ -752,19 +752,27 @@ impl Staging {
             oracle_authority: admin,
         };
         ixs.push(self.prog_ix(ix, self.admin_metas()));
-        self.send(&ixs, &[&self.admin]).context("SHUTDOWN")?;
+        Ok(ixs)
+    }
+
+    fn shutdown(&mut self) -> Result<Option<String>> {
+        self.send(&self.shutdown_ixs()?, &[&self.admin]).context("SHUTDOWN")?;
         self.phase = Phase::Recovery;
         Ok(Some("SOL shut down (Recovery)".into()))
     }
 
     /// Recovery -> Resolved: ResolveMarket by the market authority.
-    fn resolve(&mut self) -> Result<Option<String>> {
+    fn resolve_ixs(&self) -> Result<Vec<Instruction>> {
         let (data, g, s) = self.read()?;
         let mut ixs = self.fresh_cranks(&data, &[self.trader_pf, self.lp_pf], self.rpc.get_slot()?)?;
         // Mirrors v16_svm.rs `resolve_market`.
         let ix = P::ResolveMarket { asset_generation_frontier: g.next_market_id, authority_epoch: s.authority_epoch };
         ixs.push(self.prog_ix(ix, self.admin_metas()));
-        self.send(&ixs, &[&self.admin]).context("ResolveMarket")?;
+        Ok(ixs)
+    }
+
+    fn resolve(&mut self) -> Result<Option<String>> {
+        self.send(&self.resolve_ixs()?, &[&self.admin]).context("ResolveMarket")?;
         self.phase = Phase::Resolved;
         Ok(Some("market resolved".into()))
     }
@@ -776,7 +784,12 @@ impl Staging {
             None => Ok(true),
             Some(a) => {
                 let p = read_portfolio(&a.data).map_err(|e| anyhow!("read_portfolio {pf}: {e:?}"))?;
-                Ok(p.capital.get() == 0 && p.pnl.get() == 0)
+                Ok(p.capital.get() == 0
+                    && p.pnl.get() == 0
+                    && p.reserved_pnl.get() == 0
+                    && p.legs.iter().all(|l| l.active == 0)
+                    && (p.resolved_payout_receipt.present == 0
+                        || p.resolved_payout_receipt.finalized != 0))
             }
         }
     }
