@@ -1,6 +1,8 @@
 @import "./tokens.css";
 
-.site { position: relative; overflow: hidden; min-height: 100vh; background: var(--site-bg); color: var(--site-text); font-family: var(--site-font); font-size: 16px; line-height: normal; }
+.site { position: relative; min-height: 100vh; background: var(--site-bg); color: var(--site-text); font-family: var(--site-font); font-size: 16px; line-height: normal; }
+.site-decoration { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.site p, .site dd, .site td { overflow-wrap: anywhere; }
 .site * { box-sizing: border-box; min-width: 0; }
 .site a { color: var(--site-accent); text-decoration: none; overflow-wrap: anywhere; }
 .site a:hover { color: var(--site-glow); }

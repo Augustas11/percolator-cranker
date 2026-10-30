@@ -21,7 +21,7 @@ export function Link({ to, onClick, ...props }: AnchorHTMLAttributes<HTMLAnchorE
     onClick?.(event);
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.currentTarget.hasAttribute("target") || event.currentTarget.hasAttribute("download")) return;
     event.preventDefault();
-    if (to !== getPath()) {
+    if (to !== getPath() + window.location.search) {
       window.history.pushState({}, "", to);
       window.dispatchEvent(new Event(navigationEvent));
     }

@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, expect, test, vi } from "vitest";
 import Site from "./Site";
 import { site } from "./config";
+import { Link } from "./router";
 import { MockMarketClient } from "../market/mock";
 import { MockIndexerClient } from "../indexer/mock";
 import type { IndexerClient } from "../indexer/client";
@@ -74,10 +75,10 @@ test("published home terminal copies the package command", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", Object.create(navigator, { clipboard: { value: { writeText } } }));
     const container = await render(site.paths.home);
-    expect(container.querySelector(".terminal")?.textContent).toContain("npx drip-mcp");
+    expect(container.querySelector(".terminal")?.textContent).toContain(site.mcp.install);
     const button = container.querySelector<HTMLButtonElement>(".terminal button")!;
     await act(async () => { button.click(); });
-    expect(writeText).toHaveBeenCalledWith("claude mcp add drip -- npx drip-mcp");
+    expect(writeText).toHaveBeenCalledWith(site.mcp.install);
     expect(button.textContent).toBe("Copied");
   } finally { site.mcp.final = final; }
 });
@@ -97,6 +98,55 @@ test("nav links update history and render without reloading", async () => {
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
   expect(container.querySelector("h1")?.textContent).toBe("Build");
+});
+
+test("home side links select and reapply the requested trade side", async () => {
+  vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+  const container = await render(site.paths.home);
+  async function click(selector: string) {
+    await act(async () => { container.querySelector<HTMLElement>(selector)!.click(); });
+  }
+  async function select(side: "long" | "short") {
+    await click(`.market-actions a[href="/trade?side=${side}"]`);
+    expect(window.location.search).toBe(`?side=${side}`);
+    expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === (side === "long" ? "Long" : "Short"))?.getAttribute("aria-pressed")).toBe("true");
+  }
+  await select("short");
+  await click('nav a[href="/"]');
+  await select("long");
+  await click('nav a[href="/"]');
+  await select("short");
+  const long = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Long")!;
+  await act(async () => { long.click(); });
+  expect(long.getAttribute("aria-pressed")).toBe("true");
+  await click('nav a[href="/"]');
+  await select("short");
+});
+
+test("query-only side navigation updates the retained trade page", async () => {
+  vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+  const container = await render("/trade?side=long&keep=1");
+  const links = document.createElement("div");
+  const root = createRoot(links);
+  container.append(links);
+  try {
+    await act(async () => { root.render(<Link to="/trade?side=short&keep=1">Short</Link>); });
+    await act(async () => { links.querySelector("a")!.click(); });
+    expect(window.location.search).toBe("?side=short&keep=1");
+    expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Short")?.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => {
+      window.history.back();
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    expect(window.location.search).toBe("?side=long&keep=1");
+    expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Long")?.getAttribute("aria-pressed")).toBe("true");
+  } finally { await act(async () => { root.unmount(); }); }
+});
+
+test.each(["long", "short", "invalid"])("validates an initial trade side of %s", async side => {
+  const container = await render(`/trade?side=${side}`);
+  const selected = side === "short" ? "Short" : "Long";
+  expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === selected)?.getAttribute("aria-pressed")).toBe("true");
 });
 
 test("trailing slash renders Tools and its nav link only scrolls to top", async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { MarketClient, Side } from "./market/types";
 import type { IndexerClient } from "./indexer/client";
 import { IndexerPanels } from "./Indexer";
@@ -15,12 +15,13 @@ export function useSnapshot(client: MarketClient) {
   return useSyncExternalStore(subscribe, getSnapshot);
 }
 
-export default function App({ client, indexer }: { client: MarketClient; indexer?: IndexerClient | null }) {
+export default function App({ client, indexer, requestedSide, sideRequest }: { client: MarketClient; indexer?: IndexerClient | null; requestedSide?: Side; sideRequest?: number }) {
   const { market, mark, funding, portfolio, fills } = useSnapshot(client);
   const [amount, setAmount] = useState("");
   const [size, setSize] = useState("1");
   const [leverage, setLeverage] = useState("5");
   const [side, setSide] = useState<Side>("long");
+  useEffect(() => { if (requestedSide) setSide(requestedSide); }, [requestedSide, sideRequest]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const leg = portfolio.legs[0];

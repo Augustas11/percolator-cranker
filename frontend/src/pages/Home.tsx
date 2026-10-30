@@ -32,7 +32,7 @@ const builds = [
 export default function Home({ client, indexerBase }: { client: MarketClient; indexerBase: string | null }) {
   const { mark } = useSnapshot(client);
   const price = Number.isFinite(mark.price) ? mark.price.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
-  const command = site.mcp.final ? `claude mcp add drip -- npx ${site.mcp.package}` : null;
+  const command = site.mcp.final ? site.mcp.install : null;
   const facts = [
     { label: "ENGINE", value: "v16", note: "Percolator by aeyakovenko" },
     { label: "MARK LAG", value: site.markLag.value, note: site.markLag.note },
@@ -56,7 +56,7 @@ export default function Home({ client, indexerBase }: { client: MarketClient; in
             {candles.map(c => <g key={c.x} className={c.up ? "candle-up" : "candle-down"}><line x1={c.cx} y1={c.hi} x2={c.cx} y2={c.lo} strokeWidth="1.5" /><rect x={c.x} y={c.y} width="10" height={c.h} rx="2" /></g>)}
           </svg><p className="chart-caption">Illustrative chart</p>
           <div className="market-stats">{[["Mark lag", site.markLag.value], ["Fee", `${site.feeBps} bps`], ["Max fill", site.maxFill]].map(([label, value]) => <div key={label}><div>{label}</div><strong>{value}</strong></div>)}</div>
-          <div className="market-actions"><Link className="button-link" to="/trade">Long</Link><Link className="button-link short" to="/trade">Short</Link></div>
+          <div className="market-actions"><Link className="button-link" to="/trade?side=long">Long</Link><Link className="button-link short" to="/trade?side=short">Short</Link></div>
         </div>
       </div>
     </section>
