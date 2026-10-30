@@ -106,6 +106,8 @@ pub struct OracleCfg {
     pub push_heartbeat_slots: u64,
     #[serde(default = "default_push_poll_ms")]
     pub push_poll_ms: u64,
+    #[serde(default = "default_confirm_poll_ms")]
+    pub confirm_poll_ms: u64,
     #[serde(default = "default_accrual_lag_slots")]
     pub accrual_lag_slots: u64,
     #[serde(default = "default_accrual_max_cranks")]
@@ -127,6 +129,7 @@ fn default_exchange_max_dev() -> u64 { 50 }
 fn default_exchange_min_venues() -> usize { 2 }
 fn default_accrual_lag_slots() -> u64 { 32 }
 fn default_accrual_max_cranks() -> u64 { 10 }
+fn default_confirm_poll_ms() -> u64 { 500 }
 fn default_push_poll_ms() -> u64 { 400 }
 fn default_push_min_move_bps() -> u64 { 1 }
 fn default_priority_fee() -> u64 { 10_000 }
@@ -787,6 +790,16 @@ pub fn pyth_rpc_url(o: &OracleCfg, cluster_rpc: &str) -> String {
 
 #[cfg(test)]
 mod config_tests {
+    #[test]
+    fn confirmation_poll_defaults_and_override() {
+        let config = include_str!("../../launch/sol-perp.toml");
+        for (line, expected) in [("", 500), ("confirm_poll_ms = 750", 750)] {
+            let text = config.replace("confirm_poll_ms = 500", line);
+            let cfg: super::Config = toml::from_str(&text).unwrap();
+            assert_eq!(cfg.oracle.confirm_poll_ms, expected);
+        }
+    }
+
     /// The shipped config must load (deny_unknown_fields catches stray keys).
     #[test]
     fn shipped_config_loads() {

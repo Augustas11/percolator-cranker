@@ -37,7 +37,9 @@ fn run_one_cycle_live_then_resolved_route_pays_owner() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("PERCOLATOR_TEST_RPC / PERCOLATOR_PROGRAM_ID not set"))?;
     let env = setup::bootstrap_with_fee(&rpc, &program_id, common::load_payer()?, 0)?;
     let pyth = observation::empty_pyth_resolver();
+    let blockhash = drip::submit::BlockhashCache::default();
     let ctx = CrankCtx {
+        blockhash: &blockhash,
         rpc: &rpc,
         program_id: &program_id,
         payer: &env.payer,

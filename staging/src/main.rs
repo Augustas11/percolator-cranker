@@ -160,6 +160,7 @@ impl Role {
 struct Staging {
     cfg: Config,
     rpc: RpcClient,
+    blockhash: submit::BlockhashCache,
     program_id: Pubkey,
     payer: Keypair,
     /// marketauth at InitMarket, holding every asset-0 role until the
@@ -225,12 +226,14 @@ impl Staging {
         all.extend_from_slice(ixs);
         let mut keys: Vec<&Keypair> = vec![&self.payer];
         keys.extend_from_slice(signers);
-        let bh = self.rpc.get_latest_blockhash()?;
+        let bh = self.blockhash.get(&self.rpc)?;
         Ok(Transaction::new_signed_with_payer(&all, Some(&self.payer.pubkey()), &keys, bh))
     }
 
     fn send(&self, ixs: &[Instruction], signers: &[&Keypair]) -> Result<()> {
-        self.rpc.send_and_confirm_transaction(&self.tx(ixs, signers)?)?;
+        self.rpc.send_and_confirm_transaction(&self.tx(ixs, signers)?).inspect_err(|e| {
+            if e.to_string().contains("Blockhash not found") { self.blockhash.invalidate(); }
+        })?;
         Ok(())
     }
 
@@ -289,9 +292,8 @@ impl Staging {
     /// do reverts, so only the ones that simulate clean go into a tx. Trades
     /// and Live backing withdrawals need the asset accrued to the current
     /// slot, which these cranks do in the same tx.
-    fn fresh_cranks(&self, data: &[u8], portfolios: &[Pubkey]) -> Result<Vec<Instruction>> {
+    fn fresh_cranks(&self, data: &[u8], portfolios: &[Pubkey], now: u64) -> Result<Vec<Instruction>> {
         let obs = observation::fetch_observation_for_asset(data, 0, &self.pyth)?;
-        let now = self.rpc.get_slot()?;
         let mut out = Vec::new();
         for pf in portfolios {
             let route = CrankRoute::Live { reward_portfolio: None };
@@ -341,6 +343,7 @@ impl Staging {
         let o = cfg.oracle.clone();
         let admin_ata = spl_associated_token_account::get_associated_token_address(&admin.pubkey(), &mint);
         Staging {
+            blockhash: submit::BlockhashCache::default(),
             rpc,
             program_id,
             payer,
@@ -527,7 +530,7 @@ impl Staging {
         // push, and keep market/LP in one snapshot through trade confirmation.
         let _in_flight = lifecycle.lock().unwrap();
         let snapshot = self.rpc.get_multiple_accounts_with_commitment(
-            &[self.market, self.lp_pf], CommitmentConfig::processed(),
+            &[self.market, self.lp_pf, self.trader_pf], CommitmentConfig::processed(),
         )?;
         let data = &snapshot.value[0].as_ref().context("market missing")?.data;
         let (_, g) = read_market(data).map_err(|e| anyhow!("{e:?}"))?;
@@ -536,7 +539,7 @@ impl Staging {
         }
         // A bucket just past expiry refuses fills (EngineStale) until the
         // keeper's crank of a claim holder expires it: skip this tick.
-        let now = self.rpc.get_slot()?;
+        let now = snapshot.context.slot;
         if now.saturating_sub(g.assets[0].slot_last) > self.cfg.oracle.accrual_lag_slots {
             return Ok(Some("refused(accrual_behind)".into()));
         }
@@ -566,9 +569,9 @@ impl Staging {
         }
         let half = mark * self.cfg.matcher.spread_bps / 10_000;
         let price = if q > 0 { mark + half } else { mark - half };
-        let tb = binding::portfolio_binding(&self.rpc.get_account_data(&self.trader_pf)?)?;
-        let lb = binding::portfolio_binding(&self.rpc.get_account_data(&self.lp_pf)?)?;
-        let mut ixs = self.fresh_cranks(&data, &[self.trader_pf, self.lp_pf])?;
+        let tb = binding::portfolio_binding(&snapshot.value[2].as_ref().context("trader portfolio missing")?.data)?;
+        let lb = binding::portfolio_binding(lp_data)?;
+        let mut ixs = self.fresh_cranks(data, &[self.trader_pf, self.lp_pf], now)?;
         ixs.push(self.prog_ix(
             P::TradeNoCpi {
                 account_a_portfolio_id: tb.portfolio_id,
@@ -682,7 +685,7 @@ impl Staging {
     fn withdraw_backing(&self, data: &[u8], d: usize, amount: u128) -> Result<()> {
         let (_, g, s) = self.read()?;
         let k = self.backing_kp.as_ref().context("no backing key on this host")?;
-        let mut ixs = self.fresh_cranks(data, &[self.trader_pf, self.lp_pf])?;
+        let mut ixs = self.fresh_cranks(data, &[self.trader_pf, self.lp_pf], self.rpc.get_slot()?)?;
         let mut metas = self.role_metas(k);
         metas.extend([
             AccountMeta::new(spl_associated_token_account::get_associated_token_address(&k.pubkey(), &self.mint), false),
@@ -723,7 +726,7 @@ impl Staging {
     /// shutdown accrues committed funding up to now.
     fn shutdown(&mut self) -> Result<Option<String>> {
         let (data, g, s) = self.read()?;
-        let mut ixs = self.fresh_cranks(&data, &[self.trader_pf, self.lp_pf])?;
+        let mut ixs = self.fresh_cranks(&data, &[self.trader_pf, self.lp_pf], self.rpc.get_slot()?)?;
         // Mirrors v16_svm.rs `shutdown_asset` (the role keys are ignored by
         // SHUTDOWN; upstream passes the admin's).
         let admin = self.admin.pubkey().to_bytes();
@@ -749,7 +752,7 @@ impl Staging {
     /// Recovery -> Resolved: ResolveMarket by the market authority.
     fn resolve(&mut self) -> Result<Option<String>> {
         let (data, g, s) = self.read()?;
-        let mut ixs = self.fresh_cranks(&data, &[self.trader_pf, self.lp_pf])?;
+        let mut ixs = self.fresh_cranks(&data, &[self.trader_pf, self.lp_pf], self.rpc.get_slot()?)?;
         // Mirrors v16_svm.rs `resolve_market`.
         let ix = P::ResolveMarket { asset_generation_frontier: g.next_market_id, authority_epoch: s.authority_epoch };
         ixs.push(self.prog_ix(ix, self.admin_metas()));
@@ -918,6 +921,7 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         let i = if live && tick % insurance_every == 0 { insurance.record(st.top_up_insurance(st.cfg.amounts.insurance_topup)) } else { "-".into() };
 
         let ctx = CrankCtx {
+            blockhash: &st.blockhash,
             rpc: &st.rpc,
             program_id: &st.program_id,
             payer: &st.payer,

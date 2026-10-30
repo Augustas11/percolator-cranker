@@ -45,6 +45,57 @@ use solana_sdk::{
 use crate::binding::{layout_is_current, V16_LAYOUT_DISCRIMINATOR};
 use crate::observation::FetchedObservation;
 
+#[derive(Debug, Default)]
+pub struct BlockhashCache(std::sync::Mutex<Option<(solana_sdk::hash::Hash, std::time::Instant)>>);
+
+impl BlockhashCache {
+    pub fn get(&self, rpc: &RpcClient) -> Result<solana_sdk::hash::Hash> {
+        let mut cached = self.0.lock().unwrap();
+        if let Some((hash, at)) = *cached {
+            if at.elapsed() < std::time::Duration::from_secs(20) { return Ok(hash); }
+        }
+        let (hash, _) = rpc.get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())
+            .context("get_latest_blockhash")?;
+        *cached = Some((hash, std::time::Instant::now()));
+        Ok(hash)
+    }
+
+    pub fn invalidate(&self) { *self.0.lock().unwrap() = None; }
+}
+
+fn send_and_confirm(rpc: &RpcClient, tx: &Transaction) -> std::result::Result<Signature, Box<ClientError>> {
+    send_and_confirm_with_timeout(rpc, tx, std::time::Duration::from_secs(60))
+}
+
+fn send_and_confirm_with_timeout(rpc: &RpcClient, tx: &Transaction, timeout: std::time::Duration) -> std::result::Result<Signature, Box<ClientError>> {
+    let signature = rpc.send_transaction(tx)?;
+    let started = std::time::Instant::now();
+    let poll = std::time::Duration::from_millis(std::env::var("CRANKER_CONFIRM_POLL_MS")
+        .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(1000).max(1));
+    loop {
+        let response = rpc.get_signature_statuses(&[signature])?;
+        if let Some(status) = response.value.first().and_then(Option::as_ref) {
+            if status.satisfies_commitment(CommitmentConfig::confirmed()) {
+                if let Some(error) = &status.err { return Err(Box::new(ClientErrorKind::TransactionError(error.clone()).into())); }
+                return Ok(signature);
+            }
+        }
+        let left = timeout.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return Err(Box::new(ClientErrorKind::Custom(format!("transaction not confirmed in {} s", timeout.as_secs_f64())).into()));
+        }
+        std::thread::sleep(poll.min(left));
+    }
+}
+
+fn snapshot(rpc: &RpcClient, keys: &[Pubkey], contexts: &[&str]) -> Result<Vec<Vec<u8>>> {
+    let accounts = rpc.get_multiple_accounts(keys).context(contexts[0].to_string())?;
+    accounts.into_iter().zip(contexts).map(|(account, context)| {
+        account.map(|a| a.data).ok_or_else(|| anyhow::anyhow!("account missing"))
+            .context((*context).to_string())
+    }).collect()
+}
+
 /// Classification of a submission's outcome. Encapsulates the three-way
 /// shape described in the module docs and carries enough context to log
 /// or reconcile downstream.
@@ -324,6 +375,23 @@ pub fn submit_crank_routed(
     now_slot: u64,
     deadline: Option<std::time::Instant>,
 ) -> Result<CrankOutcome> {
+    submit_crank_routed_cached(rpc, &BlockhashCache::default(), program_id, payer, market,
+        target_portfolio, route, observations, now_slot, deadline)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn submit_crank_routed_cached(
+    rpc: &RpcClient,
+    blockhash: &BlockhashCache,
+    program_id: &Pubkey,
+    payer: &Keypair,
+    market: &Pubkey,
+    target_portfolio: &Pubkey,
+    route: &CrankRoute<'_>,
+    observations: &[FetchedObservation],
+    now_slot: u64,
+    deadline: Option<std::time::Instant>,
+) -> Result<CrankOutcome> {
     let reward_portfolio = match route {
         CrankRoute::Live { reward_portfolio } => *reward_portfolio,
         CrankRoute::Resolved { .. } => None,
@@ -351,10 +419,22 @@ pub fn submit_crank_routed(
 
     // Snapshot pre-state. Layout 18 is required on the decode path;
     // a stale-layout account is a hard reject, not a crank.
-    let pre_target = rpc
-        .get_account_data(target_portfolio)
-        .context("read target portfolio pre-state")?;
-    if !layout_is_current(&pre_target) {
+    let mut keys = vec![*target_portfolio];
+    let mut pre_contexts = vec!["read target portfolio pre-state"];
+    let mut post_contexts = vec!["read target portfolio post-state"];
+    if let Some(reward) = reward_portfolio {
+        keys.push(*reward);
+        pre_contexts.push("read reward portfolio pre-state");
+        post_contexts.push("read reward portfolio post-state");
+    }
+    if track_market {
+        keys.push(*market);
+        pre_contexts.push("read market pre-state");
+        post_contexts.push("read market post-state");
+    }
+    let pre = snapshot(rpc, &keys, &pre_contexts)?;
+    let pre_target = &pre[0];
+    if !layout_is_current(pre_target) {
         return Ok(CrankOutcome::HardReject {
             error: format!(
                 "target portfolio layout_discriminator != {V16_LAYOUT_DISCRIMINATOR}"
@@ -364,16 +444,9 @@ pub fn submit_crank_routed(
             tx_cu: None,
         });
     }
-    let pre_reward = match reward_portfolio {
-        Some(r) => Some(rpc.get_account_data(r).context("read reward portfolio pre-state")?),
-        None => None,
-    };
-    let pre_market = if track_market {
-        Some(rpc.get_account_data(market).context("read market pre-state")?)
-    } else {
-        None
-    };
-    let pre_state_hash = fnv_hash(&pre_target);
+    let pre_reward = reward_portfolio.map(|_| &pre[1]);
+    let pre_market = track_market.then(|| pre.last().unwrap());
+    let pre_state_hash = fnv_hash(pre_target);
 
     // Fetch a confirmed blockhash to match preflight commitment on public
     // load-balanced RPCs. A preflight "Blockhash not found" means
@@ -386,9 +459,7 @@ pub fn submit_crank_routed(
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Err(DeadlineReached.into());
         }
-        let (bh, _) = rpc
-            .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())
-            .context("get_latest_blockhash")?;
+        let bh = blockhash.get(rpc)?;
         let tx = Transaction::new_signed_with_payer(
             &ixs,
             Some(&payer.pubkey()),
@@ -397,12 +468,11 @@ pub fn submit_crank_routed(
         );
         // Re-check right before the send: the blockhash fetch itself may have
         // crossed the deadline. The deadline is an ADMISSION deadline: once a
-        // tx is sent, its confirmation is bounded by blockhash expiry (the
-        // client's own wait), not by the cycle deadline.
+        // tx is sent, confirmation has its own 60 s bound.
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Err(DeadlineReached.into());
         }
-        match rpc.send_and_confirm_transaction(&tx) {
+        match send_and_confirm(rpc, &tx) {
             Ok(signature) => {
                 // The tx LANDED. From here on, read failures must not turn it
                 // into a failure (that would strike a healthy account and drop
@@ -414,28 +484,15 @@ pub fn submit_crank_routed(
                     (None, None)
                 };
                 let post = (|| -> Result<(Vec<u8>, Option<usize>, Option<usize>)> {
-                    let post_target = rpc
-                        .get_account_data(target_portfolio)
-                        .context("read target portfolio post-state")?;
-                    let reward_bytes_diff = match (reward_portfolio, &pre_reward) {
-                        (Some(r), Some(a)) => Some(byte_diff_count(
-                            a,
-                            &rpc.get_account_data(r).context("read reward portfolio post-state")?,
-                        )),
-                        _ => None,
-                    };
-                    let market_bytes_diff = match &pre_market {
-                        Some(a) => Some(byte_diff_count(
-                            a,
-                            &rpc.get_account_data(market).context("read market post-state")?,
-                        )),
-                        None => None,
-                    };
+                    let post = snapshot(rpc, &keys, &post_contexts)?;
+                    let post_target = post[0].clone();
+                    let reward_bytes_diff = pre_reward.map(|a| byte_diff_count(a, &post[1]));
+                    let market_bytes_diff = pre_market.map(|a| byte_diff_count(a, post.last().unwrap()));
                     Ok((post_target, reward_bytes_diff, market_bytes_diff))
                 })();
                 return Ok(match post {
                     Ok((post_target, reward_bytes_diff, market_bytes_diff)) => {
-                        let target_bytes_diff = byte_diff_count(&pre_target, &post_target);
+                        let target_bytes_diff = byte_diff_count(pre_target, &post_target);
                         let mutated = target_bytes_diff > 0
                             || reward_bytes_diff.is_some_and(|d| d > 0)
                             || market_bytes_diff.is_some_and(|d| d > 0);
@@ -469,6 +526,7 @@ pub fn submit_crank_routed(
             Err(e) => {
                 let (program_cu, tx_cu) = preflight_cu(&e, program_id);
                 let msg = format!("{e}");
+                if msg.contains("Blockhash not found") { blockhash.invalidate(); }
                 if msg.contains("Blockhash not found") && attempt < 4 {
                     std::thread::sleep(std::time::Duration::from_millis(400));
                     attempt += 1;
@@ -749,6 +807,59 @@ fn fnv_hash(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
     use percolator_prog::ix::{CrankObservationHint, Instruction as ProgInstruction};
+
+    #[test]
+    fn blockhash_cache_reuses_expires_and_invalidates() {
+        let rpc = RpcClient::new_mock("succeeds".to_string());
+        let cache = BlockhashCache::default();
+        let hash = cache.get(&rpc).unwrap();
+        let failing_rpc = RpcClient::new_mock("fails".to_string());
+        assert_eq!(cache.get(&failing_rpc).unwrap(), hash);
+        cache.invalidate();
+        assert!(cache.get(&failing_rpc).is_err());
+        *cache.0.lock().unwrap() = Some((hash, std::time::Instant::now() - std::time::Duration::from_secs(20)));
+        assert!(cache.get(&failing_rpc).is_err());
+        assert_eq!(cache.get(&rpc).unwrap(), hash);
+    }
+
+    #[test]
+    fn processed_only_error_times_out_without_a_definitive_error() {
+        use solana_client::rpc_request::RpcRequest;
+        use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+        use solana_transaction_status::{TransactionStatus, TransactionConfirmationStatus};
+        let payer = Keypair::new();
+        let tx = Transaction::new_signed_with_payer(&[], Some(&payer.pubkey()), &[&payer], solana_sdk::hash::Hash::default());
+        let error = TransactionError::InstructionError(3, InstructionError::Custom(22));
+        let status = TransactionStatus { slot: 1, confirmations: Some(0), status: Err(error.clone()),
+            err: Some(error), confirmation_status: Some(TransactionConfirmationStatus::Processed) };
+        let mocks = std::collections::HashMap::from([(RpcRequest::GetSignatureStatuses,
+            serde_json::json!({"context": {"slot": 1}, "value": [status]}))]);
+        let rpc = RpcClient::new_mock_with_mocks("succeeds".to_string(), mocks);
+        let error = send_and_confirm_with_timeout(&rpc, &tx, std::time::Duration::ZERO).unwrap_err();
+        assert!(matches!(error.kind(), ClientErrorKind::Custom(_)));
+        assert!(error.to_string().contains("transaction not confirmed"));
+        assert_eq!(wrapper_error_name_for_crank(&error.to_string(), 3, true), None);
+    }
+
+    #[test]
+    fn confirmation_preserves_executed_custom_error() {
+        use solana_client::rpc_request::RpcRequest;
+        use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+        use solana_transaction_status::{TransactionStatus, TransactionConfirmationStatus};
+        let payer = Keypair::new();
+        let tx = Transaction::new_signed_with_payer(&[], Some(&payer.pubkey()), &[&payer], solana_sdk::hash::Hash::default());
+        let rpc = RpcClient::new_mock("succeeds".to_string());
+        assert_eq!(send_and_confirm(&rpc, &tx).unwrap(), tx.signatures[0]);
+        let error = TransactionError::InstructionError(3, InstructionError::Custom(22));
+        let status = TransactionStatus { slot: 1, confirmations: Some(1), status: Err(error.clone()),
+            err: Some(error), confirmation_status: Some(TransactionConfirmationStatus::Confirmed) };
+        let mocks = std::collections::HashMap::from([(RpcRequest::GetSignatureStatuses,
+            serde_json::json!({"context": {"slot": 1}, "value": [status]}))]);
+        let rpc = RpcClient::new_mock_with_mocks("succeeds".to_string(), mocks);
+        let error = send_and_confirm(&rpc, &tx).unwrap_err();
+        assert!(matches!(error.kind(), ClientErrorKind::TransactionError(_)));
+        assert_eq!(wrapper_error_name_for_crank(&error.to_string(), 3, true), Some("EngineNonProgress"));
+    }
 
     fn reject(name: Option<&'static str>) -> CrankOutcome {
         CrankOutcome::HardReject {

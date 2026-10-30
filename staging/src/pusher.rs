@@ -4,9 +4,6 @@ use std::sync::{Arc, Mutex};
 mod exchanges;
 pub use exchanges::Exchanges;
 
-// Public RPCs rate-limit per method (429, Retry-After 10 s), and the client sleeps on it.
-const CONFIRM_POLL: Duration = Duration::from_millis(200);
-
 /// Replaceable source boundary, with independent public websocket readers.
 // Later: paid pyth.dourolabs.app/hermes source, Authorization: Bearer from env.
 pub enum PriceSource {
@@ -101,6 +98,10 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
         st.rpc.url(), Duration::from_millis(500), CommitmentConfig::processed(),
     );
     let handle = std::thread::spawn(move || {
+        let blockhash = Arc::new(Mutex::new(None::<(solana_sdk::hash::Hash, Instant)>));
+        let mut last_landed = None::<Instant>;
+        let mut last_accrual_read = None::<Instant>;
+        let mut max_move_bps_per_slot = 0u64;
         let mut last_slot = 0;
         let mut market = Pubkey::default();
         let mut read_error = None;
@@ -115,6 +116,8 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                 if market != s.market {
                     market = s.market;
                     last_slot = 0;
+                    last_landed = None;
+                    last_accrual_read = None;
                     s.landed_ms = None;
                     s.published_ms = None;
                 }
@@ -123,21 +126,32 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                 let has_landed = s.landed_ms.is_some();
                 drop(s);
                 let mut send_attempted = false;
+                let mut market_snapshot = None;
                 let result = (|| -> Result<Option<String>> {
-                    let data = rpc.get_account_data(&market)?;
-                    let (_, g) = read_market(&data).map_err(|e| anyhow!("{e:?}"))?;
-                    if g.mode != MarketModeV16::Live { return Ok(None); }
-                    let seq = read_asset_control_sequences(&data, 0).map_err(|e| anyhow!("{e:?}"))?;
-                    let slot = rpc.get_slot()?;
+                    let elapsed = last_landed.map_or(Duration::ZERO, |at| at.elapsed());
                     if let PriceSource::Mock { max_bps, .. } = &mut source {
-                        *max_bps = (g.config.max_price_move_bps_per_slot * slot.saturating_sub(last_slot).max(1)).min(50);
+                        let gap = (elapsed.as_millis() / 400).max(1).min(u64::MAX as u128) as u64;
+                        *max_bps = max_move_bps_per_slot.saturating_mul(gap).min(50);
                     }
                     let (mark, published) = source.latest()?;
-                    let moved = mark.abs_diff(last_mark) as u128 * 10_000 / last_mark as u128;
-                    if has_landed && slot.saturating_sub(last_slot) < heartbeat && moved < cfg.push_min_move_bps as u128 {
+                    let moved = if last_mark == 0 { u128::MAX }
+                        else { mark.abs_diff(last_mark) as u128 * 10_000 / last_mark as u128 };
+                    let heartbeat_due = elapsed >= Duration::from_millis(heartbeat.saturating_mul(400));
+                    if has_landed && !heartbeat_due && moved < cfg.push_min_move_bps as u128 {
                         log_read_state(&mut read_error, None);
                         return Ok(None);
                     }
+                    let response = rpc.get_account_with_commitment(&market, CommitmentConfig::processed())?;
+                    let slot = response.context.slot;
+                    let data = response.value.context("market missing")?.data;
+                    market_snapshot = Some((data.clone(), slot, Instant::now()));
+                    last_accrual_read = Some(Instant::now());
+                    let (_, g) = read_market(&data).map_err(|e| anyhow!("{e:?}"))?;
+                    if g.mode != MarketModeV16::Live { return Ok(None); }
+                    max_move_bps_per_slot = g.config.max_price_move_bps_per_slot;
+                    let seq = read_asset_control_sequences(&data, 0).map_err(|e| anyhow!("{e:?}"))?;
+                    if has_landed && !heartbeat_due && slot.saturating_sub(last_slot) < heartbeat
+                        && moved < cfg.push_min_move_bps as u128 { return Ok(None); }
                     let ix = Instruction {
                         program_id,
                         accounts: vec![AccountMeta::new(oracle.pubkey(), true), AccountMeta::new(market, false)],
@@ -148,13 +162,25 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                         }.encode(),
                     };
                     let ixs = push_instructions(&cfg, ix, matcher_program, oracle.pubkey(), &matcher_ctxs, mark);
-                    let tx = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &[&payer, &oracle], rpc.get_latest_blockhash()?);
+                    let cached = *blockhash.lock().unwrap();
+                    let hash = match cached.filter(|(_, at)| at.elapsed() < Duration::from_secs(20)) {
+                        Some((hash, _)) => hash,
+                        None => {
+                            let hash = rpc.get_latest_blockhash()?;
+                            *blockhash.lock().unwrap() = Some((hash, Instant::now()));
+                            hash
+                        }
+                    };
+                    let tx = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &[&payer, &oracle], hash);
                     if bincode::serialized_size(&tx)? > 1232 { bail!("push transaction exceeds 1232 bytes"); }
                     log_read_state(&mut read_error, None);
                     send_attempted = true;
                     let src_age_ms = launch::now_ms().saturating_sub(published);
                     let send_started = Instant::now();
-                    let sig = rpc.send_transaction_with_config(&tx, RpcSendTransactionConfig { skip_preflight: true, ..Default::default() })?;
+                    let sig = rpc.send_transaction_with_config(&tx, RpcSendTransactionConfig { skip_preflight: true, ..Default::default() })
+                        .inspect_err(|e| {
+                            if e.to_string().contains("Blockhash not found") { *blockhash.lock().unwrap() = None; }
+                        })?;
                     let sent = Instant::now();
                     let send_ms = sent.duration_since(send_started).as_millis();
                     loop {
@@ -169,13 +195,14 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                             s.published_ms = Some(published);
                             drop(s);
                             last_slot = slot;
+                            last_landed = Some(sent);
                             if keeper_log {
                                 println!("{{\"event\":\"mark_lag\",\"ms\":{lag},\"src_age_ms\":{src_age_ms},\"send_ms\":{send_ms},\"confirm_ms\":{confirm_ms},\"target_ms\":{},\"at_ms\":{landed}}}", cfg.lag_target_ms);
                             }
                             return Ok(Some(format!("ok({lag}ms)")));
                         }
                         if sent.elapsed() > Duration::from_secs(30) { bail!("PushAuthMark {sig} not processed in 30 s"); }
-                        std::thread::sleep(CONFIRM_POLL);
+                        std::thread::sleep(Duration::from_millis(cfg.confirm_poll_ms.max(1)));
                     }
                 })();
                 // Reads/build preparation are not PushAuthMark send attempts.
@@ -190,48 +217,71 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                 if outcome != "-" { println!("push={outcome}"); }
                 // Separate transaction: a failed crank must never revert a mark.
                 // The lifecycle lock still covers this send and confirmation.
-                let client = Arc::clone(accrual_rpc.get_inner_client());
-                let accrual_payer = payer.insecure_clone();
-                let accrual_cfg = cfg.clone();
-                let accrual_pyth = pyth.clone();
-                let accrual = run_bounded(&accrual_rpc, Duration::from_secs(3), async move {
-                    let payer = accrual_payer;
-                    let cfg = accrual_cfg;
-                    let pyth = accrual_pyth;
-                    let deadline = Instant::now() + Duration::from_secs(3);
-                    let data = client.get_account_data(&market).await?;
-                    let (_, g) = read_market(&data).map_err(|e| anyhow!("{e:?}"))?;
-                    if g.mode != MarketModeV16::Live { return Ok(None); }
-                    let slot = client.get_slot().await?;
-                    let mut cranks = accrual_crank_count(slot.saturating_sub(g.assets[0].slot_last), cfg.accrual_lag_slots, cfg.accrual_max_cranks_per_tx);
-                    if cranks == 0 || portfolio == Pubkey::default() { return Ok(None); }
-                    let obs = observation::fetch_observation_for_asset(&data, 0, &pyth)?;
-                    let route = CrankRoute::Live { reward_portfolio: None };
-                    let (mut built, index) = submit::build_crank_instructions(
-                        &program_id, &payer.pubkey(), &market, &portfolio, &route, &[obs], slot, false,
-                    );
-                    let crank = built.swap_remove(index);
-                    for attempt in 0..2 {
-                        let mut ixs = vec![
-                            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
-                            ComputeBudgetInstruction::set_compute_unit_price(cfg.priority_fee_micro_lamports),
-                            ComputeBudgetInstruction::request_heap_frame(128 * 1024),
-                        ];
-                        for _ in 0..cranks { ixs.push(crank.clone()); }
-                        if Instant::now() >= deadline { bail!("accrual deadline before send"); }
-                        let tx = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &[&payer], client.get_latest_blockhash().await?);
-                        let result = send_accrual(&client, &tx, deadline).await;
-                        match result {
-                            Err(e) if attempt == 0 && submit::wrapper_error_name(&e.to_string()) == Some("EngineNonProgress") => {
-                                cranks = retry_crank_count(cranks);
+                let accrual_due = market_snapshot.is_some() || last_accrual_read.is_none_or(
+                    |at| at.elapsed() >= Duration::from_millis(cfg.accrual_lag_slots.saturating_mul(400) / 2));
+                if accrual_due {
+                    last_accrual_read = Some(Instant::now());
+                    let client = Arc::clone(accrual_rpc.get_inner_client());
+                    let accrual_payer = payer.insecure_clone();
+                    let accrual_cfg = cfg.clone();
+                    let accrual_pyth = pyth.clone();
+                    let accrual_blockhash = Arc::clone(&blockhash);
+                    let cached_hash = *blockhash.lock().unwrap();
+                    let accrual = run_bounded(&accrual_rpc, Duration::from_secs(3), async move {
+                        let payer = accrual_payer;
+                        let cfg = accrual_cfg;
+                        let pyth = accrual_pyth;
+                        let deadline = Instant::now() + Duration::from_secs(3);
+                        let (data, slot) = match market_snapshot {
+                            Some((data, slot, read_at)) if read_at.elapsed() < Duration::from_secs(1) => (data, slot),
+                            _ => {
+                                let response = client.get_account_with_commitment(&market, CommitmentConfig::processed()).await?;
+                                (response.value.context("market missing")?.data, response.context.slot)
                             }
-                            other => { other?; break; }
+                        };
+                        let (_, g) = read_market(&data).map_err(|e| anyhow!("{e:?}"))?;
+                        if g.mode != MarketModeV16::Live { return Ok(None); }
+                        let mut cranks = accrual_crank_count(slot.saturating_sub(g.assets[0].slot_last), cfg.accrual_lag_slots, cfg.accrual_max_cranks_per_tx);
+                        if cranks == 0 || portfolio == Pubkey::default() { return Ok(None); }
+                        let obs = observation::fetch_observation_for_asset(&data, 0, &pyth)?;
+                        let route = CrankRoute::Live { reward_portfolio: None };
+                        let (mut built, index) = submit::build_crank_instructions(
+                            &program_id, &payer.pubkey(), &market, &portfolio, &route, &[obs], slot, false,
+                        );
+                        let crank = built.swap_remove(index);
+                        let hash = match cached_hash.filter(|(_, at)| at.elapsed() < Duration::from_secs(20)) {
+                            Some((hash, _)) => hash,
+                            None => {
+                                let hash = client.get_latest_blockhash().await?;
+                                *accrual_blockhash.lock().unwrap() = Some((hash, Instant::now()));
+                                hash
+                            }
+                        };
+                        for attempt in 0..2 {
+                            let mut ixs = vec![
+                                ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+                                ComputeBudgetInstruction::set_compute_unit_price(cfg.priority_fee_micro_lamports),
+                                ComputeBudgetInstruction::request_heap_frame(128 * 1024),
+                            ];
+                            for _ in 0..cranks { ixs.push(crank.clone()); }
+                            if Instant::now() >= deadline { bail!("accrual deadline before send"); }
+                            let tx = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &[&payer], hash);
+                            let result = send_accrual(&client, &tx, deadline, cfg.confirm_poll_ms).await;
+                            if result.as_ref().err().is_some_and(|e| e.to_string().contains("Blockhash not found")) {
+                                *accrual_blockhash.lock().unwrap() = None;
+                            }
+                            match result {
+                                Err(e) if attempt == 0 && submit::wrapper_error_name(&e.to_string()) == Some("EngineNonProgress") => {
+                                    cranks = retry_crank_count(cranks);
+                                }
+                                other => { other?; break; }
+                            }
                         }
-                    }
-                    Ok(Some(format!("ok({cranks} cranks)")))
-                });
-                let outcome = state.lock().unwrap().accrual.record(accrual);
-                if outcome != "-" { println!("accrual={outcome}"); }
+                        Ok(Some(format!("ok({cranks} cranks)")))
+                    });
+                    let outcome = state.lock().unwrap().accrual.record(accrual);
+                    if outcome != "-" { println!("accrual={outcome}"); }
+                }
 
             } else {
                 drop(s);
@@ -275,14 +325,15 @@ fn push_instructions(cfg: &launch::OracleCfg, push: Instruction, matcher: Pubkey
     ixs
 }
 
-async fn send_accrual(rpc: &solana_client::nonblocking::rpc_client::RpcClient, tx: &Transaction, deadline: Instant) -> Result<()> {
+async fn send_accrual(rpc: &solana_client::nonblocking::rpc_client::RpcClient, tx: &Transaction, deadline: Instant, confirm_poll_ms: u64) -> Result<()> {
     let sig = rpc.send_transaction_with_config(tx, RpcSendTransactionConfig { skip_preflight: true, ..Default::default() }).await?;
     while Instant::now() < deadline {
         if let Some(status) = rpc.get_signature_status_with_commitment(&sig, CommitmentConfig::processed()).await? {
             status?;
             return Ok(());
         }
-        std::thread::sleep(CONFIRM_POLL);
+        std::thread::sleep(Duration::from_millis(confirm_poll_ms.max(1))
+            .min(deadline.saturating_duration_since(Instant::now())));
     }
     bail!("accrual {sig} not processed before deadline")
 }
