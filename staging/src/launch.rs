@@ -803,6 +803,9 @@ pub fn lifecycle_main(args: &[String]) -> Result<()> {
         if cfg.marketauth != st.admin.pubkey().to_bytes() {
             bail!("keys/multisig.json is not the on-chain marketauth");
         }
+        if !run.join("lifecycle.jsonl").exists() {
+            record(&st, "start", json!({"sig":""}))?;
+        }
         (st.mark, st.feed) = (g.assets[0].effective_price, g.assets[0].effective_price);
         if g.mode == MarketModeV16::Live && g.assets[0].lifecycle != percolator::AssetLifecycleV16::Recovery {
             send(&st, &st.shutdown_ixs()?, &st.admin)
