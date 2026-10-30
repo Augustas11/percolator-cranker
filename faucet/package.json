@@ -1,0 +1,21 @@
+{
+  "name": "devnet-usdc-faucet",
+  "private": true,
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && esbuild src/main.ts --bundle --platform=node --format=esm --packages=external --external:@solana/web3.js --outfile=dist/faucet.js",
+    "test": "vitest run",
+    "start": "node dist/faucet.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "1.98.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3",
+    "vitest": "5.0.3"
+  }
+}

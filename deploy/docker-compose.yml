@@ -58,6 +58,24 @@ services:
     pids_limit: 128
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 
+  # Devnet test-USDC faucet; claimants create their own token accounts.
+  # FAUCET_PAYER_KEYPAIR holds the mint authority (read-only mount).
+  # FAUCET_DATA_DIR persists rolling wallet limits and the UTC daily cap.
+  faucet:
+    build: { context: .., dockerfile: deploy/Dockerfile.faucet }
+    image: percolator-faucet:local
+    restart: unless-stopped
+    user: "${LAUNCH_UID:?set LAUNCH_UID}:${LAUNCH_GID:?set LAUNCH_GID}"
+    environment:
+      FAUCET_RPC_URL: ${LAUNCH_RPC_URL}
+      FAUCET_KEYPAIR: /keys/payer.json
+      FAUCET_STATE: /data/faucet-state.json
+      FAUCET_BIND: 0.0.0.0:8092
+    volumes:
+      - "${FAUCET_PAYER_KEYPAIR:?set FAUCET_PAYER_KEYPAIR}:/keys/payer.json:ro"
+      - "${FAUCET_DATA_DIR:?set FAUCET_DATA_DIR}:/data"
+    ports: ["${FAUCET_PUBLIC_PORT:-127.0.0.1:8092}:8092"]
+
   indexer-proxy:
     image: nginx:1.27-alpine
     restart: unless-stopped

@@ -46,3 +46,13 @@ public/crates/cranker/README.md crates/cranker/README.md
 public/docs/ARCHITECTURE.md docs/ARCHITECTURE.md
 public/docs/RUNBOOK.md docs/RUNBOOK.md
 public/scripts/env.sh scripts/env.sh
+faucet/.gitignore faucet/.gitignore
+faucet/README.md faucet/README.md
+faucet/package.json faucet/package.json
+faucet/package-lock.json faucet/package-lock.json
+faucet/tsconfig.json faucet/tsconfig.json
+faucet/vitest.config.ts faucet/vitest.config.ts
+faucet/src/faucet.ts faucet/src/faucet.ts
+faucet/src/faucet.test.ts faucet/src/faucet.test.ts
+faucet/src/main.ts faucet/src/main.ts
+frontend/src/chain/pda.ts frontend/src/chain/pda.ts

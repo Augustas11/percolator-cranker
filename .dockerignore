@@ -5,7 +5,13 @@ launch-runs/
 **/target/
 *.log
 public/
-frontend/
+frontend/*
+!frontend/src/
+frontend/src/*
+!frontend/src/chain/
+**/node_modules/
+**/dist/
+**/faucet-state.json*
 # Secrets: the filled-in hosting env and any key files never enter the build context.
 **/.env
 **/.env.*
