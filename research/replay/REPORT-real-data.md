@@ -1,5 +1,7 @@
 # SOL-PERP replay on real devnet pusher data
 
+> **Update 2026-10-30:** the stalls were fixed in PR #52. See [REPORT-post-fix.md](REPORT-post-fix.md): +4.8 bps at 12 bps, break-even ~$210k/day.
+
 **Answer: not as the pusher runs today.** At 12 bps the LP loses about 44 bps per $ of volume hedged, or 24 bps
 unhedged, at any volume. The cause is not the lag. Our measured lag at landing is fine: p50 1.0 s, p95 2.1 s.
 The cause is the **stalls**. The pusher often goes quiet for 25–120 s because the exchange quorum fails, and a

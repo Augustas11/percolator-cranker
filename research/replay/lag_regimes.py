@@ -14,6 +14,7 @@ SOURCES = {
     'median_public': 'Exchange median / public RPC; mac 24..26, pearl 0..31,34',
     'median_fast': 'Exchange median / paid RPC / every move; pearl 32,33,35',
     'move_or_heartbeat': 'Exchange median / paid RPC / 10 bps or 60 slots; pearl 36..41',
+    'post_fix': 'Exchange median after stall fix PR #52 (quote feeds, bounded fallback), paid RPC, 10 bps move or 60-slot heartbeat; pearl bots-after-52.log',
 }
 
 
@@ -27,13 +28,19 @@ def pairs(rows):
 
 def extract(paths):
     regimes = {name: dict(source=source, ms=[], at_ms=[], segment=[], latency_rows=[],
-                          **{key: [] for key in COMPONENTS}) for name, source in SOURCES.items()}
-    for file_i, (path, expected) in enumerate(zip(paths, (27, 42))):
+                          **{key: [] for key in COMPONENTS}) for name, source in SOURCES.items()
+               if name != 'post_fix' or len(paths) == 3}
+    for file_i, (path, expected) in enumerate(zip(paths, (27, 42, None))):
         segment = -1
+        after_fix = False
         with open(os.path.expanduser(path)) as f:
             for line in f:
                 if line.startswith('staging SOL-PERP'):
                     segment += 1
+                if line.startswith('{"event":"price_stall_stats"'):
+                    after_fix = True
+                if file_i == 2 and not after_fix:
+                    continue
                 if not line.startswith('{"event":"mark_lag"'):
                     continue
                 if segment < 0:
@@ -41,9 +48,11 @@ def extract(paths):
                 row = json.loads(line)
                 if file_i == 0:
                     name = 'pyth_public' if segment < 24 else 'median_public'
-                else:
+                elif file_i == 1:
                     name = ('move_or_heartbeat' if segment >= 36 else
                             'median_fast' if segment in (32, 33, 35) else 'median_public')
+                else:
+                    name = 'post_fix'
                 out = regimes[name]
                 if all(key in row for key in COMPONENTS):
                     out['latency_rows'].append(len(out['ms']))
@@ -51,8 +60,8 @@ def extract(paths):
                         out[key].append(int(row[key]))
                 out['ms'].append(int(row['ms']))
                 out['at_ms'].append(int(row['at_ms']))
-                out['segment'].append(segment + file_i * 27)
-        if segment + 1 != expected:
+                out['segment'].append(segment + (1000 if file_i == 2 else file_i * 27))
+        if expected is not None and segment + 1 != expected:
             raise ValueError(f'{path}: expected {expected} segments, found {segment + 1}')
     return regimes
 
@@ -62,8 +71,8 @@ def stats(values, percentiles=(50, 95)):
 
 
 def main():
-    if len(sys.argv) != 3:
-        raise SystemExit(f'Usage: {sys.argv[0]} mac.log pearl.log')
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit(f'Usage: {sys.argv[0]} mac.log pearl.log [bots-after-52.log]')
     regimes = extract(sys.argv[1:])
     target = os.path.join(HERE, 'inputs', 'mark_lag_regimes.json')
     with open(target, 'w') as f:

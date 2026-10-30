@@ -103,16 +103,33 @@ def rule(rows, start, end, move_bps=10, heartbeat_ms=24_000, poll_ms=400, k=1.0)
 
 
 def specs():
-    rows = [('const 400 ms', 'const', None, {'lag': 400}),
-            ('const 1 s', 'const', None, {'lag': 1000})]
-    rows += [(name, 'schedule', name, {}) for name in ('pyth_public', 'median_public', 'median_fast')]
-    rows += [('move_or_heartbeat', 'rule', 'move_or_heartbeat', {})]
-    rows += [('move_or_heartbeat logged', 'schedule', 'move_or_heartbeat', {})]  # logged timing, stalls included
-    rows += [(f'{name} k={k:g}', kind, name, {'k': k})
+    whole = [(offset, v, R.ARB_CAP_FRAC) for v in (500_000, 1_000_000, 2_000_000)
+             for offset in range(3)]
+    replay_set = os.environ.get('REPLAY_SET', 'default')
+    if replay_set == 'postfix':
+        rows = [(f'post_fix move={move} hb={slots}', 'rule', 'post_fix',
+                 {'move_bps': move, 'heartbeat_ms': heartbeat}, (12, 15),
+                 whole if move == 10 and slots == 60 else [])
+                for move in (10, 5) for slots, heartbeat in ((60, 26_000), (30, 13_000))]
+        rows += [(f'post_fix k={k:g}', 'rule', 'post_fix',
+                  {'move_bps': 10, 'heartbeat_ms': 26_000, 'k': k}, (12, 15), [])
+                 for k in (0.5, 1.5, 2, 3)]
+        rows += [('post_fix logged', 'schedule', 'post_fix', {}, (12, 15), [])]
+        return rows
+    if replay_set != 'default':
+        raise ValueError(f'unknown REPLAY_SET: {replay_set}')
+    rows = [('const 400 ms', 'const', None, {'lag': 400}, (12,), []),
+            ('const 1 s', 'const', None, {'lag': 1000}, (12,), [])]
+    rows += [(name, 'schedule', name, {}, (12,), []) for name in ('pyth_public', 'median_public')]
+    rows += [('median_fast', 'schedule', 'median_fast', {}, (12, 8, 15), whole)]
+    rows += [('move_or_heartbeat', 'rule', 'move_or_heartbeat', {}, (12, 8, 15),
+              whole + [(offset, 1_000_000, 4 * R.ARB_CAP_FRAC) for offset in range(3)])]
+    rows += [('move_or_heartbeat logged', 'schedule', 'move_or_heartbeat', {}, (12,), [])]  # logged timing, stalls included
+    rows += [(f'{name} k={k:g}', kind, name, {'k': k}, (12,), [])
              for name, kind in (('median_fast', 'schedule'), ('move_or_heartbeat', 'rule')) for k in (0.5, 2)]
-    rows += [('rule move=5 bps', 'rule', 'move_or_heartbeat', {'move_bps': 5}),
-             ('rule heartbeat=10 s', 'rule', 'move_or_heartbeat', {'heartbeat_ms': 10_000}),
-             ('rule move=1 bps', 'rule', 'move_or_heartbeat', {'move_bps': 1})]
+    rows += [('rule move=5 bps', 'rule', 'move_or_heartbeat', {'move_bps': 5}, (12,), []),
+             ('rule heartbeat=10 s', 'rule', 'move_or_heartbeat', {'heartbeat_ms': 10_000}, (12,), []),
+             ('rule move=1 bps', 'rule', 'move_or_heartbeat', {'move_bps': 1}, (12,), [])]
     return rows
 
 
@@ -142,7 +159,7 @@ def main():
           f'Stale-mark refusal is {"enabled" if stale_refusal else "disabled"} (landing age > {MAX_REF_AGE_MS} ms). '
           'Arb statistics are before the inventory limit.\n')
     age_rows, mo_rows, arb_rows, main_rows, whole_rows = [], [], [], [], []
-    for name, kind, regime, kwargs in specs():
+    for name, kind, regime, kwargs, fees, whole in specs():
         path = (MarkPath(**kwargs) if kind == 'const' else
                 schedule(regimes[regime], start, end, **kwargs) if kind == 'schedule' else
                 rule(regimes[regime], start, end, **kwargs))
@@ -151,8 +168,6 @@ def main():
             gap = np.percentile(np.diff(lands), [50, 95])
             print(f'Rule validation {name}: {len(lands)/n:,.1f} pushes/day; '
                   f'landing gaps p50/p95 {gap[0]:.0f}/{gap[1]:.0f} ms.\n', flush=True)
-        extra = name in ('median_fast', 'move_or_heartbeat')
-        fees = (12, 8, 15) if extra else (12,)
         books = {(fee, hz, v): R.Book() for fee in fees for hz in ('tight', 'none') for v in R.VOLS_USD}
         positions = {fee: 0.0 for fee in fees}
         arb = {fee: [0, 0.0] for fee in fees}
@@ -160,10 +175,6 @@ def main():
         refused_notional, refused_ticks = 0.0, 0
         mo = np.zeros(len(R.MARKOUT_S))
         # Whole tickets retain their own positions and books across midnight.
-        whole = [(offset, v, afrac) for v in (500_000, 1_000_000, 2_000_000)
-                 for offset in range(3) for afrac in (R.ARB_CAP_FRAC,)] if extra else []
-        if name == 'move_or_heartbeat':
-            whole += [(offset, 1_000_000, 4 * R.ARB_CAP_FRAC) for offset in range(3)]
         wb = [R.Book() for _ in whole]
         wp, filled = [0.0] * len(whole), np.zeros((len(whole), 2))
         idx0 = 0
@@ -226,7 +237,8 @@ def main():
             print(f'{day} {name} done', file=sys.stderr, flush=True)
         all_age = np.concatenate(ages)
         age_rows.append([name, *[f'{v:.0f}' for v in np.percentile(all_age, [50, 95, 99])],
-                         f'{all_age.mean():.0f}', f'{error_sum/count*1e4:.3f}',
+                         f'{all_age.mean():.0f}', *[f'{np.mean(all_age > age):.2%}' for age in (10_000, 20_000)],
+                         f'{error_sum/count*1e4:.3f}',
                          f'{refused_notional/sum(raw_vol):.2%}'])
         mo_rows.append([name, *[f'{-v/n*1e4:.2f}' for v in mo]])
         for fee in fees:
@@ -248,7 +260,7 @@ def main():
             label = name + (' arb x4' if afrac != R.ARB_CAP_FRAC else '')
             whole_rows.append([label, f'{offset}/3 N', R.fmt_usd(v), f"{s['trade_bps']:.2f}",
                                f"{s['net_day']:,.0f}", f'{fill[0]/fill[1]:.1%}' if fill[1] else '—'])
-    table('Effective mark at real-flow fills', ['Path', 'Age p50 ms', 'p95 ms', 'p99 ms', 'Mean ms', 'Mean absolute mark error bps', 'Refused (stale) share of real-flow notional'], age_rows)
+    table('Effective mark at real-flow fills', ['Path', 'Age p50 ms', 'p95 ms', 'p99 ms', 'Mean ms', 'Age >10 s share', 'Age >20 s share', 'Mean absolute mark error bps', 'Refused (stale) share of real-flow notional'], age_rows)
     table('Adverse selection, real flow (positive = LP loses; bps of base volume)', ['Path', *[f'{h}s' for h in R.MARKOUT_S]], mo_rows)
     table('Latency arb before inventory limit', ['Path', 'Fee', 'Trades/day', 'Arb ticks refused/day', 'Volume % of base', 'LP loss at 0s bps', 'Net of arb fee bps'], arb_rows)
     cols = ['margin @$100k', '@$1M', '@$10M', 'Net/day @$1M', 'SD/day', 'Max DD', 'Break-even', '+ model lines']
