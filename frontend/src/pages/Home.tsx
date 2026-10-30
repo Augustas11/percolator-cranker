@@ -54,7 +54,7 @@ export default function Home({ indexer }: { indexer: IndexerClient | null }) {
     <section>
       <h2>How it works</h2>
       <ol className="card-grid steps">
-        <li><h3>Add the MCP</h3><p>One command adds drip tools to Claude Code, Cursor or any MCP client.</p></li>
+        <li><h3>Add the MCP</h3><p>One command adds drip tools to your MCP client.</p></li>
         <li><h3>Claim test funds</h3><p>The MCP tool claim_test_funds gets devnet SOL and test USDC for your wallet.</p></li>
         <li><h3>Trade SOL-PERP</h3><p>Open and close positions on the devnet market, by hand or through an agent.</p></li>
         <li><h3>Climb the leaderboard</h3><p>Rules are on the Arena page.</p></li>
