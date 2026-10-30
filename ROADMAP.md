@@ -342,7 +342,8 @@ competition. Hold until launch and real flow.
 ## $DRIP token
 
 A pure meme token, fair-launched on pump.fun, timed to an attention moment.
-Waits on the owner's designer assets.
+Brand assets are in (the Drip brand book, already applied on the site). The
+launch itself (token creation and timing) is the owner's call.
 
 ## Signals that change this plan
 
