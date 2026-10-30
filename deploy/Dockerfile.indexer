@@ -1,0 +1,15 @@
+# Read-only devnet indexer image (indexer/README.md). Build from the repo root
+# with the pinned wrapper checked out (scripts/fetch_upstream.sh).
+FROM rust:1.98-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --manifest-path indexer/Cargo.toml
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/indexer/target/release/indexer /usr/local/bin/
+USER 10001
+WORKDIR /data
+ENTRYPOINT ["indexer"]
+CMD ["run"]
