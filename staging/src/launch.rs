@@ -92,6 +92,10 @@ pub struct OracleCfg {
     pub exchange_max_dev_bps: u64,
     #[serde(default = "default_exchange_min_venues")]
     pub exchange_min_venues: usize,
+    #[serde(default = "default_exchange_fallback_ms")]
+    pub exchange_fallback_ms: u64,
+    #[serde(default = "default_exchange_fallback_max_dev")]
+    pub exchange_fallback_max_dev_bps: u64,
     pub pyth_feed_id: String,
     pub pyth_price_account: String,
     /// Read-only RPC the Pyth price account is read from, when it is not the
@@ -122,10 +126,12 @@ pub struct OracleCfg {
     pub open_max_mark_age_ms: u64,
 }
 
-fn default_exchange_binance_url() -> String { "wss://stream.binance.com:9443/ws/solusdt@trade".into() }
+fn default_exchange_binance_url() -> String { "wss://stream.binance.com:9443/ws/solusdt@bookTicker".into() }
 fn default_exchange_clock_skew() -> u64 { 500 }
-fn default_exchange_max_age() -> u64 { 2000 }
+fn default_exchange_max_age() -> u64 { 5000 }
 fn default_exchange_max_dev() -> u64 { 50 }
+fn default_exchange_fallback_ms() -> u64 { 10_000 }
+fn default_exchange_fallback_max_dev() -> u64 { 25 }
 fn default_exchange_min_venues() -> usize { 2 }
 fn default_accrual_lag_slots() -> u64 { 32 }
 fn default_accrual_max_cranks() -> u64 { 10 }
@@ -1014,6 +1020,6 @@ mod config_tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../launch/sol-perp.toml");
         let cfg = super::load(path).expect("launch/sol-perp.toml loads");
         assert_eq!(cfg.cluster["devnet"].matcher_max_ref_age_slots, 80);
-        assert_eq!(cfg.oracle.exchange_binance_url, "wss://stream.binance.com:9443/ws/solusdt@trade");
+        assert_eq!(cfg.oracle.exchange_binance_url, "wss://stream.binance.com:9443/ws/solusdt@bookTicker");
     }
 }

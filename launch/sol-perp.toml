@@ -63,17 +63,22 @@ asset_admin = ""                # cold hardware wallet C
 [oracle]
 # Status polling interval for mark pushes and accrual transactions.
 confirm_poll_ms = 500
-# Public Coinbase + Kraken, plus Binance when reachable without a key.
+# Coinbase level2_batch, Kraken ticker bbo, and Binance bookTicker midpoints.
 # Binance SOL/USDT is treated as USD. Median of fresh prices, then exclude
 # prices >50 bps from that median and recompute; require 2 usable venues.
-# Lag uses the newest USED exchange event timestamp, never receipt time.
-# No quorum means no push; PusherMarkStale remains the outage alarm.
+# Lag uses the newest used quote timestamp; Binance uses receipt time.
+# Missing quorum allows the bounded single-venue fallback below.
 exchange_clock_skew_ms = 500
-exchange_max_age_ms = 2000
+# Quotes remain valid for 5 seconds.
+exchange_max_age_ms = 5000
 exchange_max_dev_bps = 50
 exchange_min_venues = 2
-# Binance.US hosts (binance.com geo-blocks the US with 451) use wss://stream.binance.us:9443/ws/solusdt@trade; same trade message format.
-exchange_binance_url = "wss://stream.binance.com:9443/ws/solusdt@trade"
+# Single-venue fallback window since the last real quorum; 0 disables it.
+exchange_fallback_ms = 10000
+# The lone venue must stay within 25 bps of the last quorum median.
+exchange_fallback_max_dev_bps = 25
+# Binance.US hosts (binance.com geo-blocks the US with 451) use wss://stream.binance.us:9443/ws/solusdt@bookTicker.
+exchange_binance_url = "wss://stream.binance.com:9443/ws/solusdt@bookTicker"
 # Pyth SOL/USD. price_source = "pyth" reads its PriceUpdateV2 account (the
 # sponsored push-oracle account, shard 0, same address on devnet and
 # mainnet) with the wrapper's own parser; a reading older than

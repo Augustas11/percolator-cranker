@@ -527,7 +527,7 @@ impl Staging {
             self.feed = price;
             self.rng = rng;
         }
-        Ok(reading)
+        Ok((reading.0, reading.1))
     }
 
     fn match_trade(&mut self, lifecycle: &std::sync::Mutex<()>) -> Result<Option<String>> {

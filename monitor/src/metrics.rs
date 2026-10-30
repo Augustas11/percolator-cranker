@@ -165,6 +165,8 @@ pub fn render(s: &Value) -> String {
             "mark_lag_ms",
             "mark_lag_p50_ms",
             "mark_lag_p95_ms",
+            "price_gap_longest_ms",
+            "price_gap_over_10s_pct",
             "mark_push_age_seconds",
         ] {
             emit(&format!("keeper_{field}"), vec![], &k[field], false);

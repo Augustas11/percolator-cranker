@@ -1,0 +1,1 @@
+{"channel": "ticker", "type": "update", "data": [{"symbol": "SOL/USD", "bid": 97.06, "bid_qty": 158.49991488, "ask": 97.07, "ask_qty": 10.92008648, "last": 97.07, "volume": 539050.79773971, "vwap": 97.21, "low": 92.15, "high": 103.07, "change": -3.11, "change_pct": -3.1, "trades": 66185, "timestamp": "2026-10-30T09:00:54.416384Z"}]}
