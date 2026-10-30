@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { createRoot } from "react-dom/client";
-import App from "./App";
+import Site from "./site/Site";
 import { MockMarketClient } from "./market/mock";
 import { DevnetMarketClient } from "./market/devnet";
 import { devnetConfig } from "./chain/config";
@@ -11,4 +11,5 @@ const client = import.meta.env.VITE_MARKET_CLIENT === "devnet" ? new DevnetMarke
 const indexer = import.meta.env.VITE_MARKET_CLIENT === "devnet"
   ? indexerUrl === "none" ? null : new HttpIndexerClient(indexerUrl, { market: devnetConfig.market.toBase58(), program: devnetConfig.programId.toBase58() })
   : new MockIndexerClient();
-createRoot(document.getElementById("root")!).render(<App client={client} indexer={indexer} />);
+const indexerBase = import.meta.env.VITE_MARKET_CLIENT === "devnet" ? (indexerUrl === "none" ? null : indexerUrl) : null;
+createRoot(document.getElementById("root")!).render(<Site client={client} indexer={indexer} indexerBase={indexerBase} />);

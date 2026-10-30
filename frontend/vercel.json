@@ -4,6 +4,7 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "rewrites": [
-    { "source": "/indexer/:path*", "destination": "http://159.223.165.194:8091/:path*" }
+    { "source": "/indexer/:path*", "destination": "http://159.223.165.194:8091/:path*" },
+    { "source": "/((?!indexer/|faucet/).*)", "destination": "/index.html" }
   ]
 }
