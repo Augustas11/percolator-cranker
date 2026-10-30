@@ -1,0 +1,48 @@
+/* Design tokens. Swap values here for brand assets. */
+:root {
+  /* Brand palette */
+  --brand-mint: #32D67D;
+  --brand-graphite: #1F1F1F;
+  --brand-neon: #00FD54;
+  --brand-forest: #2A724B;
+  --brand-cloud: #F5F5F5;
+  --brand-mist: #DDDDDD;
+  --brand-coral: #F76B57;
+  --brand-ice: #D9EFEC;
+  --brand-slate: #67828F;
+  --brand-ink: #122126;
+
+  --site-bg: #161616;
+  --site-surface: var(--brand-graphite);
+  --site-text: var(--brand-cloud);
+  --site-muted: #8FA3AD;
+  --site-border: #2E2E2E;
+  --site-accent: var(--brand-mint);
+  --site-on-accent: var(--brand-ink);
+  --site-glow: var(--brand-neon);
+  --site-up: var(--brand-mint);
+  --site-down: var(--brand-coral);
+  --site-tint: #262626;
+  /* Glancyr is the brand display face; Unbounded stands in until it is licensed. */
+  --site-display: "Glancyr", "Unbounded", system-ui, sans-serif;
+  --site-font: "Manrope", system-ui, sans-serif;
+  --site-mono: "Space Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  --site-radius: 14px;
+  --site-width: 1100px;
+  --site-gutter: 16px;
+  --site-xs: 4px;
+  --site-sm: 8px;
+  --site-md: 16px;
+  --site-lg: 24px;
+  --site-xl: 32px;
+  --site-xxl: 64px;
+  --site-text-sm: 0.875rem;
+  --site-text-base: 1rem;
+  --site-text-lg: 1.25rem;
+  --site-text-xl: 1.75rem;
+  --site-text-hero: clamp(2.75rem, 10vw, 5rem);
+  --site-leading: 1.6;
+  --site-heading-leading: 1.1;
+  --site-focus: 3px;
+  --site-focus-offset: 2px;
+}

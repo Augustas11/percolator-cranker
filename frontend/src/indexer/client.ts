@@ -4,6 +4,7 @@ export interface Stats {
   as_of_slot: number | null;
   as_of: number | null;
   cranks: { total: number; success_rate: number | null };
+  fills?: number;
   uptime: { uptime_pct: number | null };
   liquidations_observed: number;
   liquidations_since_slot: number | null;
