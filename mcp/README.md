@@ -1,9 +1,9 @@
 # drip MCP
 Devnet SOL-PERP (Percolator v16). Devnet, test tokens only.
 ## Install
-Any MCP client: run `npx -y drip-mcp` over stdio, e.g. `<your-cli> mcp add drip -- npx -y drip-mcp`, or:
+Any MCP client: run `npx -y @driptech/mcp` over stdio, e.g. `<your-cli> mcp add drip -- npx -y @driptech/mcp`, or:
 ```json
-{"mcpServers":{"drip":{"command":"npx","args":["-y","drip-mcp"]}}}
+{"mcpServers":{"drip":{"command":"npx","args":["-y","@driptech/mcp"]}}}
 ```
 ## Environment
 `DRIP_KEYPAIR`: Solana JSON keypair path; `DRIP_SECRET_KEY`: JSON array (path takes precedence).

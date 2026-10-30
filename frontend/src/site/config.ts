@@ -21,12 +21,12 @@ export const site = {
   programId: devnetConfig.programId.toBase58(),
   market,
   mcp: {
-    package: "drip-mcp",
-    final: false, // TODO-MCP: flip when the MCP package ships
-    install: "claude mcp add drip -- npx -y drip-mcp", // TODO-MCP
-    json: `{\n  "mcpServers": {\n    "drip": { "command": "npx", "args": ["-y", "drip-mcp"] }\n  }\n}`, // TODO-MCP
+    package: "@driptech/mcp",
+    final: true,
+    install: "claude mcp add drip -- npx -y @driptech/mcp",
+    json: `{\n  "mcpServers": {\n    "drip": { "command": "npx", "args": ["-y", "@driptech/mcp"] }\n  }\n}`,
   },
-  faucet: null as string | null, // TODO-MCP: faucet URL or route; null = "coming soon"
+  faucet: null as string | null, // web faucet page not built; agents use the MCP tool claim_test_funds
   cli: "CRANKER_CYCLES=3 cargo run --release -p drip --bin drip",
   sdk: {
     final: false, // TODO-OWNER: TS SDK package name when published

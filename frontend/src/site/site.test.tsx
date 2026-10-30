@@ -49,6 +49,9 @@ test.each([
 });
 
 test("home shows its live mark, recent trades and honest unpublished tools", async () => {
+  const final = site.mcp.final;
+  site.mcp.final = false;
+  try {
   const container = await render(site.paths.home);
   expect(container.textContent).toContain("$150.00");
   expect(container.textContent).toContain("From agent to leaderboard.");
@@ -61,6 +64,7 @@ test("home shows its live mark, recent trades and honest unpublished tools", asy
   expect(container.textContent).toContain("Indexer not configured");
   expect(container.textContent).not.toMatch(/\[TBD\]|\[NPM-PACKAGE\]|npx/);
   expect(container.querySelector(".terminal button")).toBeNull();
+  } finally { site.mcp.final = final; }
 });
 
 test("footer community destinations stay plain text until configured", async () => {
