@@ -325,6 +325,7 @@ fn pass_inner(c: &mut Connection, cfg: &Config) -> Result<()> {
     let pass_time = now();
     db::set_meta(&tx, "last_ingest_at", &pass_time.to_string())?;
     db::set_meta(&tx, "last_ingest_slot", &through_slot.to_string())?;
+    db::set_meta(&tx, "observed_slot", &through_slot.to_string())?;
     let stats = db::stats(&tx, cfg, pass_time)?;
     db::set_meta(&tx, "stats_json", &stats.to_string())?;
     let leaderboard = db::leaderboard(&tx, cfg)?;

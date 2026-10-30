@@ -368,21 +368,36 @@ pub fn leaderboard(c: &Connection, cfg: &Config) -> Result<Value> {
         open_positions: u64,
         portfolios: Vec<String>,
     }
+    let observed_slot = meta(c, "observed_slot")?
+        .map(|s| s.parse::<u64>())
+        .transpose()?;
     let mut wallets: BTreeMap<String, Entry> = BTreeMap::new();
-    let mut stmt = c.prepare("SELECT s.portfolio,owner,capital,pnl,positions_json,slot,c.portfolio IS NOT NULL FROM portfolio_snapshots s LEFT JOIN current_portfolios c ON c.portfolio=s.portfolio WHERE slot=(SELECT MAX(slot) FROM portfolio_snapshots WHERE portfolio=s.portfolio) ORDER BY s.portfolio")?;
-    let rows = stmt.query_map([], |r| {
+    let mut stmt = c.prepare(
+        "SELECT p.portfolio,
+            COALESCE(s.owner, (SELECT signer FROM transfers WHERE portfolio=p.portfolio
+                AND kind='deposit' AND ok=1 AND slot<=?1 ORDER BY slot,signature,ix_index LIMIT 1)),
+            COALESCE(s.capital,'0'),COALESCE(s.pnl,'0'),COALESCE(s.positions_json,'[]'),
+            c.portfolio IS NOT NULL
+         FROM (SELECT portfolio FROM portfolio_snapshots
+               UNION SELECT portfolio FROM transfers WHERE ok=1 AND slot<=?1) p
+         LEFT JOIN portfolio_snapshots s ON s.portfolio=p.portfolio
+            AND s.slot=(SELECT MAX(slot) FROM portfolio_snapshots WHERE portfolio=p.portfolio)
+         LEFT JOIN current_portfolios c ON c.portfolio=p.portfolio
+         WHERE ?1 IS NOT NULL ORDER BY p.portfolio",
+    )?;
+    let rows = stmt.query_map([observed_slot], |r| {
         Ok((
             r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(1)?,
             r.get::<_, String>(2)?,
             r.get::<_, String>(3)?,
             r.get::<_, String>(4)?,
-            r.get::<_, u64>(5)?,
-            r.get::<_, bool>(6)?,
+            r.get::<_, bool>(5)?,
         ))
     })?;
     for row in rows {
-        let (portfolio, owner, capital, pnl, positions, slot, current) = row?;
+        let (portfolio, owner, capital, pnl, positions, current) = row?;
+        let Some(owner) = owner else { continue };
         if cfg.leaderboard_exclude.contains(&portfolio) || cfg.leaderboard_exclude.contains(&owner)
         {
             continue;
@@ -402,10 +417,11 @@ pub fn leaderboard(c: &Connection, cfg: &Config) -> Result<Value> {
             .context("leaderboard equity overflow")?;
         // Withdraw-all pays capital after fees: requested amounts are exact only with
         // maintenance_fee_per_slot = 0 (launch setting; reward epochs reject nonzero).
+        // CloseResolved payouts are not transfers; the leaderboard assumes a Live market (the arena resets if the market resolves).
         let mut transfers = c.prepare_cached(
-            "SELECT kind,amount FROM transfers WHERE portfolio=?1 AND ok=1 AND (?2 OR slot<=?3)",
+            "SELECT kind,amount FROM transfers WHERE portfolio=?1 AND ok=1 AND slot<=?2",
         )?;
-        for transfer in transfers.query_map(params![portfolio, !current, slot], |r| {
+        for transfer in transfers.query_map(params![portfolio, observed_slot], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })? {
             let (kind, amount) = transfer?;
@@ -524,7 +540,7 @@ mod tests {
             ("a", "withdraw", "1000", 1, 3),
             ("a2", "deposit", "500", 1, 3),
             ("closed", "deposit", "1000", 1, 1),
-            ("closed", "withdraw", "900", 1, 3),
+            ("closed", "withdraw", "900", 1, 2),
         ]
         .into_iter()
         .enumerate()
@@ -542,6 +558,7 @@ mod tests {
             c.execute("INSERT INTO fills(signature,ix_index,leg,taker_portfolio,maker_portfolio,status) VALUES(?1,0,0,?2,?3,?4)", params![i.to_string(), taker, maker, status]).unwrap();
         }
         set_meta(&c, "last_ingest_slot", "123").unwrap();
+        set_meta(&c, "observed_slot", "2").unwrap();
         let out = leaderboard(&c, &cfg).unwrap();
         assert_eq!(out["as_of_slot"], 123);
         assert_eq!(
@@ -576,11 +593,106 @@ mod tests {
         assert_eq!(leaderboard(&c, &cfg).unwrap()["entries"][3]["pnl"], "149");
     }
     #[test]
+    fn leaderboard_counts_deposits_through_unchanged_observations() {
+        let c = memory();
+        let (_, cfg) = Config::parse(["serve".into()]).unwrap();
+        let mut s = snap(1, 0);
+        snapshot(&c, &s).unwrap();
+        c.execute("INSERT INTO current_portfolios VALUES(?1)", [A])
+            .unwrap();
+        c.execute("INSERT INTO transfers(signature,ix_index,slot,portfolio,kind,signer,amount,ok) VALUES('initial',0,1,?1,'deposit',?2,'1000',1),('deposit-before-loss',0,2,?1,'deposit',?2,'500',1)", params![A, PROGRAM]).unwrap();
+        // The deposit and loss cancel out, so observing again writes no new snapshot.
+        s.slot = 3;
+        snapshot(&c, &s).unwrap();
+        let latest: u64 = c
+            .query_row("SELECT MAX(slot) FROM portfolio_snapshots", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(latest, 1);
+        set_meta(&c, "observed_slot", "3").unwrap();
+        let out = leaderboard(&c, &cfg).unwrap();
+        assert_eq!(out["entries"][0]["equity"], "1000");
+        assert_eq!(out["entries"][0]["net_deposits"], "1500");
+        assert_eq!(out["entries"][0]["pnl"], "-500");
+    }
+    #[test]
+    fn leaderboard_attributes_unsnapshotted_closed_portfolios_to_deposit_signers() {
+        let c = memory();
+        let (_, cfg) = Config::parse(["serve".into()]).unwrap();
+        for (signature, portfolio, slot, kind, signer, amount, ok) in [
+            ("failed", "closed", 1, "deposit", "wrong", "9999", 0),
+            (
+                "earlier-withdraw",
+                "closed",
+                1,
+                "withdraw",
+                "delegate",
+                "100",
+                1,
+            ),
+            ("first-deposit", "closed", 2, "deposit", "owner", "1000", 1),
+            ("later-deposit", "closed", 3, "deposit", "other", "500", 1),
+            ("withdraw", "closed", 4, "withdraw", "delegate", "900", 1),
+            ("no-deposit", "orphan", 1, "withdraw", "delegate", "100", 1),
+            (
+                "failed-only",
+                "failed-only",
+                1,
+                "deposit",
+                "wrong",
+                "100",
+                0,
+            ),
+        ] {
+            c.execute("INSERT INTO transfers(signature,ix_index,slot,portfolio,kind,signer,amount,ok) VALUES(?1,0,?2,?3,?4,?5,?6,?7)", params![signature, slot, portfolio, kind, signer, amount, ok]).unwrap();
+        }
+        set_meta(&c, "observed_slot", "4").unwrap();
+        assert_eq!(
+            leaderboard(&c, &cfg).unwrap()["entries"],
+            json!([{"rank":1,"wallet":"owner","equity":"0","net_deposits":"500","pnl":"-500","trades":0,"open_positions":0,"portfolios":[]}])
+        );
+    }
+    #[test]
+    fn leaderboard_ignores_transfers_after_observed_slot() {
+        let c = memory();
+        let (_, cfg) = Config::parse(["serve".into()]).unwrap();
+        for portfolio in ["current", "closed", "unsnapshotted"] {
+            if portfolio != "unsnapshotted" {
+                let mut s = snap(1, 0);
+                s.portfolio = portfolio.into();
+                snapshot(&c, &s).unwrap();
+            }
+            c.execute("INSERT INTO transfers(signature,ix_index,slot,portfolio,kind,signer,amount,ok) VALUES(?1,0,1,?1,'deposit',?2,'1000',1)", params![portfolio, PROGRAM]).unwrap();
+        }
+        c.execute("INSERT INTO current_portfolios VALUES('current')", [])
+            .unwrap();
+        set_meta(&c, "observed_slot", "2").unwrap();
+        let before = leaderboard(&c, &cfg).unwrap();
+        assert_eq!(before["entries"][0]["net_deposits"], "3000");
+        for portfolio in ["current", "closed", "unsnapshotted", "future-only"] {
+            c.execute("INSERT INTO transfers(signature,ix_index,slot,portfolio,kind,signer,amount,ok) VALUES(?1,1,3,?1,'deposit','future-owner','9999',1),(?1,2,3,?1,'withdraw','delegate','500',1)", [portfolio]).unwrap();
+        }
+        assert_eq!(leaderboard(&c, &cfg).unwrap(), before);
+    }
+    #[test]
+    fn leaderboard_without_completed_observation_is_empty() {
+        let c = memory();
+        let (_, cfg) = Config::parse(["serve".into()]).unwrap();
+        snapshot(&c, &snap(1, 0)).unwrap();
+        c.execute("INSERT INTO current_portfolios VALUES(?1)", [A])
+            .unwrap();
+        c.execute("INSERT INTO transfers(signature,ix_index,slot,portfolio,kind,signer,amount,ok) VALUES('deposit',0,1,'closed','deposit','owner','1000',1)", []).unwrap();
+        set_meta(&c, "last_ingest_slot", "123").unwrap();
+        assert_eq!(leaderboard(&c, &cfg).unwrap()["entries"], json!([]));
+    }
+    #[test]
     fn leaderboard_checks_amount_overflows_and_limits_ranks() {
         let c = memory();
         let (_, mut cfg) = Config::parse(["serve".into()]).unwrap();
         cfg.leaderboard_exclude.clear();
         assert_eq!(leaderboard(&c, &cfg).unwrap()["entries"], json!([]));
+        set_meta(&c, "observed_slot", "1").unwrap();
         for i in 0..101 {
             let mut s = snap(1, 0);
             s.portfolio = format!("p{i:03}");
