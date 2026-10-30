@@ -1,0 +1,29 @@
+name: mcp
+on:
+  pull_request:
+    paths: ["mcp/**", "frontend/src/chain/**", ".github/workflows/mcp.yml"]
+  push:
+    branches: [main]
+    paths: ["mcp/**", "frontend/src/chain/**", ".github/workflows/mcp.yml"]
+permissions:
+  contents: read
+jobs:
+  mcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+      - run: npm install -g npm@11.6.2
+      - run: npm ci
+      - run: npm run build
+      - run: npm test

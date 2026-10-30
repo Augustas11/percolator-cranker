@@ -2,7 +2,7 @@ import { PublicKey } from "@solana/web3.js";
 import { i128, u8, u16, u32, u64, u128 } from "./bytes";
 import { layout as l } from "./layout";
 
-// repo-prog/src/v16_program.rs:748-749, PortfolioMatcherConfigV16.
+// percolator-prog src/v16_program.rs:748-749, PortfolioMatcherConfigV16.
 export const POSITION_EPOCH_BITS = 49;
 export const POSITION_EPOCH_MAX = (1n << BigInt(POSITION_EPOCH_BITS)) - 1n;
 
