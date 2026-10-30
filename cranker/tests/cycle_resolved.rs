@@ -48,7 +48,8 @@ fn run_one_cycle_live_then_resolved_route_pays_owner() -> Result<()> {
         pyth: &pyth,
         exclude: &[],
     };
-    let budget = CycleBudget::default();
+    // Refresh every cycle: a fresh flat account is otherwise not cranked on first sight.
+    let budget = CycleBudget { quiet_refresh_secs: 0, ..CycleBudget::default() };
     let mut q = Quarantine::new(QuarantineConfig::default());
     let mut records: Vec<SubmissionRecord> = Vec::new();
     let mut cu = CuStats::default();
