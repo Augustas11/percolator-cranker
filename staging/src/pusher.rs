@@ -208,7 +208,7 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                     let obs = observation::fetch_observation_for_asset(&data, 0, &pyth)?;
                     let route = CrankRoute::Live { reward_portfolio: None };
                     let (mut built, index) = submit::build_crank_instructions(
-                        &program_id, &payer.pubkey(), &market, &portfolio, &route, &[obs], slot,
+                        &program_id, &payer.pubkey(), &market, &portfolio, &route, &[obs], slot, false,
                     );
                     let crank = built.swap_remove(index);
                     for attempt in 0..2 {

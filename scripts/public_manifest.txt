@@ -22,6 +22,7 @@ cranker/tests/cycle_resolved.rs crates/cranker/tests/cycle_resolved.rs
 cranker/tests/hard_reject.rs crates/cranker/tests/hard_reject.rs
 cranker/tests/invariants.rs crates/cranker/tests/invariants.rs
 cranker/tests/lifecycle.rs crates/cranker/tests/lifecycle.rs
+cranker/tests/money_path.rs crates/cranker/tests/money_path.rs
 client/Cargo.toml crates/bringup/Cargo.toml
 client/build.rs crates/bringup/build.rs
 client/src/main.rs crates/bringup/src/main.rs

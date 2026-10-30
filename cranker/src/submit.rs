@@ -24,7 +24,7 @@
 //! the wrapper's resolved branch and the Hybrid same-slot rule return it
 //! atomically when there is nothing to do. Only other reverts are failures.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use percolator_prog::ix::{CrankObservationHint, Instruction as ProgInstruction};
 use solana_client::{
     client_error::{ClientError, ClientErrorKind},
@@ -144,13 +144,24 @@ pub fn is_non_progress(error_name: Option<&str>) -> bool {
 }
 
 /// Parse `Program <id> consumed N of M compute units` for `program_id`.
-/// Takes the last match: the top-level invocation logs its total last.
+/// Sum top-level invocations; nested consumption is already included in their totals.
 pub fn program_cu_from_logs(program_id: &Pubkey, logs: &[String]) -> Option<u64> {
-    let prefix = format!("Program {program_id} consumed ");
-    logs.iter().rev().find_map(|l| {
-        let rest = l.strip_prefix(&prefix)?;
-        rest.split_whitespace().next()?.parse().ok()
-    })
+    let invoke_prefix = format!("Program {program_id} invoke [");
+    let consumed_prefix = format!("Program {program_id} consumed ");
+    let mut invocations = Vec::new();
+    let mut total = None;
+    for log in logs {
+        if let Some(depth) = log.strip_prefix(&invoke_prefix) {
+            invocations.push(depth == "1]");
+        } else if let Some(rest) = log.strip_prefix(&consumed_prefix) {
+            if invocations.pop() == Some(true) {
+                if let Some(cu) = rest.split_whitespace().next().and_then(|n| n.parse::<u64>().ok()) {
+                    *total.get_or_insert(0) += cu;
+                }
+            }
+        }
+    }
+    total
 }
 
 /// `(program_cu, tx_cu)` from a preflight-simulation failure, when the RPC
@@ -317,7 +328,8 @@ pub fn submit_crank_routed(
         CrankRoute::Live { reward_portfolio } => *reward_portfolio,
         CrankRoute::Resolved { .. } => None,
     };
-    let (ixs, crank_ix_index) = build_crank_instructions(
+    let mut paired = matches!(route, CrankRoute::Live { .. }) && paired_crank_enabled();
+    let (mut ixs, crank_ix_index) = build_crank_instructions(
         program_id,
         &payer.pubkey(),
         market,
@@ -325,6 +337,7 @@ pub fn submit_crank_routed(
         route,
         observations,
         now_slot,
+        paired,
     );
     // On the Resolved route a backing hint can make market-only progress
     // (expiring a bucket) without touching the target, so the market
@@ -368,8 +381,8 @@ pub fn submit_crank_routed(
     // instructions with a fresh blockhash and stays within the one budget
     // reservation the caller took. The deadline is re-checked before every
     // send.
-    let mut last_err: Option<String> = None;
-    for attempt in 0..5 {
+    let mut attempt = 0;
+    loop {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Err(DeadlineReached.into());
         }
@@ -458,21 +471,22 @@ pub fn submit_crank_routed(
                 let msg = format!("{e}");
                 if msg.contains("Blockhash not found") && attempt < 4 {
                     std::thread::sleep(std::time::Duration::from_millis(400));
-                    last_err = Some(msg);
+                    attempt += 1;
                     continue;
                 }
                 // Definitive: the preflight simulation rejected it, or the tx
                 // executed and failed. Anything else (transport error, status
                 // poll failure, "unable to confirm") is UNCERTAIN: the tx may
                 // have landed. Ask for its status once before assigning blame.
-                let definitive = matches!(
+                let preflight_rejected = matches!(
                     e.kind(),
-                    ClientErrorKind::TransactionError(_)
-                        | ClientErrorKind::RpcError(RpcError::RpcResponseError {
-                            data: RpcResponseErrorData::SendTransactionPreflightFailure(_),
-                            ..
-                        })
+                    ClientErrorKind::RpcError(RpcError::RpcResponseError {
+                        data: RpcResponseErrorData::SendTransactionPreflightFailure(_),
+                        ..
+                    })
                 );
+                let definitive = preflight_rejected
+                    || matches!(e.kind(), ClientErrorKind::TransactionError(_));
                 if !definitive {
                     let signature = tx.signatures[0];
                     match rpc.get_signature_status(&signature) {
@@ -492,23 +506,33 @@ pub fn submit_crank_routed(
                         }
                         Ok(Some(Err(te))) => {
                             let error = format!("{te}");
-                            let error_name = wrapper_error_name_for_ix(&error, crank_ix_index);
+                            let error_name = wrapper_error_name_for_crank(&error, crank_ix_index, paired);
                             return Ok(CrankOutcome::HardReject { error, error_name, program_cu, tx_cu });
                         }
                         _ => return Err(Unconfirmed { signature, error: msg }.into()),
                     }
                 }
-                let error_name = wrapper_error_name_for_ix(&msg, crank_ix_index);
+                if paired {
+                    if let Some(single) = single_crank_retry_instructions(
+                        &ixs, crank_ix_index, preflight_rejected, &msg,
+                    ) {
+                        paired = false;
+                        ixs = single;
+                        continue;
+                    }
+                }
+                let error_name = wrapper_error_name_for_crank(&msg, crank_ix_index, paired);
                 return Ok(CrankOutcome::HardReject { error: msg, error_name, program_cu, tx_cu });
             }
         }
     }
-    Err(anyhow!(last_err.unwrap_or_else(|| "unknown submit error".to_string())))
 }
 
 /// The tx's instruction list: compute-budget ixs, (Resolved route) an
-/// idempotent owner-ATA create, then the crank. Returns the crank's index,
+/// idempotent owner-ATA create, then the crank (twice when Live and paired).
+/// Returns the first crank's index,
 /// which error attribution needs. Pure: no RPC.
+#[allow(clippy::too_many_arguments)]
 pub fn build_crank_instructions(
     program_id: &Pubkey,
     payer: &Pubkey,
@@ -517,6 +541,7 @@ pub fn build_crank_instructions(
     route: &CrankRoute<'_>,
     observations: &[FetchedObservation],
     now_slot: u64,
+    paired: bool,
 ) -> (Vec<Instruction>, usize) {
     // Hint counts must match the fetched oracle accounts, otherwise the
     // wrapper consumes the wrong number of tail accounts per hint.
@@ -583,7 +608,52 @@ pub fn build_crank_instructions(
         }
         .encode(),
     });
+    if paired && matches!(route, CrankRoute::Live { .. }) {
+        ixs.push(ixs[crank_index].clone());
+    }
     (ixs, crank_index)
+}
+
+/// Retry only a preflight rejection of the second crank, before any fee is paid.
+pub fn should_fallback_to_single(preflight_rejected: bool, msg: &str, crank_ix_index: usize) -> bool {
+    let Some((_, rest)) = msg.split_once("Error processing Instruction ") else {
+        return false;
+    };
+    let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    preflight_rejected && n.parse::<usize>().ok() == Some(crank_ix_index + 1)
+}
+
+/// Preserve the first crank only when the pair was rejected before submission.
+pub fn single_crank_retry_instructions(
+    ixs: &[Instruction],
+    crank_ix_index: usize,
+    preflight_rejected: bool,
+    msg: &str,
+) -> Option<Vec<Instruction>> {
+    if !should_fallback_to_single(preflight_rejected, msg, crank_ix_index) {
+        return None;
+    }
+    ixs.get(..crank_ix_index + 1).map(|single| single.to_vec())
+}
+
+/// Pairing is on unless explicitly disabled, like CRANKER_MEASURE_CU.
+fn paired_crank_enabled() -> bool {
+    std::env::var("CRANKER_PAIRED_CRANK").ok().as_deref() != Some("0")
+}
+
+/// Attribute either crank in a pair, including failures confirmed on chain.
+fn wrapper_error_name_for_crank(
+    msg: &str,
+    crank_ix_index: usize,
+    paired: bool,
+) -> Option<&'static str> {
+    wrapper_error_name_for_ix(msg, crank_ix_index).or_else(|| {
+        if paired {
+            wrapper_error_name_for_ix(msg, crank_ix_index + 1)
+        } else {
+            None
+        }
+    })
 }
 
 /// Like [`wrapper_error_name`], but only when the error came from the
@@ -732,7 +802,7 @@ mod tests {
         );
         let route = CrankRoute::Resolved { owner, mint, vault, vault_authority: vault_auth };
         let hint = FetchedObservation { asset_index: 2, oracle_accounts: vec![] };
-        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route, &[hint], 9);
+        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route, &[hint], 9, true);
         assert_eq!(idx, 3, "cu, heap, ATA create, crank");
         assert_eq!(ixs[2].program_id, spl_associated_token_account::ID);
         let crank = &ixs[idx];
@@ -753,12 +823,12 @@ mod tests {
         );
         // Payer is not a signer of the crank unless it owns the portfolio.
         let route_self = CrankRoute::Resolved { owner: payer, mint, vault, vault_authority: vault_auth };
-        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route_self, &[], 9);
+        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route_self, &[], 9, true);
         assert!(ixs[idx].accounts[0].is_signer);
         // Wire: one oracle-less hint for asset 2.
         let (ixs, idx) = build_crank_instructions(
             &program, &payer, &market, &target, &route,
-            &[FetchedObservation { asset_index: 2, oracle_accounts: vec![] }], 9,
+            &[FetchedObservation { asset_index: 2, oracle_accounts: vec![] }], 9, true,
         );
         assert_eq!(&ixs[idx].data[9..], &[1, 2, 0, 0]);
     }
@@ -775,11 +845,85 @@ mod tests {
         );
         let route = CrankRoute::Live { reward_portfolio: Some(&reward) };
         let obs = FetchedObservation { asset_index: 0, oracle_accounts: vec![oracle] };
-        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route, &[obs], 1);
+        let (ixs, idx) = build_crank_instructions(&program, &payer, &market, &target, &route, &[obs], 1, false);
         assert_eq!(idx, 2);
         let keys: Vec<_> = ixs[idx].accounts.iter().map(|m| m.pubkey).collect();
         assert_eq!(keys, vec![payer, market, target, oracle, reward]);
         assert!(ixs[idx].accounts[0].is_signer);
+    }
+
+    #[test]
+    fn pairing_duplicates_only_live_cranks() {
+        let program = Pubkey::new_unique();
+        let payer = Pubkey::new_unique();
+        let market = Pubkey::new_unique();
+        let target = Pubkey::new_unique();
+        let live = CrankRoute::Live {
+            reward_portfolio: None,
+        };
+        let (single, idx) =
+            build_crank_instructions(&program, &payer, &market, &target, &live, &[], 7, false);
+        let (paired, paired_idx) =
+            build_crank_instructions(&program, &payer, &market, &target, &live, &[], 7, true);
+        assert_eq!(idx, 2);
+        assert_eq!(paired_idx, idx);
+        assert_eq!(single.len(), 3);
+        assert_eq!(paired.len(), 4);
+        assert_eq!(&paired[..single.len()], single.as_slice());
+        assert_eq!(paired[idx], paired[idx + 1]);
+        let resolved = CrankRoute::Resolved {
+            owner: payer,
+            mint: Pubkey::new_unique(),
+            vault: Pubkey::new_unique(),
+            vault_authority: Pubkey::new_unique(),
+        };
+        let (off, idx) =
+            build_crank_instructions(&program, &payer, &market, &target, &resolved, &[], 7, false);
+        let (on, _) =
+            build_crank_instructions(&program, &payer, &market, &target, &resolved, &[], 7, true);
+        assert_eq!(idx, 3);
+        assert_eq!(off.len(), 4);
+        assert_eq!(on, off);
+    }
+
+    #[test]
+    fn fallback_requires_preflight_rejection_and_second_instruction_attribution() {
+        let ixs = vec![cu_ix(), heap_ix(), cu_ix(), cu_ix()];
+        for suffix in [
+            "custom program error: 0x16",
+            "Computational budget exceeded",
+        ] {
+            let msg = format!("RPC response error -32002: Transaction simulation failed: Error processing Instruction 3: {suffix} [3 log messages]");
+            assert!(should_fallback_to_single(true, &msg, 2));
+            assert!(!should_fallback_to_single(false, &msg, 2));
+            assert!(!should_fallback_to_single(true, &msg, 3));
+            assert_eq!(single_crank_retry_instructions(&ixs, 2, true, &msg), Some(ixs[..3].to_vec()));
+            assert_eq!(single_crank_retry_instructions(&ixs, 2, false, &msg), None);
+            assert_eq!(single_crank_retry_instructions(&ixs, 3, true, &msg), None);
+        }
+        for msg in [
+            "custom program error: 0x16",
+            "Error processing Instruction x: error",
+            "Error processing Instruction 30: error",
+            "Error processing Instruction 1: error",
+        ] {
+            assert!(!should_fallback_to_single(true, msg, 2), "{msg}");
+        }
+    }
+
+    #[test]
+    fn paired_on_chain_second_crank_nonprogress_is_idle_without_retry() {
+        for ix in [2, 3] {
+            let msg = format!("Error processing Instruction {ix}: custom program error: 0x16");
+            let error_name = wrapper_error_name_for_crank(&msg, 2, true);
+            assert_eq!(error_name, Some("EngineNonProgress"));
+            assert_eq!(reject(error_name).class(), OutcomeClass::Idle);
+            assert!(!should_fallback_to_single(false, &msg, 2));
+        }
+        let second = "Error processing Instruction 3: custom program error: 0x16";
+        assert_eq!(wrapper_error_name_for_crank(second, 2, false), None);
+        let other = "Error processing Instruction 1: custom program error: 0x16";
+        assert_eq!(wrapper_error_name_for_crank(other, 2, true), None);
     }
 
     #[test]
@@ -803,6 +947,23 @@ mod tests {
         ];
         assert_eq!(program_cu_from_logs(&pid, &logs), Some(17_975));
         assert_eq!(program_cu_from_logs(&Pubkey::new_unique(), &logs), None);
+    }
+
+    #[test]
+    fn program_cu_sums_top_level_invocations_without_nested_double_counting() {
+        let pid = Pubkey::new_unique();
+        let logs = vec![
+            format!("Program {pid} invoke [1]"),
+            format!("Program {pid} invoke [2]"),
+            format!("Program {pid} consumed 100 of 1000 compute units"),
+            format!("Program {pid} success"),
+            format!("Program {pid} consumed 300 of 1000 compute units"),
+            format!("Program {pid} success"),
+            format!("Program {pid} invoke [1]"),
+            format!("Program {pid} consumed 200 of 700 compute units"),
+            format!("Program {pid} success"),
+        ];
+        assert_eq!(program_cu_from_logs(&pid, &logs), Some(500));
     }
 
     #[test]

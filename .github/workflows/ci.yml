@@ -56,7 +56,7 @@ jobs:
         run: |
           cargo build --release --all-targets --manifest-path "$CRANKER_MANIFEST"
           cargo build --release --manifest-path "$BRINGUP_DIR/Cargo.toml"
-      - name: unit tests (validator-gated integration tests self-skip)
+      - name: unit tests (validator/SBF-gated integration tests self-skip)
         run: cargo test --release --manifest-path "$CRANKER_MANIFEST"
       - name: indexer unit tests
         if: ${{ hashFiles('indexer/Cargo.toml') != '' }}
@@ -172,6 +172,10 @@ jobs:
       # ~/.cache/solana/v1.52 before building. The Solana cache keeps both.)
       - name: SBF build + local bring-up
         run: ./scripts/m1_bringup.sh
+      - name: local money-path tests
+        env:
+          MONEY_PATH_REQUIRE_SBF: "1"
+        run: cargo test --release --manifest-path "$CRANKER_MANIFEST" --test money_path
       - name: keeper dry-run (3 cycles)
         run: |
           export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
