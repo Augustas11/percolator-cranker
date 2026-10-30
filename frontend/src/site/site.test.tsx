@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, expect, test, vi } from "vitest";
 import Site from "./Site";
 import { site } from "./config";
+import { Link } from "./router";
 import { MockMarketClient } from "../market/mock";
 import { MockIndexerClient } from "../indexer/mock";
 import type { IndexerClient } from "../indexer/client";
@@ -33,7 +34,7 @@ async function render(path: string, indexer: IndexerClient | null = new MockInde
 }
 
 test.each([
-  [site.paths.home, "drip", "How it works", "drip"],
+  [site.paths.home, "The House ofPercolatorPerps.", "From agent to leaderboard.", "drip"],
   [site.paths.tools, "Tools", "Keeper CLI", "Tools · drip"],
   [site.paths.arena, "Arena", "Rules", "Arena · drip"],
   [site.paths.build, "Build", "Add an MCP tool", "Build · drip"],
@@ -44,60 +45,42 @@ test.each([
   expect(container.textContent).toContain(text);
   expect(document.title).toBe(title);
   expect(container.querySelector("nav")).not.toBeNull();
-  expect(container.querySelector("footer")?.textContent).toContain("Devnet only. Test tokens have no value. Software provided as-is.");
+  expect(container.querySelector("footer")?.textContent).toContain("Devnet only. Test tokens, no real value.");
 });
 
-test("home renders mock metrics and optional fills honestly", async () => {
+test("home shows its live mark, illustrative chart and honest unpublished tools", async () => {
   const container = await render(site.paths.home);
-  expect(Array.from(container.querySelectorAll(".metric-grid dd")).map(dd => dd.textContent)).toEqual(["200", "—", "2.5 SOL", "99.5%"]);
-  expect(container.textContent).toContain("Devnet, test tokens. (mock data)");
-  expect(container.textContent).toContain(`As of ${new Date(1793232000 * 1000).toLocaleString()}`);
-});
-
-test("home handles an unconfigured indexer", async () => {
-  const container = await render(site.paths.home, null);
+  expect(container.textContent).toContain("$150.00");
+  expect(container.textContent).toContain("From agent to leaderboard.");
+  expect(container.textContent).toContain("Illustrative chart");
+  expect(container.textContent).toContain("Prizes TBD.");
   expect(container.textContent).toContain("Indexer not configured");
+  expect(container.textContent).not.toMatch(/\[TBD\]|\[NPM-PACKAGE\]|npx/);
+  expect(container.querySelector(".terminal button")).toBeNull();
 });
 
-test("home handles omitted metrics", async () => {
-  const indexer = new MockIndexerClient();
-  vi.spyOn(indexer, "stats").mockResolvedValue({} as Awaited<ReturnType<IndexerClient["stats"]>>);
-  const container = await render(site.paths.home, indexer);
-  expect(Array.from(container.querySelectorAll(".metric-grid dd")).map(dd => dd.textContent)).toEqual(["—", "—", "—", "—"]);
+test("footer community destinations stay plain text until configured", async () => {
+  const container = await render(site.paths.home);
+  const footer = container.querySelector("footer")!;
+  for (const label of ["X", "Telegram", "Status"]) {
+    expect(Array.from(footer.querySelectorAll("span")).some(el => el.textContent === label)).toBe(true);
+    expect(Array.from(footer.querySelectorAll("a")).some(el => el.textContent === label)).toBe(false);
+  }
 });
 
-test("home handles an unavailable indexer", async () => {
-  const indexer = new MockIndexerClient();
-  vi.spyOn(indexer, "stats").mockRejectedValue(new Error("offline"));
-  const container = await render(site.paths.home, indexer);
-  expect(container.textContent).toContain("Market data unavailable");
-});
-
-test("home keeps the last good metrics when a refresh fails", async () => {
-  vi.useFakeTimers();
-  const indexer = new MockIndexerClient();
-  const stats = await indexer.stats();
-  vi.spyOn(indexer, "stats").mockResolvedValueOnce(stats).mockRejectedValue(new Error("offline"));
-  const container = await render(site.paths.home, indexer);
-  await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
-  expect(container.textContent).toContain("Market data unavailable");
-  expect(Array.from(container.querySelectorAll(".metric-grid dd")).map(dd => dd.textContent)).toEqual(["200", "—", "2.5 SOL", "99.5%"]);
-});
-
-test("home refreshes every 30 seconds and stops on unmount", async () => {
-  vi.useFakeTimers();
-  const indexer = new MockIndexerClient();
-  const stats = await indexer.stats();
-  const fetch = vi.spyOn(indexer, "stats").mockResolvedValue({ ...stats, fills: 12, as_of: null, uptime: { uptime_pct: null } });
-  const container = await render(site.paths.home, indexer);
-  expect(container.textContent).toContain("No data yet");
-  expect(Array.from(container.querySelectorAll(".metric-grid dd")).map(dd => dd.textContent)).toEqual(["200", "12", "2.5 SOL", "—"]);
-  await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
-  expect(fetch).toHaveBeenCalledTimes(2);
-  await cleanup!();
-  cleanup = undefined;
-  await vi.advanceTimersByTimeAsync(30000);
-  expect(fetch).toHaveBeenCalledTimes(2);
+test("published home terminal copies the package command", async () => {
+  const final = site.mcp.final;
+  site.mcp.final = true;
+  try {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", Object.create(navigator, { clipboard: { value: { writeText } } }));
+    const container = await render(site.paths.home);
+    expect(container.querySelector(".terminal")?.textContent).toContain(site.mcp.install);
+    const button = container.querySelector<HTMLButtonElement>(".terminal button")!;
+    await act(async () => { button.click(); });
+    expect(writeText).toHaveBeenCalledWith(site.mcp.install);
+    expect(button.textContent).toBe("Copied");
+  } finally { site.mcp.final = final; }
 });
 
 test("nav links update history and render without reloading", async () => {
@@ -117,10 +100,53 @@ test("nav links update history and render without reloading", async () => {
   expect(container.querySelector("h1")?.textContent).toBe("Build");
 });
 
-test("arena shows the placeholder when no leaderboard file exists", async () => {
-  if (Object.keys(import.meta.glob("../arena/Leaderboard.tsx")).length) return;
-  const container = await render(site.paths.arena);
-  expect(container.textContent).toContain("Leaderboard coming soon.");
+test("home side links select and reapply the requested trade side", async () => {
+  vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+  const container = await render(site.paths.home);
+  async function click(selector: string) {
+    await act(async () => { container.querySelector<HTMLElement>(selector)!.click(); });
+  }
+  async function select(side: "long" | "short") {
+    await click(`.market-actions a[href="/trade?side=${side}"]`);
+    expect(window.location.search).toBe(`?side=${side}`);
+    expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === (side === "long" ? "Long" : "Short"))?.getAttribute("aria-pressed")).toBe("true");
+  }
+  await select("short");
+  await click('nav a[href="/"]');
+  await select("long");
+  await click('nav a[href="/"]');
+  await select("short");
+  const long = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Long")!;
+  await act(async () => { long.click(); });
+  expect(long.getAttribute("aria-pressed")).toBe("true");
+  await click('nav a[href="/"]');
+  await select("short");
+});
+
+test("query-only side navigation updates the retained trade page", async () => {
+  vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+  const container = await render("/trade?side=long&keep=1");
+  const links = document.createElement("div");
+  const root = createRoot(links);
+  container.append(links);
+  try {
+    await act(async () => { root.render(<Link to="/trade?side=short&keep=1">Short</Link>); });
+    await act(async () => { links.querySelector("a")!.click(); });
+    expect(window.location.search).toBe("?side=short&keep=1");
+    expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Short")?.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => {
+      window.history.back();
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    expect(window.location.search).toBe("?side=long&keep=1");
+    expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Long")?.getAttribute("aria-pressed")).toBe("true");
+  } finally { await act(async () => { root.unmount(); }); }
+});
+
+test.each(["long", "short", "invalid"])("validates an initial trade side of %s", async side => {
+  const container = await render(`/trade?side=${side}`);
+  const selected = side === "short" ? "Short" : "Long";
+  expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === selected)?.getAttribute("aria-pressed")).toBe("true");
 });
 
 test("trailing slash renders Tools and its nav link only scrolls to top", async () => {
