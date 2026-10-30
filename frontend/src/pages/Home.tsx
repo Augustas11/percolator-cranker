@@ -23,14 +23,14 @@ export default function Home({ indexer }: { indexer: IndexerClient | null }) {
       try {
         const result = await indexer!.stats();
         if (active) { setStats(result); setError(false); }
-      } catch { if (active) { setStats(null); setError(true); } }
+      } catch { if (active) setError(true); }
       finally { pending = false; }
     }
     void refresh();
     const timer = setInterval(() => void refresh(), 30000);
     return () => { active = false; clearInterval(timer); };
   }, [indexer]);
-  const interest = stats ? Object.values(stats.open_interest).reduce((sum, item) => sum + fixed(item.long_q), 0) : NaN;
+  const interest = stats?.open_interest == null ? NaN : Object.values(stats.open_interest ?? {}).reduce((sum, item) => sum + fixed(item.long_q), 0);
 
   return <>
     <div className="hero">
@@ -44,10 +44,10 @@ export default function Home({ indexer }: { indexer: IndexerClient | null }) {
       <h2>Devnet market</h2>
       <p className="note">Devnet, test tokens.{indexer?.mock ? " (mock data)" : ""}</p>
       <dl className="metric-grid">
-        <div><dt>Cranks landed</dt><dd>{stats ? number(stats.cranks.total) : "—"}</dd></div>
+        <div><dt>Cranks landed</dt><dd>{stats?.cranks?.total == null ? "—" : number(stats.cranks.total)}</dd></div>
         <div><dt>Fills</dt><dd>{stats?.fills === undefined ? "—" : number(stats.fills)}</dd></div>
         <div><dt>Open interest</dt><dd>{Number.isFinite(interest) ? `${number(interest)} SOL` : "—"}</dd></div>
-        <div><dt>Crank uptime</dt><dd>{stats?.uptime.uptime_pct == null ? "—" : `${stats.uptime.uptime_pct.toLocaleString("en-US", { maximumFractionDigits: 1 })}%`}</dd></div>
+        <div><dt>Crank uptime</dt><dd>{stats?.uptime?.uptime_pct == null ? "—" : `${stats.uptime.uptime_pct.toLocaleString("en-US", { maximumFractionDigits: 1 })}%`}</dd></div>
       </dl>
       <p role="status">{!indexer ? "Indexer not configured" : error ? "Market data unavailable" : stats?.as_of == null ? "No data yet" : `As of ${new Date(stats.as_of * 1000).toLocaleString()}`}</p>
     </section>

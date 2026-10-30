@@ -10,7 +10,7 @@ const subscribe = (notify: () => void) => {
     window.removeEventListener(navigationEvent, notify);
   };
 };
-const getPath = () => window.location.pathname;
+const getPath = () => window.location.pathname.replace(/\/$/, "") || "/";
 
 export function usePath() {
   return useSyncExternalStore(subscribe, getPath);
@@ -21,8 +21,10 @@ export function Link({ to, onClick, ...props }: AnchorHTMLAttributes<HTMLAnchorE
     onClick?.(event);
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.currentTarget.hasAttribute("target") || event.currentTarget.hasAttribute("download")) return;
     event.preventDefault();
-    window.history.pushState({}, "", to);
-    window.dispatchEvent(new Event(navigationEvent));
+    if (to !== getPath()) {
+      window.history.pushState({}, "", to);
+      window.dispatchEvent(new Event(navigationEvent));
+    }
     window.scrollTo(0, 0);
   }} />;
 }

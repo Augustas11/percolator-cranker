@@ -26,9 +26,10 @@ export default function Tools() {
   return <>
     <h1>Tools</h1>
     <section><h2>MCP</h2>
-      <p>Add drip to Claude Code:</p><Code>{site.mcp.install}</Code>
-      <p>Other MCP clients:</p><Code>{site.mcp.json}</Code>
-      {!site.mcp.final && <p className="note">Package not published yet. Command will change.</p>}
+      {site.mcp.final ? <>
+        <p>Add drip to Claude Code:</p><Code>{site.mcp.install}</Code>
+        <p>Other MCP clients:</p><Code>{site.mcp.json}</Code>
+      </> : <p>The MCP package is not published yet. The install command will appear here when it is.</p>}
     </section>
     <section><h2>Faucet</h2>{site.faucet ? <a href={site.faucet}>Get test funds</a> : <p>Ask your agent to call the MCP tool claim_test_funds. A web faucet is coming.</p>}</section>
     <section><h2>Keeper CLI</h2>
