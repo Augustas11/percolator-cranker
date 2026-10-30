@@ -118,13 +118,13 @@ describe("closing", () => {
   it("refreshes the cap and keeps closing while a position remains", async () => {
     const { drip, close, send } = setup("long", [5_000_000n, 3_000_000n, 0n]);
     vi.mocked(drip.matcher).mockResolvedValueOnce({ state: { maxFill: 6_000_000n } } as Awaited<ReturnType<Drip["matcher"]>>);
-    expect(await closePosition.run(drip, {})).toMatchObject({ complete: true, remaining_sol: 0 });
+    expect(await closePosition.run(drip, {})).toMatchObject({ closed_sol: 5, complete: true, remaining_sol: 0 });
     expect(send).toHaveBeenCalledTimes(2);
     expect(close.mock.calls.map(call => call[6])).toEqual([6_000_000n, 10_000_000n]);
   });
-  it("stops when a refreshed position is empty", async () => {
+  it("reports the actual closed size after a post-crank shrink empties the position", async () => {
     const { drip, send } = setup("long", [25_000_000n, 0n]);
-    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed_sol: 10, complete: true, remaining_sol: 0 });
+    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed_sol: 25, complete: true, remaining_sol: 0 });
     expect(send).toHaveBeenCalledTimes(1);
   });
   it("limits each call to ten fills", async () => {
