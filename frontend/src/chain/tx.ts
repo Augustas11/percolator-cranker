@@ -109,12 +109,13 @@ export async function buildTrade(
 
 export async function buildClose(
   conn: Connection, cfg: DevnetConfig, owner: PublicKey, portfolio: PublicKey,
-  slippageBps: bigint, feeBps: bigint,
+  slippageBps: bigint, feeBps: bigint, maxSizeQ?: bigint,
 ) {
   return buildTradeIxs(conn, cfg, owner, portfolio, (pf, market) => {
     const leg = pf.legs.find(leg => leg.assetIndex === 0 && leg.marketId === market.asset0.marketId);
-    const q = leg ? effectiveAbsQ(market, leg) : 0n;
+    let q = leg ? effectiveAbsQ(market, leg) : 0n;
     if (!leg || q === 0n) throw new Error("no open position");
+    if (maxSizeQ !== undefined) q = q > maxSizeQ ? maxSizeQ : q;
     const price = market.asset0.effectivePrice;
     const slippage = price * slippageBps / 10000n;
     return { sizeQ: leg.side === "long" ? -q : q, limitPrice: leg.side === "long" ? price - slippage : price + slippage };

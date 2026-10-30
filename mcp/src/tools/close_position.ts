@@ -1,5 +1,5 @@
 import { effectiveAbsQ } from "../../../frontend/src/chain/accounts";
-import { buildClose, buildTrade } from "../../../frontend/src/chain/tx";
+import { buildClose } from "../../../frontend/src/chain/tx";
 import { units } from "../drip";
 import { tool } from "./tool";
 
@@ -23,16 +23,16 @@ export default tool({
         if (i === 0) throw new Error("no open position");
         break;
       }
-      const chunk = closeChunk(size, (await drip.matcher()).state.maxFill);
-      const mark = market.asset0.effectivePrice;
-      const result = await drip.send(() => chunk === size
-        ? buildClose(drip.conn, drip.cfg, drip.wallet.publicKey, pf.key, 50n, 12n)
-        : buildTrade(drip.conn, drip.cfg, drip.wallet.publicKey, pf.key, leg.side === "long" ? -chunk : chunk,
-          leg.side === "long" ? mark - mark * 50n / 10000n : mark + mark * 50n / 10000n, 12n));
+      const maxFill = (await drip.matcher()).state.maxFill;
+      const chunk = closeChunk(size, maxFill);
+      const result = await drip.send(() => buildClose(drip.conn, drip.cfg, drip.wallet.publicKey, pf.key, 50n, 12n, maxFill));
       signatures.push(result.signature); explorer.push(result.explorer);
       closed += chunk;
-      if (chunk === size) break;
     }
-    return { signatures, explorer, closed_sol: units(closed) };
+    const pf = await drip.portfolio();
+    const market = await drip.market();
+    const leg = pf?.legs.find(leg => leg.assetIndex === 0 && leg.marketId === market.asset0.marketId);
+    const remaining = leg ? effectiveAbsQ(market, leg) : 0n;
+    return { signatures, explorer, closed_sol: units(closed), complete: remaining === 0n, remaining_sol: units(remaining) };
   },
 });

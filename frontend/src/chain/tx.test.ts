@@ -168,6 +168,12 @@ it.each(["long", "short"] as const)("closes the post-crank %s size and binds its
   expect(q).toBeGreaterThan(0n);
   expect(q).toBeLessThan(effectiveAbsQ(parseMarket(market), parsePortfolio(data).legs[0]));
   expect(i128(trade.data, 51)).toBe(side === "long" ? -q : q);
+  for (const maxSizeQ of [q / 2n, q, q * 2n]) {
+    const capped = (await buildClose(conn, cfg, owner, portfolio, 50n, 12n, maxSizeQ)).at(-1)!;
+    const expected = q > maxSizeQ ? maxSizeQ : q;
+    expect(i128(capped.data, 51)).toBe(side === "long" ? -expected : expected);
+    expect(u64(capped.data, 75)).toBe(u64(trade.data, 75));
+  }
   expect(u64(trade.data, 9)).toBe(parsePortfolio(advanced).positionEpoch);
   expect(u64(trade.data, 43)).toBe(freshMarket.asset0.marketId);
   expect(u64(trade.data, 67)).toBe(12n);

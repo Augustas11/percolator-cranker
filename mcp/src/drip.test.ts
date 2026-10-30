@@ -91,7 +91,7 @@ describe("closing", () => {
     const drip = new Drip(env);
     const market = { asset0: { marketId: 1n, effectivePrice: 150_000_000n, aLong: 1n, aShort: 1n, epochLong: 0n, epochShort: 0n } } as Awaited<ReturnType<Drip["market"]>>;
     vi.spyOn(drip, "market").mockResolvedValue(market);
-    const portfolio = vi.spyOn(drip, "portfolio");
+    const portfolio = vi.spyOn(drip, "portfolio").mockResolvedValue(null);
     for (const size of sizes) portfolio.mockResolvedValueOnce({ key: key.publicKey, legs: [{ assetIndex: 0, marketId: 1n, side, basisPosQ: size, aBasis: 1n, epochSnap: 0n }] } as Awaited<ReturnType<Drip["portfolio"]>>);
     vi.spyOn(drip, "matcher").mockResolvedValue({ state: { maxFill: 10_000_000n } } as Awaited<ReturnType<Drip["matcher"]>>);
     const trade = vi.spyOn(tx, "buildTrade").mockResolvedValue([]);
@@ -105,27 +105,31 @@ describe("closing", () => {
   }
   it.each(["long", "short"] as const)("closes a large %s in capped reducing fills", async side => {
     const { drip, portfolio, trade, close, send } = setup(side, [25_000_000n, 15_000_000n, 5_000_000n]);
-    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1", "sig-2", "sig-3"], explorer: ["explorer-1", "explorer-2", "explorer-3"], closed_sol: 25 });
-    expect(send).toHaveBeenCalledTimes(3); expect(portfolio).toHaveBeenCalledTimes(3);
-    expect(trade).toHaveBeenCalledTimes(2); expect(close).toHaveBeenCalledTimes(1);
-    for (const call of trade.mock.calls) {
-      expect(call.slice(4)).toEqual([side === "long" ? -10_000_000n : 10_000_000n, side === "long" ? 149_250_000n : 150_750_000n, 12n]);
-    }
-    expect(close.mock.calls[0].slice(4)).toEqual([50n, 12n]);
+    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1", "sig-2", "sig-3"], explorer: ["explorer-1", "explorer-2", "explorer-3"], closed_sol: 25, complete: true, remaining_sol: 0 });
+    expect(send).toHaveBeenCalledTimes(3); expect(portfolio).toHaveBeenCalledTimes(5);
+    expect(trade).not.toHaveBeenCalled(); expect(close).toHaveBeenCalledTimes(3);
+    for (const call of close.mock.calls) expect(call.slice(4)).toEqual([50n, 12n, 10_000_000n]);
   });
   it("keeps the common single-fill buildClose path", async () => {
     const { drip, trade, close, send } = setup("long", [5_000_000n]);
-    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed_sol: 5 });
+    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed_sol: 5, complete: true, remaining_sol: 0 });
     expect(trade).not.toHaveBeenCalled(); expect(close).toHaveBeenCalledTimes(1); expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("refreshes the cap and keeps closing while a position remains", async () => {
+    const { drip, close, send } = setup("long", [5_000_000n, 3_000_000n, 0n]);
+    vi.mocked(drip.matcher).mockResolvedValueOnce({ state: { maxFill: 6_000_000n } } as Awaited<ReturnType<Drip["matcher"]>>);
+    expect(await closePosition.run(drip, {})).toMatchObject({ complete: true, remaining_sol: 0 });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(close.mock.calls.map(call => call[6])).toEqual([6_000_000n, 10_000_000n]);
   });
   it("stops when a refreshed position is empty", async () => {
     const { drip, send } = setup("long", [25_000_000n, 0n]);
-    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed_sol: 10 });
+    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed_sol: 10, complete: true, remaining_sol: 0 });
     expect(send).toHaveBeenCalledTimes(1);
   });
   it("limits each call to ten fills", async () => {
-    const { drip, send } = setup("short", Array.from({ length: 10 }, (_, i) => BigInt(110 - 10 * i) * 1_000_000n));
-    expect(await closePosition.run(drip, {})).toMatchObject({ closed_sol: 100 });
+    const { drip, send } = setup("short", Array.from({ length: 11 }, (_, i) => BigInt(110 - 10 * i) * 1_000_000n));
+    expect(await closePosition.run(drip, {})).toMatchObject({ closed_sol: 100, complete: false, remaining_sol: 10 });
     expect(send).toHaveBeenCalledTimes(10);
   });
   it("does not send for an empty position", async () => {
