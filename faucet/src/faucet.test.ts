@@ -1,20 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { ata, TOKEN_PROGRAM_ID } from "../../frontend/src/chain/pda";
-import { ClaimError, DEFAULT_MINT, Faucet, WINDOW, checkGetBody, checkTokenAccount, mintTo, parseState, parseWallet, pruneState, readBody, withTimeout, type State } from "./faucet";
+import { ClaimError, DEFAULT_MINT, Faucet, WINDOW, checkGetBody, checkTokenAccount, mintTo, needsSol, parseState, parseWallet, pruneState, readBody, withTimeout, type State } from "./faucet";
 
 const wallet = Keypair.generate().publicKey;
 const other = Keypair.generate().publicKey;
 const mint = new PublicKey(DEFAULT_MINT);
 const start = Date.parse("2026-10-30T23:59:00Z") / 1000;
-const empty = (): State => ({ wallets: {}, day: "2026-10-30", count: 0 });
+const empty = (): State => ({ wallets: {}, day: "2026-10-30", count: 0, sol_count: 0 });
 async function* chunks(...values: string[]) { for (const value of values) yield Buffer.from(value); }
-function setup(dailyCap = 200) {
+function setup(dailyCap = 200, solDailyCap = 20) {
   let now = start;
   const save = vi.fn(async (_state: State) => {});
-  const send = vi.fn(async (_wallet: PublicKey, _destination: PublicKey) => "signature");
-  const faucet = new Faucet(empty(), { mint, dailyCap, amountUsdc: 1000, now: () => now, save, send });
-  return { faucet, save, send, setTime: (time: number) => { now = time; } };
+  const sent = { signature: "signature", solLamports: 50_000_000 };
+  const send = vi.fn(async (_wallet: PublicKey, _destination: PublicKey, _allowSol: boolean) => sent);
+  const faucet = new Faucet(empty(), { mint, dailyCap, amountUsdc: 1000, solDailyCap, solLamports: 50_000_000, minPayerLamports: 3_000_000_000, payerLamports: 4_000_000_000, now: () => now, save, send });
+  return { faucet, save, send, sent, setTime: (time: number) => { now = time; } };
 }
 
 describe("request validation", () => {
@@ -66,13 +67,14 @@ describe("limits and reservations", () => {
     setTime(start + 60);
     expect(faucet.health().claims_today).toBe(0);
     await faucet.claim(other);
+    expect(faucet.health().sol_drips_today).toBe(1);
     expect(faucet.health().claims_today).toBe(1);
     await expect(faucet.claim(wallet)).rejects.toMatchObject({ status: 429 });
   });
   it("persists reservations before sending and releases failures", async () => {
     const { faucet, save, send } = setup(1);
     send.mockImplementationOnce(async () => {
-      expect(save).toHaveBeenCalledWith(expect.objectContaining({ count: 1 }));
+      expect(save).toHaveBeenCalledWith(expect.objectContaining({ count: 1, sol_count: 1 }));
       throw new ClaimError(503, "simulation failed");
     });
     await expect(faucet.claim(wallet)).rejects.toMatchObject({ status: 503 });
@@ -94,15 +96,63 @@ describe("limits and reservations", () => {
       status: 503, nextClaimAfter: start + WINDOW, message: `Mint outcome unknown; try again after ${start + WINDOW}`,
     });
     expect(save).toHaveBeenCalledTimes(1);
+    expect(faucet.health().sol_drips_today).toBe(1);
     expect(faucet.health().claims_today).toBe(1);
     await expect(faucet.claim(wallet)).rejects.toMatchObject({ status: 429, nextClaimAfter: start + WINDOW });
     await expect(faucet.claim(other)).rejects.toMatchObject({ status: 429, message: "Global daily cap reached" });
     expect(send).toHaveBeenCalledTimes(1);
   });
+  it.each([false, true])("releases ambiguous USDC-only SOL slots even if saving fails: %s", async saveFails => {
+    const { faucet, save, send } = setup(1);
+    send.mockRejectedValueOnce(new ClaimError(503, "submission failed", undefined, true, 0));
+    if (saveFails) save.mockResolvedValueOnce().mockRejectedValueOnce(new Error("disk full"));
+    await expect(faucet.claim(wallet)).rejects.toMatchObject({
+      status: 503, nextClaimAfter: start + WINDOW, submitted: true, solLamports: 0,
+      message: `Mint outcome unknown; try again after ${start + WINDOW}`,
+    });
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ count: 1, sol_count: 0 }));
+    expect(faucet.health()).toMatchObject({ claims_today: 1, sol_drips_today: 0 });
+    await expect(faucet.claim(wallet)).rejects.toMatchObject({ status: 429 });
+    await expect(faucet.claim(other)).rejects.toMatchObject({ status: 429, message: "Global daily cap reached" });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("reserves a SOL slot and persists its release when no SOL is sent", async () => {
+    const { faucet, save, send, sent } = setup();
+    send.mockImplementationOnce(async () => {
+      expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ sol_count: 1, count: 1 }));
+      faucet.observePayer(3_000_000_000);
+      return { ...sent, solLamports: 0 };
+    });
+    expect(await faucet.claim(wallet)).toMatchObject({ sol: 0 });
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ sol_count: 0, count: 1 }));
+    expect(faucet.health()).toMatchObject({ sol_drips_today: 0, sol_daily_cap: 20, sol_paused: true });
+    faucet.observePayer(4_000_000_000);
+    expect(await faucet.claim(other)).toMatchObject({ sol: 0.05 });
+    expect(faucet.health().sol_paused).toBe(false);
+  });
+  it("continues USDC claims with allowSol false at the SOL cap and resets at midnight", async () => {
+    const { faucet, send, sent, setTime } = setup(200, 1);
+    await faucet.claim(wallet);
+    expect(faucet.health()).toMatchObject({ sol_drips_today: 1, sol_daily_cap: 1, sol_paused: true });
+    send.mockResolvedValueOnce({ ...sent, solLamports: 0 });
+    expect(await faucet.claim(other)).toMatchObject({ amount_usdc: 1000, sol: 0 });
+    expect(send).toHaveBeenLastCalledWith(other, ata(other, mint), false);
+    setTime(start + 60);
+    expect(faucet.health()).toMatchObject({ sol_drips_today: 0, claims_today: 0, sol_paused: false });
+  });
+  it("keeps the confirmed claim if persisting a released SOL slot fails", async () => {
+    const { faucet, save, send, sent } = setup();
+    send.mockResolvedValueOnce({ ...sent, solLamports: 0 });
+    save.mockResolvedValueOnce().mockRejectedValueOnce(new Error("disk full"));
+    await expect(faucet.claim(wallet)).resolves.toMatchObject({ ok: true, sol: 0, signature: "signature" });
+    expect(faucet.health()).toMatchObject({ claims_today: 1, sol_drips_today: 0 });
+    await expect(faucet.claim(wallet)).rejects.toMatchObject({ status: 429 });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
   it("rejects overflow immediately and releases queue slots after failures", async () => {
     const { faucet, send } = setup();
     let release!: () => void;
-    send.mockImplementationOnce(() => new Promise<string>(resolve => { release = () => resolve("signature"); }));
+    send.mockImplementationOnce(() => new Promise<{ signature: string; solLamports: number }>(resolve => { release = () => resolve({ signature: "signature", solLamports: 50_000_000 }); }));
     const queued = Array.from({ length: 8 }, () => faucet.claim(wallet).catch(error => error));
     await expect(faucet.claim(other)).rejects.toMatchObject({ status: 503, message: "Faucet busy" });
     await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
@@ -115,7 +165,7 @@ describe("limits and reservations", () => {
     const results = await Promise.allSettled([faucet.claim(wallet), faucet.claim(other)]);
     expect(results.map(result => result.status)).toEqual(["fulfilled", "rejected"]);
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith(wallet, ata(wallet, mint));
+    expect(send).toHaveBeenCalledWith(wallet, ata(wallet, mint), true);
   });
 });
 
@@ -136,18 +186,23 @@ describe("RPC timeouts", () => {
 
 describe("state", () => {
   it("prunes expired wallets at the exact boundary", () => {
-    const state = { wallets: { [wallet.toBase58()]: start - WINDOW, [other.toBase58()]: start - 1 }, day: "2026-10-29", count: 200 };
-    expect(pruneState(state, start)).toEqual({ wallets: { [other.toBase58()]: start - 1 }, day: "2026-10-30", count: 0 });
+    const state = { wallets: { [wallet.toBase58()]: start - WINDOW, [other.toBase58()]: start - 1 }, day: "2026-10-29", count: 200, sol_count: 20 };
+    expect(pruneState(state, start)).toEqual({ wallets: { [other.toBase58()]: start - 1 }, day: "2026-10-30", count: 0, sol_count: 0 });
   });
   it("prunes on persisted claims", async () => {
     const { faucet, save, setTime } = setup();
     await faucet.claim(wallet);
     setTime(start + WINDOW);
     await faucet.claim(other);
-    expect(save).toHaveBeenLastCalledWith({ wallets: { [other.toBase58()]: start + WINDOW }, day: "2026-10-31", count: 1 });
+    expect(save).toHaveBeenLastCalledWith({ wallets: { [other.toBase58()]: start + WINDOW }, day: "2026-10-31", count: 1, sol_count: 1 });
   });
   it("validates saved state", () => {
     expect(parseState(empty())).toEqual(empty());
+    const { sol_count, ...legacy } = empty();
+    expect(parseState(legacy)).toEqual(empty());
+    for (const sol_count of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, null, "1"]) {
+      expect(() => parseState({ ...empty(), sol_count })).toThrow();
+    }
     for (const value of [null, {}, { ...empty(), count: -1 }, { ...empty(), wallets: [] }, { ...empty(), wallets: { bad: 3 } }]) {
       expect(() => parseState(value)).toThrow();
     }
@@ -183,5 +238,17 @@ describe("SPL token checks", () => {
       { pubkey: destination, isWritable: true, isSigner: false },
       { pubkey: wallet, isWritable: false, isSigner: true },
     ]);
+  });
+});
+
+describe("SOL decision", () => {
+  it.each([
+    [0, 3_050_000_000, true, true],
+    [49_999_999, 4_000_000_000, true, true],
+    [50_000_000, 4_000_000_000, true, false],
+    [0, 3_049_999_999, true, false],
+    [0, 4_000_000_000, false, false],
+  ])("decides for wallet %s, payer %s, allowed %s", (walletBalance, payerBalance, allowSol, expected) => {
+    expect(needsSol(walletBalance, payerBalance, 50_000_000, 3_000_000_000, allowSol)).toBe(expected);
   });
 });

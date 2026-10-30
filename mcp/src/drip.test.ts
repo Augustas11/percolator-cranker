@@ -152,18 +152,53 @@ describe("backend availability", () => {
     expect(fetch).toHaveBeenCalledWith(`${drip.apiUrl}/faucet/health`, expect.not.objectContaining({ method: "POST" }));
     expect(balance).not.toHaveBeenCalled(); expect(account).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled();
   });
-  it("creates the ATA only after successful faucet health and before claiming", async () => {
+  it.each([2_049_279, 2_049_280, 2_049_281])("creates the ATA only when rent and fees are affordable: %s", async balance => {
     const drip = new Drip(env), order: string[] = [];
     vi.spyOn(drip, "fetchJson").mockImplementation(async path => { order.push(path); return {} as never; });
-    vi.spyOn(drip.conn, "getBalance").mockResolvedValue(1_000_000_000);
+    vi.spyOn(drip.conn, "getMinimumBalanceForRentExemption").mockResolvedValue(2_039_280);
+    vi.spyOn(drip.conn, "getBalance").mockResolvedValue(balance);
     vi.spyOn(drip.conn, "getAccountInfo").mockResolvedValue(null);
     vi.spyOn(drip, "send").mockImplementation(async build => {
       order.push("create ATA"); expect(await build()).toHaveLength(1);
       return { signature: "sig", explorer: "explorer" };
     });
     await claimTestFunds.run(drip, {});
-    expect(order).toEqual(["/faucet/health", "create ATA", "/faucet/claim"]);
+    expect(order).toEqual(balance >= 2_049_280 ? ["/faucet/health", "create ATA", "/faucet/claim"] : ["/faucet/health", "/faucet/claim"]);
+    expect(drip.conn.getMinimumBalanceForRentExemption).toHaveBeenCalledWith(165);
   });
+  it("lets the faucet fund a zero-SOL wallet without an airdrop or local ATA creation", async () => {
+    const drip = new Drip(env);
+    const fetch = vi.spyOn(drip, "fetchJson").mockResolvedValue({ sol: 0.05 });
+    vi.spyOn(drip.conn, "getMinimumBalanceForRentExemption").mockResolvedValue(2_039_280);
+    vi.spyOn(drip.conn, "getBalance").mockResolvedValue(0);
+    vi.spyOn(drip.conn, "getAccountInfo").mockResolvedValue(null);
+    const airdrop = vi.spyOn(drip.conn, "requestAirdrop"), send = vi.spyOn(drip, "send");
+    expect(await claimTestFunds.run(drip, {})).toEqual({ sol: 0.05 });
+    expect(fetch).toHaveBeenLastCalledWith("/faucet/claim", { wallet: drip.wallet.publicKey.toBase58() });
+    expect(airdrop).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled();
+  });
+  it.each([0, 2_049_279, 2_049_280])("adds the manual SOL hint only below rent plus the fee margin: %s", async balance => {
+    const drip = new Drip(env);
+    vi.spyOn(drip, "fetchJson").mockResolvedValueOnce({}).mockRejectedValueOnce(new Error("Claim unavailable"));
+    vi.spyOn(drip.conn, "getMinimumBalanceForRentExemption").mockResolvedValue(2_039_280);
+    vi.spyOn(drip.conn, "getBalance").mockResolvedValue(balance);
+    vi.spyOn(drip.conn, "getAccountInfo").mockResolvedValue({} as never);
+    const expected = balance < 2_049_280
+      ? `Claim unavailable; get devnet SOL at https://faucet.solana.com for wallet ${drip.wallet.publicKey.toBase58()}`
+      : "Claim unavailable";
+    await expect(claimTestFunds.run(drip, {})).rejects.toThrow(expected);
+  });
+  it("does not recreate an existing ATA", async () => {
+    const drip = new Drip(env);
+    vi.spyOn(drip, "fetchJson").mockResolvedValue({});
+    vi.spyOn(drip.conn, "getMinimumBalanceForRentExemption").mockResolvedValue(2_039_280);
+    vi.spyOn(drip.conn, "getBalance").mockResolvedValue(10_000_000);
+    vi.spyOn(drip.conn, "getAccountInfo").mockResolvedValue({} as never);
+    const send = vi.spyOn(drip, "send");
+    await claimTestFunds.run(drip, {});
+    expect(send).not.toHaveBeenCalled();
+  });
+
 });
 
 describe("matcher", () => {
