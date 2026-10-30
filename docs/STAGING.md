@@ -90,6 +90,8 @@ Ctrl-C stops it; the validator is killed on exit and its `ledger/` deleted
 `ledger/`, `payer.json`.
 
 Knobs (environment): `STAGING_HOURS`, `STAGING_TICK_MS`, `STAGING_SEED`,
+`STAGING_TRADE_EVERY_SECS` (default 300 in bots mode, 0 = every tick),
+a close needed for a backing roll is not delayed by this cadence;
 `STAGING_BACKING_TENOR_SLOTS`, `STAGING_INSURANCE_EVERY`,
 `STAGING_LIFECYCLE_TICK`, `STAGING_PUSH_HEARTBEAT_SLOTS`,
 `STAGING_SUMMARY_EVERY` (100),
@@ -133,7 +135,8 @@ Every `STAGING_SUMMARY_EVERY` ticks, and at the end, one JSON line:
 from its tick on until it lands; SOL must be relisted before the end). 1 as
 soon as a role fails `STAGING_MAX_CONSEC_FAIL` times in a row, or more than
 5% of its attempts (after 20), or when the lifecycle did not complete, so an unattended run is judged by the exit code and the
-final summary line. The script prints that line again at the end.
+final summary line. Trade failures, like accrual failures, are counted but
+never end the run. The script prints that line again at the end.
 
 ## Known upstream issues
 
