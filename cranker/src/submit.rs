@@ -71,7 +71,7 @@ fn send_and_confirm_with_timeout(rpc: &RpcClient, tx: &Transaction, timeout: std
     let signature = rpc.send_transaction(tx)?;
     let started = std::time::Instant::now();
     let poll = std::time::Duration::from_millis(std::env::var("CRANKER_CONFIRM_POLL_MS")
-        .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(1000).max(1));
+        .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(2000).max(1));
     loop {
         let response = rpc.get_signature_statuses(&[signature])?;
         if let Some(status) = response.value.first().and_then(Option::as_ref) {

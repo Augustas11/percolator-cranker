@@ -204,6 +204,51 @@ fn renew_refresh_on_idle(portfolio: &PortfolioAccountV16Account) -> bool {
     !portfolio.legs.iter().any(|leg| leg.active != 0)
 }
 
+// Stay below the monitor's KeeperNoSuccessfulCrank alert (750 slots + 1 minute).
+const KEEPER_HEARTBEAT_SECS: u64 = 240;
+
+fn assess_refresh(
+    key: Pubkey,
+    portfolio: &PortfolioAccountV16Account,
+    group: &MarketGroupV16,
+    started: std::time::Instant,
+    now_slot: u64,
+    budget: &CycleBudget,
+    state: &mut scheduler::ScheduleState,
+) -> (work::PortfolioWork, bool) {
+    let work = work::assess(portfolio, group);
+    let due = work::refresh_due(
+        portfolio, group, work, state.refresh.get(&key), started, now_slot,
+        budget.quiet_refresh_secs, budget.flat_refresh_secs,
+    );
+    if !due && renew_refresh_on_idle(portfolio) {
+        state.refresh.entry(key).or_insert_with(|| work::RefreshRecord::new(started, now_slot, group));
+    }
+    (work, due)
+}
+
+/// Candidates are from a Live market; due work may be blocked before landing.
+fn heartbeat_candidate(
+    candidates: &[(Pubkey, bool)],
+    state: &mut scheduler::ScheduleState,
+    now: std::time::Instant,
+    quiet_refresh_secs: u64,
+) -> Option<Pubkey> {
+    if quiet_refresh_secs == 0
+        || now.saturating_duration_since(state.last_heartbeat_or_landed.unwrap_or(now)).as_secs() < KEEPER_HEARTBEAT_SECS
+    {
+        return None;
+    }
+    let candidate = candidates.iter()
+        .filter(|(_, due)| !due)
+        .min_by_key(|(key, _)| (state.refresh.get(key).map(|r| r.at), *key))
+        .map(|(key, _)| *key);
+    if candidate.is_some() {
+        state.last_heartbeat_or_landed = Some(now);
+    }
+    candidate
+}
+
 /// Run one full cycle against `ctx.market`.
 pub fn run_one_cycle(
     ctx: &CrankCtx<'_>,
@@ -215,6 +260,7 @@ pub fn run_one_cycle(
 ) -> Result<CycleSummary> {
     // The wall budget covers the whole cycle, discovery and planning included.
     let started = std::time::Instant::now();
+    quarantine.schedule_state_mut().last_heartbeat_or_landed.get_or_insert(started);
     let all = discovery::discover_portfolios(ctx.rpc, ctx.program_id)?;
     let reward = ctx.reward_portfolio.copied().unwrap_or_default();
     let ranked: Vec<_> = discovery::rank_by_staleness(all, ctx.market, &reward)
@@ -244,19 +290,28 @@ pub fn run_one_cycle(
     quarantine.schedule_state_mut().refresh.retain(|key, _| discovered.contains(key));
     let mut quiet_skipped = 0;
     let mut flat_accounts = std::collections::HashSet::new();
+    let decoded: Vec<_> = ranked.iter().map(|p| read_portfolio(&p.account.data).ok()).collect();
+    let assessed: Vec<_> = ranked.iter().zip(&decoded).map(|(p, decoded)| {
+        decoded.as_ref().map(|pf| {
+            if renew_refresh_on_idle(pf) {
+                flat_accounts.insert(p.pubkey);
+            }
+            assess_refresh(p.pubkey, pf, &group, started, now_slot, budget, quarantine.schedule_state_mut())
+        })
+    }).collect();
+    let due: Vec<_> = ranked.iter().zip(&assessed)
+        .map(|(p, assessed)| (p.pubkey, assessed.is_none_or(|(_, due)| due)))
+        .collect();
+    let heartbeat = if group.mode == MarketModeV16::Live {
+        heartbeat_candidate(&due, quarantine.schedule_state_mut(), started, budget.quiet_refresh_secs)
+    } else {
+        None
+    };
     let mut plans = std::collections::HashMap::new();
     let mut candidates = Vec::with_capacity(ranked.len());
-    for p in &ranked {
-        let decoded = read_portfolio(&p.account.data).ok();
-        if decoded.as_ref().is_some_and(renew_refresh_on_idle) {
-            flat_accounts.insert(p.pubkey);
-        }
-        let work = decoded.as_ref().map(|pf| work::assess(pf, &group));
-        let priority = work.map(|w| w.priority).unwrap_or(Priority::Pending);
-        if decoded.as_ref().is_some_and(|pf| !work::refresh_due(
-            pf, &group, work.expect("decoded portfolio"),
-            quarantine.schedule_state().refresh.get(&p.pubkey), started, now_slot, budget.quiet_refresh_secs,
-        )) {
+    for ((p, decoded), assessed) in ranked.iter().zip(&decoded).zip(&assessed) {
+        let priority = assessed.map(|(w, _)| w.priority).unwrap_or(Priority::Pending);
+        if assessed.is_some_and(|(_, due)| !due) && heartbeat != Some(p.pubkey) {
             quiet_skipped += 1;
             continue;
         }
@@ -414,6 +469,9 @@ pub fn run_one_cycle(
         }
         Ok(attempt)
     });
+    if !summary.progressed_accounts.is_empty() {
+        quarantine.schedule_state_mut().last_heartbeat_or_landed = Some(std::time::Instant::now());
+    }
     for key in summary.progressed_accounts.iter().chain(
         summary.idle_accounts.iter().filter(|key| flat_accounts.contains(key)),
     ) {
@@ -428,6 +486,100 @@ pub fn run_one_cycle(
 mod tests {
     use super::*;
     use solana_sdk::signature::Signature;
+
+    #[test]
+    fn flat_first_sight_seeds_refresh_without_cranking() {
+        let mut pf: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
+        let group = MarketGroupV16::new([7; 32], percolator::V16Config::public_user_fund(4, 1, 8)).unwrap();
+        let mut state = scheduler::ScheduleState::default();
+        let key = Pubkey::new_unique();
+        let now = std::time::Instant::now();
+        let budget = CycleBudget::default();
+        assert!(!assess_refresh(key, &pf, &group, now, 100, &budget, &mut state).1);
+        let record = state.refresh.get(&key).unwrap();
+        assert_eq!(record.at, now);
+        assert_eq!(record.slot, 100);
+        assert_eq!(record.prices, work::RefreshRecord::new(now, 100, &group).prices);
+        for secs in [300, 3599, 3600] {
+            assert_eq!(
+                assess_refresh(key, &pf, &group, now + std::time::Duration::from_secs(secs),
+                    200, &budget, &mut state).1,
+                secs >= 3600,
+            );
+            assert_eq!(state.refresh[&key].at, now);
+        }
+        pf.legs[0].active = 1;
+        let leg_key = Pubkey::new_unique();
+        assert!(assess_refresh(leg_key, &pf, &group, now, 100, &budget, &mut state).1);
+        assert!(!state.refresh.contains_key(&leg_key));
+    }
+
+    #[test]
+    fn flat_first_sight_lapsed_backing_is_due_without_seeding() {
+        let mut pf: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
+        let mut group = MarketGroupV16::new([7; 32], percolator::V16Config::public_user_fund(4, 1, 8)).unwrap();
+        group.config.backing_fee_base_rate_e9_per_slot = 0;
+        group.config.backing_fee_slope_at_kink_e9_per_slot = 0;
+        group.config.backing_fee_slope_above_kink_e9_per_slot = 0;
+        group.source_backing_buckets[0].status = percolator::BackingBucketStatusV16::Fresh;
+        let key = Pubkey::new_unique();
+        let now = std::time::Instant::now();
+        let budget = CycleBudget::default();
+        for expiry in [99, 100] {
+            group.source_backing_buckets[0].expiry_slot = expiry;
+            for occupied in [true, false] {
+                let mut state = scheduler::ScheduleState::default();
+                pf.source_domains[0].source_claim_bound_num = percolator::V16PodU128::new(u128::from(occupied));
+                assert_eq!(assess_refresh(key, &pf, &group, now, 100, &budget, &mut state).1, occupied);
+                assert_eq!(state.refresh.contains_key(&key), !occupied);
+            }
+        }
+    }
+
+    #[test]
+    fn heartbeat_attempt_resets_timer_without_landed_progress() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let now = start + Duration::from_secs(KEEPER_HEARTBEAT_SECS);
+        let mut state = scheduler::ScheduleState::default();
+        state.last_heartbeat_or_landed = Some(start);
+        let candidates = [(Pubkey::new_unique(), false)];
+        assert_eq!(heartbeat_candidate(&candidates, &mut state, now, 300), Some(candidates[0].0));
+        assert_eq!(state.last_heartbeat_or_landed, Some(now));
+        assert_eq!(heartbeat_candidate(&candidates, &mut state, now, 300), None);
+        assert_eq!(heartbeat_candidate(&candidates, &mut state,
+            now + Duration::from_secs(KEEPER_HEARTBEAT_SECS - 1), 300), None);
+        assert_eq!(heartbeat_candidate(&candidates, &mut state,
+            now + Duration::from_secs(KEEPER_HEARTBEAT_SECS), 300), Some(candidates[0].0));
+    }
+
+    #[test]
+    fn heartbeat_selects_oldest_not_due_account_when_overdue() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let now = start + Duration::from_secs(KEEPER_HEARTBEAT_SECS);
+        let group = MarketGroupV16::new([7; 32], percolator::V16Config::public_user_fund(4, 1, 8)).unwrap();
+        let keys = [1, 2, 3].map(|n| Pubkey::new_from_array([n; 32]));
+        let mut state = scheduler::ScheduleState::default();
+        state.last_heartbeat_or_landed.get_or_insert(start);
+        for (key, age) in [(keys[0], 10), (keys[1], 0), (keys[2], 0)] {
+            state.refresh.insert(key, work::RefreshRecord::new(start + Duration::from_secs(age), 100, &group));
+        }
+        let mut candidates = vec![(keys[2], false), (keys[0], false), (keys[1], false)];
+        assert_eq!(heartbeat_candidate(&candidates, &mut state.clone(), now, 300), Some(keys[1]));
+        candidates.reverse();
+        assert_eq!(heartbeat_candidate(&candidates, &mut state.clone(), now, 300), Some(keys[1]));
+        assert_eq!(heartbeat_candidate(&candidates, &mut state.clone(), now - Duration::from_secs(1), 300), None);
+        assert_eq!(heartbeat_candidate(&candidates, &mut state.clone(), now, 0), None);
+        assert_eq!(heartbeat_candidate(&[], &mut state.clone(), now, 300), None);
+        candidates[0].1 = true;
+        assert_eq!(heartbeat_candidate(&candidates, &mut state.clone(), now, 300), Some(keys[2]));
+        for (_, due) in &mut candidates {
+            *due = true;
+        }
+        assert_eq!(heartbeat_candidate(&candidates, &mut state, now, 300), None);
+        assert_eq!(state.last_heartbeat_or_landed, Some(start));
+    }
 
     #[test]
     fn idle_refresh_renews_only_flat_accounts() {

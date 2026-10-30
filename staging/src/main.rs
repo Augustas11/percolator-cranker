@@ -151,9 +151,9 @@ impl Role {
         format!("{{\"ok\":{},\"fail\":{},\"max_consec_fail\":{},\"transport_errors\":{}}}", self.ok, self.fail, self.max_consec, self.transport_errors)
     }
 
-    fn abnormal(&self, max_consec: u64) -> bool {
+    fn abnormal(&self, max_consec: u64, ratio: bool) -> bool {
         let n = self.ok + self.fail;
-        self.consec >= max_consec || (n >= 20 && self.fail * 20 > n)
+        self.consec >= max_consec || (ratio && n >= 20 && self.fail * 20 > n)
     }
 }
 
@@ -1002,7 +1002,7 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         println!("t{tick} SOL={} push={p} accrual={} trade={t} backing={b} insurance={i} keeper={k}{l}", st.mark, accrual.json());
 
         let roles = [("push", &push), ("accrual", &accrual), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
-        abnormal = roles.iter().any(|(name, r)| *name != "accrual" && *name != "trade" && r.abnormal(max_consec)) || keeper.role.abnormal(max_consec);
+        abnormal = roles.iter().any(|(name, r)| *name != "accrual" && *name != "trade" && r.abnormal(max_consec, !bots)) || keeper.role.abnormal(max_consec, !bots);
         if tick % summary_every == 0 {
             println!("{}", summary(tick, started, &st, &roles, &keeper, false));
         }
@@ -1014,7 +1014,7 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
     pusher_thread.join().map_err(|_| anyhow!("pusher thread panicked"))?;
     push = pushed.lock().unwrap().role.clone();
     accrual = pushed.lock().unwrap().accrual.clone();
-    abnormal |= push.abnormal(max_consec);
+    abnormal |= push.abnormal(max_consec, !bots);
     let roles = [("push", &push), ("accrual", &accrual), ("trade", &trade), ("backing", &backing), ("insurance", &insurance), ("lifecycle", &lifecycle)];
     println!("{}", summary(tick, started, &st, &roles, &keeper, true));
     if abnormal {
@@ -1088,6 +1088,20 @@ mod fill_tests {
     }
 
     #[test]
+    fn abnormal_ratio_is_rehearsal_only() {
+        let mut role = Role { ok: 19, fail: 2, consec: 1, ..Role::default() };
+        assert!(role.abnormal(10, true));
+        assert!(!role.abnormal(10, false));
+        role.consec = 10;
+        assert!(role.abnormal(10, true));
+        assert!(role.abnormal(10, false));
+        role = Role { ok: 18, fail: 1, ..Role::default() };
+        assert!(!role.abnormal(10, true)); // Fewer than 20 attempts.
+        role = Role { ok: 19, fail: 1, ..Role::default() };
+        assert!(!role.abnormal(10, true)); // Exactly 5% is allowed.
+    }
+
+    #[test]
     fn keeper_transport_vs_program_errors() {
         for error in ["Error processing Instruction 3: custom program error: 0x17",
             "TransactionError(InstructionError(3, ComputationalBudgetExceeded))",
@@ -1099,7 +1113,7 @@ mod fill_tests {
             assert!(!is_program_error(error), "{error}");
         }
         let role = Role { transport_errors: 100, ..Role::default() };
-        assert!(!role.abnormal(5));
+        assert!(!role.abnormal(5, true));
         assert!(role.json().contains("\"transport_errors\":100"));
     }
 

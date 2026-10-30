@@ -164,6 +164,7 @@ impl RefreshRecord {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn refresh_due(
     portfolio: &PortfolioAccountV16Account,
     group: &MarketGroupV16,
@@ -172,6 +173,7 @@ pub fn refresh_due(
     now: std::time::Instant,
     now_slot: u64,
     quiet_refresh_secs: u64,
+    flat_refresh_secs: u64,
 ) -> bool {
     if group.mode != percolator::MarketModeV16::Live
         || quiet_refresh_secs == 0
@@ -180,12 +182,7 @@ pub fn refresh_due(
     {
         return true;
     }
-    let Some(previous) = previous else {
-        return true;
-    };
-    if now.saturating_duration_since(previous.at).as_secs() >= quiet_refresh_secs {
-        return true;
-    }
+    let flat = !portfolio.legs.iter().any(|leg| leg.active != 0);
     if (group.config.backing_fee_base_rate_e9_per_slot != 0
         || group.config.backing_fee_slope_at_kink_e9_per_slot != 0
         || group.config.backing_fee_slope_above_kink_e9_per_slot != 0)
@@ -195,12 +192,28 @@ pub fn refresh_due(
     {
         return true;
     }
+    if portfolio.source_domains.iter().any(|source| {
+        source.is_occupied()
+            && group.source_backing_buckets.get(source.domain.get() as usize).is_some_and(|bucket| {
+                bucket.status == percolator::BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot <= now_slot
+            })
+    }) {
+        return true;
+    }
+    let Some(previous) = previous else {
+        return !flat;
+    };
+    let interval = if flat && flat_refresh_secs != 0 { flat_refresh_secs } else { quiet_refresh_secs };
+    if now.saturating_duration_since(previous.at).as_secs() >= interval {
+        return true;
+    }
     if group.source_backing_buckets.iter().any(|bucket| {
         bucket.expiry_slot > previous.slot && bucket.expiry_slot <= now_slot
     }) {
         return true;
     }
-    if !portfolio.legs.iter().any(|leg| leg.active != 0) {
+    if flat {
         return false;
     }
     let cert = &portfolio.health_cert;
@@ -320,6 +333,31 @@ mod tests {
     }
 
     #[test]
+    fn flat_refresh_cadence_and_first_sight() {
+        let (mut pf, group, record, _) = quiet_fixture();
+        let now = record.at;
+        assert!(refresh_due(&pf, &group, assess(&pf, &group), None, now, 100, 300, 3600));
+        pf.legs[0].active = 0;
+        assert!(!refresh_due(&pf, &group, assess(&pf, &group), None, now, 100, 300, 3600));
+        for secs in [0, 300, 3599, 3600, 3601] {
+            assert_eq!(
+                refresh_due(&pf, &group, assess(&pf, &group), Some(&record),
+                    now + std::time::Duration::from_secs(secs), 100, 300, 3600),
+                secs >= 3600,
+            );
+        }
+        for secs in [299, 300] {
+            assert_eq!(
+                refresh_due(&pf, &group, assess(&pf, &group), Some(&record),
+                    now + std::time::Duration::from_secs(secs), 100, 300, 0),
+                secs >= 300,
+            );
+        }
+        assert!(refresh_due(&pf, &group, assess(&pf, &group), None, now, 100, 0, 3600));
+        assert!(refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 0, 3600));
+    }
+
+    #[test]
     fn quiet_refresh_backing_fees_require_a_lien() {
         let (mut pf, mut group, record, now) = quiet_fixture();
         pf.legs[0].active = 0;
@@ -328,12 +366,13 @@ mod tests {
             group.config.backing_fee_slope_at_kink_e9_per_slot = u64::from(rate == 1);
             group.config.backing_fee_slope_above_kink_e9_per_slot = u64::from(rate == 2);
             pf.source_domains[0].source_lien_counterparty_backing_num = percolator::V16PodU128::new(0);
-            assert!(!refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300));
+            assert!(!refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300, 3600));
             pf.source_domains[0].source_lien_counterparty_backing_num = percolator::V16PodU128::new(1);
-            assert!(refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300));
+            assert!(refresh_due(&pf, &group, assess(&pf, &group), None, now, 100, 300, 3600));
+            assert!(refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300, 3600));
         }
         group.config.backing_fee_slope_above_kink_e9_per_slot = 0;
-        assert!(!refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300));
+        assert!(!refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300, 3600));
     }
 
     #[test]
@@ -343,14 +382,21 @@ mod tests {
         for expiry in [0, 89, 90, 91, 100, 101] {
             group.source_backing_buckets[0].expiry_slot = expiry;
             assert_eq!(
-                refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300),
+                refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300, 3600),
                 expiry > record.slot && expiry <= 100,
                 "expiry={expiry}",
             );
         }
         group.source_backing_buckets[0].expiry_slot = 100;
         let record = RefreshRecord::new(now, 100, &group);
-        assert!(!refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 101, 300));
+        assert!(!refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 101, 300, 3600));
+        pf.source_domains[0].domain = percolator::V16PodU32::new(0);
+        pf.source_domains[0].source_claim_bound_num = percolator::V16PodU128::new(1);
+        group.source_backing_buckets[0].status = percolator::BackingBucketStatusV16::Fresh;
+        group.source_backing_buckets[0].expiry_slot = 102;
+        group.source_backing_buckets[1].status = percolator::BackingBucketStatusV16::Fresh;
+        group.source_backing_buckets[1].expiry_slot = 100;
+        assert!(!refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 101, 300, 3600));
     }
 
     #[test]
@@ -358,17 +404,17 @@ mod tests {
         let (mut pf, mut group, record, now) = quiet_fixture();
         pf.health_cert.certified_equity = percolator::V16PodI128::new(101);
         pf.legs[0].basis_pos_q = percolator::V16PodI128::new(POS_SCALE as i128 / 2);
-        assert!(!refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300));
+        assert!(!refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300, 3600));
         group.assets[0].k_long = -1;
         group.assets[0].f_long_num = -1;
-        assert!(refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300));
+        assert!(refresh_due(&pf, &group, assess(&pf, &group), Some(&record), now, 100, 300, 3600));
     }
 
     #[test]
     fn quiet_refresh_preserves_immediate_liquidation() {
         let (mut pf, mut group, record, now) = quiet_fixture();
         let due = |pf: &PortfolioAccountV16Account, group: &MarketGroupV16, now, interval| {
-            refresh_due(pf, group, assess(pf, group), Some(&record), now, 100, interval)
+            refresh_due(pf, group, assess(pf, group), Some(&record), now, 100, interval, 3600)
         };
         assert_eq!(assess(&pf, &group).priority, Priority::Quiet);
         assert!(!due(&pf, &group, now, 300));
@@ -402,8 +448,8 @@ mod tests {
         let work = assess(&pf, &group);
         assert_eq!(work.priority, Priority::Pending);
         assert!(!work.structural);
-        assert!(!refresh_due(&pf, &group, work, Some(&record), now, 100, 300));
-        assert!(refresh_due(&pf, &group, work, None, now, 100, 300));
+        assert!(!refresh_due(&pf, &group, work, Some(&record), now, 100, 300, 3600));
+        assert!(refresh_due(&pf, &group, work, None, now, 100, 300, 3600));
         for (valid, equity, mm, bps) in [
             (0, 300, 100, 1000),
             (1, 100, 100, 1000),
@@ -422,7 +468,8 @@ mod tests {
                 Some(&record),
                 now,
                 100,
-                300
+                300,
+                3600
             ));
         }
         pf.legs[0].active = 0;
@@ -433,7 +480,8 @@ mod tests {
             Some(&record),
             now,
             100,
-            300
+            300,
+            3600
         ));
         pf.legs[0].active = 1;
         pf.health_cert.valid = 1;
@@ -448,7 +496,8 @@ mod tests {
             Some(&record),
             now,
             100,
-            300
+            300,
+            3600
         ));
         record = RefreshRecord::new(now, 100, &group);
         for mode in [
@@ -463,7 +512,8 @@ mod tests {
                 Some(&record),
                 now,
                 100,
-                300
+                300,
+                3600
             ));
         }
     }
@@ -495,7 +545,7 @@ mod tests {
                 }
                 let work = assess(&pf, &group);
                 assert!(work.structural, "side={side}, field={field}");
-                assert!(refresh_due(&pf, &group, work, Some(&record), now, 100, 300));
+                assert!(refresh_due(&pf, &group, work, Some(&record), now, 100, 300, 3600));
             }
         }
     }
@@ -512,7 +562,8 @@ mod tests {
             Some(&record),
             now,
             100,
-            300
+            300,
+            3600
         ));
         group.risk_epoch += 1;
         assert!(refresh_due(
@@ -522,7 +573,8 @@ mod tests {
             Some(&record),
             now,
             100,
-            300
+            300,
+            3600
         ));
         pf.health_cert.cert_risk_epoch = percolator::V16PodU64::new(group.risk_epoch);
         group.asset_set_epoch += 1;
@@ -533,7 +585,8 @@ mod tests {
             Some(&record),
             now,
             100,
-            300
+            300,
+            3600
         ));
         pf.health_cert.cert_asset_set_epoch = percolator::V16PodU64::new(group.asset_set_epoch);
         pf.active_bitmap[0] = percolator::V16PodU64::new(3);
@@ -544,7 +597,8 @@ mod tests {
             Some(&record),
             now,
             100,
-            300
+            300,
+            3600
         ));
     }
 
@@ -569,7 +623,7 @@ mod tests {
                 }
                 let work = assess(&pf, &group);
                 assert!(!work.structural);
-                assert!(!refresh_due(&pf, &group, work, Some(&record), now, 100, 300));
+                assert!(!refresh_due(&pf, &group, work, Some(&record), now, 100, 300, 3600));
                 // F alone consumes half the 200-atom headroom before the 2x buffer.
                 if side == 0 {
                     group.assets[0].f_long_num = sign * 100;
@@ -583,7 +637,8 @@ mod tests {
                     Some(&record),
                     now,
                     100,
-                    300
+                    300,
+                    3600
                 ));
                 if side == 0 {
                     group.assets[0].f_long_num = sign * 50;
@@ -599,7 +654,8 @@ mod tests {
                     Some(&record),
                     now,
                     100,
-                    300
+                    300,
+                    3600
                 ));
             }
         }
@@ -617,7 +673,8 @@ mod tests {
             Some(&record),
             now,
             100,
-            300
+            300,
+            3600
         ));
         pf.legs[0].basis_pos_q = percolator::V16PodI128::new(1);
         pf.legs[0].f_snap = percolator::V16PodI128::new(i128::MIN);
@@ -628,7 +685,8 @@ mod tests {
             Some(&record),
             now,
             100,
-            300
+            300,
+            3600
         ));
         pf.legs[0].f_snap = percolator::V16PodI128::new(0);
         pf.legs[0].a_basis = percolator::V16PodU128::new(u128::MAX);
@@ -639,7 +697,8 @@ mod tests {
             Some(&record),
             now,
             100,
-            300
+            300,
+            3600
         ));
     }
 
@@ -660,7 +719,8 @@ mod tests {
             quarantine.schedule_state().refresh.get(&key),
             now,
             100,
-            300
+            300,
+            3600
         ));
         pf.health_cert.certified_liq_deficit = percolator::V16PodU128::new(1);
         let work = assess(&pf, &group);
@@ -672,6 +732,7 @@ mod tests {
             now,
             100,
             300,
+            3600,
         ) {
             vec![Candidate {
                 pubkey: key,

@@ -77,6 +77,8 @@ pub struct CycleBudget {
     pub idle_stuck_cycles: u64,
     /// Quiet accounts are refreshed at least this often; zero disables skipping.
     pub quiet_refresh_secs: u64,
+    /// Flat accounts refresh at this cadence; zero uses the quiet cadence.
+    pub flat_refresh_secs: u64,
 }
 
 impl Default for CycleBudget {
@@ -89,13 +91,14 @@ impl Default for CycleBudget {
             cu_per_tx_reserve: crate::submit::TX_CU_LIMIT as u64,
             idle_stuck_cycles: 10,
             quiet_refresh_secs: 300,
+            flat_refresh_secs: 3600,
         }
     }
 }
 
 impl CycleBudget {
     /// `CRANKER_CYCLE_MS`, `CRANKER_CYCLE_CU`, `CRANKER_CYCLE_MAX_TX`,
-    /// `CRANKER_ATTEMPT_MAX_TX`, `CRANKER_IDLE_STUCK_CYCLES`, `CRANKER_QUIET_REFRESH_SECS`.
+    /// `CRANKER_ATTEMPT_MAX_TX`, `CRANKER_IDLE_STUCK_CYCLES`, `CRANKER_QUIET_REFRESH_SECS`, `CRANKER_FLAT_REFRESH_SECS`.
     pub fn from_env() -> Self {
         let d = Self::default();
         let get = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
@@ -124,6 +127,7 @@ impl CycleBudget {
                 .unwrap_or(d.max_txs_per_attempt),
             cu_per_tx_reserve: d.cu_per_tx_reserve,
             quiet_refresh_secs: get("CRANKER_QUIET_REFRESH_SECS").unwrap_or(d.quiet_refresh_secs),
+            flat_refresh_secs: get("CRANKER_FLAT_REFRESH_SECS").unwrap_or(d.flat_refresh_secs),
             idle_stuck_cycles: get("CRANKER_IDLE_STUCK_CYCLES")
                 .map(|v| v.max(1))
                 .unwrap_or(d.idle_stuck_cycles),
@@ -272,6 +276,8 @@ const CLASS_PATTERN: [Priority; 4] = [
 pub struct ScheduleState {
     last_visited: [Option<Pubkey>; 3],
     pub refresh: std::collections::HashMap<Pubkey, crate::work::RefreshRecord>,
+    /// Last heartbeat attempt or landed progress, initialized at the first cycle.
+    pub last_heartbeat_or_landed: Option<Instant>,
     /// Position in [`CLASS_PATTERN`] where the next cycle starts. Persisted
     /// so that a budget admitting only a few attempts still rotates the
     /// first turn across classes instead of always starting liquidatable.

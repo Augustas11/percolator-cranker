@@ -134,8 +134,10 @@ Every `STAGING_SUMMARY_EVERY` ticks, and at the end, one JSON line:
 `STAGING_LIFECYCLE_TICK=0`, the lifecycle completed (SHUTDOWN is retried
 from its tick on until it lands; SOL must be relisted before the end). 1 as
 soon as a role fails `STAGING_MAX_CONSEC_FAIL` times in a row, or more than
-5% of its attempts (after 20), or when the lifecycle did not complete, so an unattended run is judged by the exit code and the
-final summary line. Trade failures, like accrual failures, are counted but
+5% of its attempts (after 20) in the R2 rehearsal, or when the lifecycle did
+not complete, so an unattended run is judged by the exit code and the final
+summary line. In bots mode only consecutive failures end the run; the monitor's
+alerts cover the rest. Trade failures, like accrual failures, are counted but
 never end the run. The script prints that line again at the end.
 
 ## Known upstream issues

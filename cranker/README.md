@@ -54,6 +54,7 @@ Env vars:
     as `unconfirmed`, never as a failure of the account.
   - **When it runs out**, the rest of the queue is deferred, and rotation
     reaches it first next cycle.
+* `CRANKER_QUIET_REFRESH_SECS` (default `300`, `0` = every cycle), `CRANKER_FLAT_REFRESH_SECS` (default `3600`, `0` = quiet cadence): flat accounts start their timer on first sight; fee+lien and backing expiry still trigger refresh, and an idle Live keeper probes one account every 240 seconds to prove liveness.
 * `CRANKER_ATTEMPT_MAX_TX` (default `4`): the most txs one account may use
   in a cycle. This bounds an A6 lien drain, which continues next cycle.
 * `CRANKER_IDLE_STUCK_CYCLES` (default `10`): a Resolved claimant that still
