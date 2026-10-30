@@ -13,7 +13,8 @@ test.each(["market", "program"] as const)("rejects a mismatched %s before return
   await expect(client.stats()).rejects.toThrow(error);
   await expect(client.positions("owner")).rejects.toThrow(error);
   await expect(client.fills("portfolio")).rejects.toThrow(error);
-  expect(fetch.mock.calls.map(([url]) => url)).toEqual(Array(3).fill("http://indexer/stats"));
+  await expect(client.leaderboard()).rejects.toThrow(error);
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual(Array(4).fill("http://indexer/stats"));
   const positions = { owner: "owner", as_of_slot: null, portfolios: [] };
   fetch.mockResolvedValueOnce({ ok: true, json: async () => stats })
     .mockResolvedValueOnce({ ok: true, json: async () => positions });
@@ -41,14 +42,15 @@ test("accepts matching stats and shares one cached check for positions and fills
   const stats = await mock.stats();
   const positions = await mock.positions("owner");
   const fills = await mock.fills("portfolio");
+  const leaderboard = await mock.leaderboard();
   const fetch = vi.fn(async (url: string) => ({
-    ok: true, json: async () => url.endsWith("/stats") ? stats : url.includes("/positions?") ? positions : fills,
+    ok: true, json: async () => url.endsWith("/stats") ? stats : url.includes("/positions?") ? positions : url.endsWith("/leaderboard") ? leaderboard : fills,
   }));
   vi.stubGlobal("fetch", fetch);
   const client = new HttpIndexerClient("http://indexer", stats);
   await expect(client.stats()).resolves.toEqual(stats);
   fetch.mockClear();
-  await expect(Promise.all([client.positions("owner"), client.fills("portfolio")])).resolves.toEqual([positions, fills]);
+  await expect(Promise.all([client.positions("owner"), client.fills("portfolio"), client.leaderboard()])).resolves.toEqual([positions, fills, leaderboard]);
   await expect(client.positions("owner")).resolves.toEqual(positions);
   expect(fetch.mock.calls.filter(([url]) => url.endsWith("/stats"))).toHaveLength(1);
 });

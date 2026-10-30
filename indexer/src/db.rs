@@ -2,7 +2,7 @@ use crate::{decode::Decoded, stats, Config};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::{path::Path, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 pub fn open(path: &Path) -> Result<Connection> {
     let c = Connection::open(path)?;
@@ -351,6 +351,103 @@ pub fn positions(c: &Connection, owner: &str) -> Result<Value> {
     Ok(json!({"owner":owner,"as_of_slot":slot,"portfolios":portfolios}))
 }
 
+pub fn leaderboard(c: &Connection, cfg: &Config) -> Result<Value> {
+    #[derive(Default)]
+    struct Entry {
+        equity: i128,
+        net_deposits: i128,
+        trades: u64,
+        open_positions: u64,
+        portfolios: Vec<String>,
+    }
+    let mut wallets: BTreeMap<String, Entry> = BTreeMap::new();
+    let mut stmt = c.prepare("SELECT s.portfolio,owner,capital,pnl,positions_json FROM portfolio_snapshots s JOIN current_portfolios c ON c.portfolio=s.portfolio WHERE slot=(SELECT MAX(slot) FROM portfolio_snapshots WHERE portfolio=s.portfolio) ORDER BY s.portfolio")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (portfolio, owner, capital, pnl, positions) = row?;
+        if cfg.leaderboard_exclude.contains(&portfolio) || cfg.leaderboard_exclude.contains(&owner)
+        {
+            continue;
+        }
+        let entry = wallets.entry(owner).or_default();
+        let equity = capital
+            .parse::<i128>()?
+            .checked_add(pnl.parse()?)
+            .context("leaderboard equity overflow")?;
+        entry.equity = entry
+            .equity
+            .checked_add(equity)
+            .context("leaderboard equity overflow")?;
+        let mut transfers =
+            c.prepare("SELECT kind,amount FROM transfers WHERE portfolio=?1 AND ok=1")?;
+        for transfer in transfers.query_map([&portfolio], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (kind, amount) = transfer?;
+            let amount = amount.parse::<i128>()?;
+            entry.net_deposits = if kind == "deposit" {
+                entry.net_deposits.checked_add(amount)
+            } else {
+                entry.net_deposits.checked_sub(amount)
+            }
+            .context("leaderboard net deposits overflow")?;
+        }
+        let trades: u64 = c.query_row(
+            "SELECT COUNT(*) FROM fills WHERE taker_portfolio=?1 OR maker_portfolio=?1",
+            [&portfolio],
+            |r| r.get(0),
+        )?;
+        entry.trades = entry
+            .trades
+            .checked_add(trades)
+            .context("leaderboard trades overflow")?;
+        let positions: Value = serde_json::from_str(&positions)?;
+        for leg in positions
+            .as_array()
+            .context("invalid leaderboard positions")?
+        {
+            if leg["basis_pos_q"]
+                .as_str()
+                .context("invalid basis_pos_q")?
+                .parse::<i128>()?
+                != 0
+            {
+                entry.open_positions = entry
+                    .open_positions
+                    .checked_add(1)
+                    .context("leaderboard positions overflow")?;
+            }
+        }
+        entry.portfolios.push(portfolio);
+    }
+    let mut entries = wallets
+        .into_iter()
+        .map(|(wallet, e)| {
+            let pnl = e
+                .equity
+                .checked_sub(e.net_deposits)
+                .context("leaderboard pnl overflow")?;
+            Ok((pnl, wallet, e))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let entries = entries.into_iter().take(100).enumerate().map(|(i, (pnl, wallet, e))| json!({"rank":i+1,"wallet":wallet,"pnl":pnl.to_string(),"equity":e.equity.to_string(),"net_deposits":e.net_deposits.to_string(),"trades":e.trades,"open_positions":e.open_positions,"portfolios":e.portfolios})).collect::<Vec<_>>();
+    let slot = meta(c, "last_ingest_slot")?
+        .map(|s| s.parse::<u64>())
+        .transpose()?;
+    Ok(
+        json!({"as_of_slot":slot,"note":"devnet, test tokens. PnL = equity (capital + engine PnL at the last indexed change, open positions marked at the last crank) minus net deposits.","entries":entries}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +466,135 @@ mod tests {
             pnl: "0".into(),
             positions: json!([{"asset_index":0,"market_id":1,"side":"long","basis_pos_q":q.to_string()}]),
         }
+    }
+    #[test]
+    fn leaderboard_aggregates_current_portfolios_and_excludes_owners_and_portfolios() {
+        let c = memory();
+        let (_, mut cfg) = Config::parse(["serve".into()]).unwrap();
+        cfg.leaderboard_exclude = vec!["excluded-owner".into(), "excluded-portfolio".into()];
+        for (portfolio, owner, capital, pnl, q) in [
+            ("a", "alice", "1000", "100", 1),
+            ("a2", "alice", "200", "-50", 0),
+            ("b", "bob", "500", "-100", -1),
+            ("c", "excluded-owner", "9000", "0", 1),
+            ("excluded-portfolio", "other", "9000", "0", 1),
+            ("closed", "alice", "9000", "0", 1),
+        ] {
+            let mut s = snap(1, q);
+            s.portfolio = portfolio.into();
+            s.owner = "old-owner".into();
+            snapshot(&c, &s).unwrap();
+            s.slot = 2;
+            s.owner = owner.into();
+            s.capital = capital.into();
+            s.pnl = pnl.into();
+            snapshot(&c, &s).unwrap();
+            if portfolio != "closed" {
+                c.execute("INSERT INTO current_portfolios VALUES(?1)", [portfolio])
+                    .unwrap();
+            }
+        }
+        for (i, (portfolio, kind, amount, ok)) in [
+            ("a", "deposit", "1000", 1),
+            ("a", "withdraw", "100", 1),
+            ("a2", "deposit", "200", 1),
+            ("a", "deposit", "9999", 0),
+            ("b", "deposit", "500", 1),
+            ("b", "withdraw", "250", 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            c.execute("INSERT INTO transfers(signature,ix_index,portfolio,kind,amount,ok) VALUES(?1,0,?2,?3,?4,?5)", params![i.to_string(), portfolio, kind, amount, ok]).unwrap();
+        }
+        for (i, (taker, maker, status)) in [
+            ("a", "b", "executed"),
+            ("b", "a2", "requested"),
+            ("a", "a", "requested"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            c.execute("INSERT INTO fills(signature,ix_index,leg,taker_portfolio,maker_portfolio,status) VALUES(?1,0,0,?2,?3,?4)", params![i.to_string(), taker, maker, status]).unwrap();
+        }
+        set_meta(&c, "last_ingest_slot", "123").unwrap();
+        let out = leaderboard(&c, &cfg).unwrap();
+        assert_eq!(out["as_of_slot"], 123);
+        assert_eq!(
+            out["entries"],
+            json!([
+                {"rank":1,"wallet":"alice","equity":"1250","net_deposits":"1100","pnl":"150","trades":3,"open_positions":1,"portfolios":["a","a2"]},
+                {"rank":2,"wallet":"bob","equity":"400","net_deposits":"250","pnl":"150","trades":2,"open_positions":1,"portfolios":["b"]}
+            ])
+        );
+        cfg.leaderboard_exclude.clear();
+        let out = leaderboard(&c, &cfg).unwrap();
+        assert_eq!(out["entries"].as_array().unwrap().len(), 4);
+        assert_eq!(out["entries"][0]["wallet"], "excluded-owner");
+        assert_eq!(out["entries"][1]["wallet"], "other");
+        c.execute(
+            "UPDATE portfolio_snapshots SET pnl='-101' WHERE portfolio='b' AND slot=2",
+            [],
+        )
+        .unwrap();
+        assert_eq!(leaderboard(&c, &cfg).unwrap()["entries"][3]["pnl"], "149");
+    }
+    #[test]
+    fn leaderboard_checks_amount_overflows_and_limits_ranks() {
+        let c = memory();
+        let (_, mut cfg) = Config::parse(["serve".into()]).unwrap();
+        cfg.leaderboard_exclude.clear();
+        assert_eq!(leaderboard(&c, &cfg).unwrap()["entries"], json!([]));
+        for i in 0..101 {
+            let mut s = snap(1, 0);
+            s.portfolio = format!("p{i:03}");
+            s.owner = format!("w{i:03}");
+            c.execute("INSERT INTO current_portfolios VALUES(?1)", [&s.portfolio])
+                .unwrap();
+            snapshot(&c, &s).unwrap();
+        }
+        let out = leaderboard(&c, &cfg).unwrap();
+        assert_eq!(out["entries"].as_array().unwrap().len(), 100);
+        assert_eq!(out["entries"][99]["rank"], 100);
+        assert_eq!(out["entries"][99]["wallet"], "w099");
+        c.execute(
+            "UPDATE portfolio_snapshots SET capital=?1,pnl='1' WHERE portfolio='p000'",
+            [i128::MAX.to_string()],
+        )
+        .unwrap();
+        assert!(leaderboard(&c, &cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("overflow"));
+        c.execute(
+            "UPDATE portfolio_snapshots SET pnl='0' WHERE portfolio='p000'",
+            [],
+        )
+        .unwrap();
+        c.execute("INSERT INTO transfers(signature,ix_index,portfolio,kind,amount,ok) VALUES('withdraw',0,'p000','withdraw','1',1)", []).unwrap();
+        assert!(leaderboard(&c, &cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("overflow"));
+        c.execute("DELETE FROM transfers", []).unwrap();
+        c.execute(
+            "UPDATE portfolio_snapshots SET owner='w000' WHERE portfolio='p001'",
+            [],
+        )
+        .unwrap();
+        assert!(leaderboard(&c, &cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("overflow"));
+        c.execute("UPDATE portfolio_snapshots SET capital='0'", [])
+            .unwrap();
+        for i in 0..2 {
+            c.execute("INSERT INTO transfers(signature,ix_index,portfolio,kind,amount,ok) VALUES(?1,0,'p000','deposit',?2,1)", params![i.to_string(), i128::MAX.to_string()]).unwrap();
+        }
+        assert!(leaderboard(&c, &cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("overflow"));
     }
     fn counts(c: &Connection) -> Vec<u64> {
         [

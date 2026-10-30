@@ -42,10 +42,24 @@ Flags override environment variables. All flags take a separate value.
 | `--db` | `INDEXER_DB` | `indexer.sqlite` |
 | `--bind` | `INDEXER_BIND` | `127.0.0.1:8090` |
 | `--cors-origins` | `INDEXER_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` |
+| `--leaderboard-exclude` | `INDEXER_LEADERBOARD_EXCLUDE` | Six devnet matcher/bot portfolio and owner pubkeys listed below |
 | `--poll-secs` | `INDEXER_POLL_SECS` | `10` |
 | `--rpc-delay-ms` | `INDEXER_RPC_DELAY_MS` | `250` |
 | `--cycle-secs` | `INDEXER_CYCLE_SECS` | `3` |
 | `--uptime-slack-cycles` | `INDEXER_UPTIME_SLACK_CYCLES` | `10` |
+
+`--leaderboard-exclude` accepts comma-separated validated portfolio or owner pubkeys.
+An explicitly empty value (including `INDEXER_LEADERBOARD_EXCLUDE=`) excludes nothing.
+The defaults are:
+
+```text
+6wH2d4CARhEWeGC2deBDb9pVT1a7Tgd48VUiFmkTNAHY
+TVA9xtfvX8uiFAqDHCpeD4HzwT6CYb5iwD6J16cba46
+GUvzajrrfWpizSGj38iCC7TfB7rbbWxTgCszPAh1VRyh
+Fxi2q4iFrhPpfemCzkCK2haseAuoh6GvK7h7zwmaNZeu
+CUJ86gVNfnTowKt3k7QVbCa589hpUtZhiypEnt9Ben8B
+ANNQ2dksYNTWJG33jo5okUPb7AqpjUu6gcMN62bWdJc7
+```
 
 The API is local-only. `INDEXER_BIND` / `--bind` must be a numeric loopback socket
 address (`127.0.0.0/8` or `::1`, e.g. `[::1]:8090`). Put a reverse proxy in front
@@ -86,6 +100,15 @@ effective engine OI.
 ```json
 {"market":"7p8DtcMHSjdCsM9xWvBwF6TebGBSL18wKvfM7BS1zyHq","program":"GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS","as_of_slot":null,"as_of":null,"cranks":{"total":0,"ok":0,"idle":0,"failed":0,"reverted":0,"success_rate":null,"first_at":null,"last_at":null},"uptime":{"cycle_secs":3,"window_start":null,"window_end":0,"covered_secs":null,"missed_secs":null,"uptime_pct":null,"longest_gap_secs":null,"gaps_over_slack":null},"liquidations_observed":0,"liquidations_since_slot":null,"open_interest":{},"depositors":0,"portfolios":0,"fills":0,"mode":null,"materialized_portfolio_count":null,"insurance":null,"vault":null}
 ```
+
+`GET /leaderboard` — up to 100 wallets, sorted by PnL descending then wallet ascending,
+with 1-based ranks. Aggregates current portfolios' latest snapshots; equity is
+capital plus engine PnL, net deposits are successful deposits minus withdrawals,
+and PnL is equity minus net deposits. Amounts are collateral atoms as decimal
+strings. Trades count all stored fill rows (executed and requested) per portfolio;
+open positions count nonzero basis legs. Configured owners/portfolios are excluded.
+`as_of_slot` is the last completed ingest slot. No query parameters are accepted.
+The response note explains that open positions are marked at the last crank.
 
 `GET /fills?portfolio=5XWHkzJhpp1hFjMrTwbARWqCJGGuRmrrDDqHW9EmYbzN&limit=100`
 — newest first by `(slot, signature, ix_index, leg)` descending; `limit` is 1..500,

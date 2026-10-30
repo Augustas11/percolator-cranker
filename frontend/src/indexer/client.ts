@@ -44,9 +44,16 @@ export interface Fills {
   next_before: string | null;
 }
 
+export interface Leaderboard {
+  as_of_slot: number | null;
+  note: string;
+  entries: { rank: number; wallet: string; pnl: string; equity: string; net_deposits: string; trades: number; open_positions: number; portfolios: string[] }[];
+}
+
 export interface IndexerClient {
   readonly mock?: boolean;
   stats(): Promise<Stats>;
+  leaderboard(): Promise<Leaderboard>;
   positions(owner: string): Promise<Positions>;
   fills(portfolio: string): Promise<Fills>;
 }
@@ -82,6 +89,7 @@ export class HttpIndexerClient implements IndexerClient {
     }));
   }
 
+  async leaderboard() { await this.check(); return this.get<Leaderboard>("/leaderboard"); }
   async positions(owner: string) { await this.check(); return this.get<Positions>(`/positions?owner=${encodeURIComponent(owner)}`); }
   async fills(portfolio: string) { await this.check(); return this.get<Fills>(`/fills?portfolio=${encodeURIComponent(portfolio)}&limit=50`); }
 }
