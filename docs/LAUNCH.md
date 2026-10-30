@@ -314,6 +314,17 @@ sponsored update cadence), so it only keeps a devnet market live; it says
 nothing about the 400 ms target. That's what the devnet market ran on
 after the 2026-10-29 relist.
 
+## Lifecycle drill
+
+Run `scripts/lifecycle_drill.sh launch/sol-perp.toml local launch-runs/lifecycle` (or `devnet`).
+Local needs a running validator with the wrapper deployed at the config's RPC.
+Set `DRILL_PAYER=/path/to/payer.json` to fund both launches from the same payer.
+The drill lists, checks a fill, stops bots, resolves, pays out, closes portfolios and the slab,
+sweeps reclaimed SOL, then relists a fresh market and repeats the wind-down.
+`DRILL_WIND_DOWN_RELIST=0` keeps the relisted market Live with bots stopped.
+Each run writes `lifecycle.jsonl`; `timings.txt` records steps and net payer spend.
+Resume cleanup with `staging/target/release/staging lifecycle <config> <cluster> <run dir>`; mainnet is refused.
+
 ## Key layout (owner decision, 2026-10-29)
 
 One key, one job. Every key lives in the run dir's `keys/` (mode 0600), and no other

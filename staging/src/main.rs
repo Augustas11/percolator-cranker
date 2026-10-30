@@ -52,7 +52,7 @@ use solana_sdk::{
     compute_budget::ComputeBudgetInstruction,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    signature::{read_keypair_file, Keypair, Signer},
+    signature::{read_keypair_file, Keypair, Signature, Signer},
     system_instruction,
     transaction::Transaction,
 };
@@ -161,6 +161,7 @@ struct Staging {
     cfg: Config,
     rpc: RpcClient,
     blockhash: submit::BlockhashCache,
+    last_sig: std::cell::Cell<Option<Signature>>,
     program_id: Pubkey,
     payer: Keypair,
     /// marketauth at InitMarket, holding every asset-0 role until the
@@ -231,10 +232,16 @@ impl Staging {
     }
 
     fn send(&self, ixs: &[Instruction], signers: &[&Keypair]) -> Result<()> {
-        self.rpc.send_and_confirm_transaction(&self.tx(ixs, signers)?).inspect_err(|e| {
+        self.send_sig(ixs, signers)?;
+        Ok(())
+    }
+
+    fn send_sig(&self, ixs: &[Instruction], signers: &[&Keypair]) -> Result<Signature> {
+        let sig = self.rpc.send_and_confirm_transaction(&self.tx(ixs, signers)?).inspect_err(|e| {
             if e.to_string().contains("Blockhash not found") { self.blockhash.invalidate(); }
         })?;
-        Ok(())
+        self.last_sig.set(Some(sig));
+        Ok(sig)
     }
 
     fn simulates(&self, ixs: &[Instruction], signers: &[&Keypair]) -> bool {
@@ -344,6 +351,7 @@ impl Staging {
         let admin_ata = spl_associated_token_account::get_associated_token_address(&admin.pubkey(), &mint);
         Staging {
             blockhash: submit::BlockhashCache::default(),
+            last_sig: std::cell::Cell::new(None),
             rpc,
             program_id,
             payer,
@@ -724,7 +732,7 @@ impl Staging {
 
     /// Live -> Recovery: SHUTDOWN of SOL (asset 0). Fresh cranks go first:
     /// shutdown accrues committed funding up to now.
-    fn shutdown(&mut self) -> Result<Option<String>> {
+    fn shutdown_ixs(&self) -> Result<Vec<Instruction>> {
         let (data, g, s) = self.read()?;
         let mut ixs = self.fresh_cranks(&data, &[self.trader_pf, self.lp_pf], self.rpc.get_slot()?)?;
         // Mirrors v16_svm.rs `shutdown_asset` (the role keys are ignored by
@@ -744,39 +752,53 @@ impl Staging {
             oracle_authority: admin,
         };
         ixs.push(self.prog_ix(ix, self.admin_metas()));
-        self.send(&ixs, &[&self.admin]).context("SHUTDOWN")?;
+        Ok(ixs)
+    }
+
+    fn shutdown(&mut self) -> Result<Option<String>> {
+        self.send(&self.shutdown_ixs()?, &[&self.admin]).context("SHUTDOWN")?;
         self.phase = Phase::Recovery;
         Ok(Some("SOL shut down (Recovery)".into()))
     }
 
     /// Recovery -> Resolved: ResolveMarket by the market authority.
-    fn resolve(&mut self) -> Result<Option<String>> {
+    fn resolve_ixs(&self) -> Result<Vec<Instruction>> {
         let (data, g, s) = self.read()?;
         let mut ixs = self.fresh_cranks(&data, &[self.trader_pf, self.lp_pf], self.rpc.get_slot()?)?;
         // Mirrors v16_svm.rs `resolve_market`.
         let ix = P::ResolveMarket { asset_generation_frontier: g.next_market_id, authority_epoch: s.authority_epoch };
         ixs.push(self.prog_ix(ix, self.admin_metas()));
-        self.send(&ixs, &[&self.admin]).context("ResolveMarket")?;
+        Ok(ixs)
+    }
+
+    fn resolve(&mut self) -> Result<Option<String>> {
+        self.send(&self.resolve_ixs()?, &[&self.admin]).context("ResolveMarket")?;
         self.phase = Phase::Resolved;
         Ok(Some("market resolved".into()))
+    }
+
+    fn portfolio_settled(&self, pf: &Pubkey) -> Result<bool> {
+        // Read errors fail the step: only a confirmed-absent account or a
+        // read, settled portfolio counts as closed.
+        match self.rpc.get_account_with_commitment(pf, CommitmentConfig::confirmed())?.value {
+            None => Ok(true),
+            Some(a) => {
+                let p = read_portfolio(&a.data).map_err(|e| anyhow!("read_portfolio {pf}: {e:?}"))?;
+                Ok(p.capital.get() == 0
+                    && p.pnl.get() == 0
+                    && p.reserved_pnl.get() == 0
+                    && p.legs.iter().all(|l| l.active == 0)
+                    && (p.resolved_payout_receipt.present == 0
+                        || p.resolved_payout_receipt.finalized != 0))
+            }
+        }
     }
 
     /// Resolved -> relisted: once the keeper's resolved route has closed both
     /// portfolios (paid out to the owners), open a fresh SOL-PERP market.
     fn relist_when_closed(&mut self) -> Result<Option<String>> {
         self.resolved_ticks += 1;
-        // Read errors fail the step: only a confirmed-absent account or a
-        // read, settled portfolio counts as closed.
-        let closed = |pf: &Pubkey| -> Result<bool> {
-            match self.rpc.get_account_with_commitment(pf, CommitmentConfig::confirmed())?.value {
-                None => Ok(true),
-                Some(a) => {
-                    let p = read_portfolio(&a.data).map_err(|e| anyhow!("read_portfolio {pf}: {e:?}"))?;
-                    Ok(p.capital.get() == 0 && p.pnl.get() == 0)
-                }
-            }
-        };
-        if !(closed(&self.lp_pf)? && closed(&self.trader_pf)?) {
+        if !(self.portfolio_settled(&self.lp_pf)? && self.portfolio_settled(&self.trader_pf)?) {
             if self.resolved_ticks > 100 {
                 bail!("portfolios still open {} ticks after resolve", self.resolved_ticks);
             }
@@ -829,8 +851,9 @@ fn real_main() -> Result<()> {
         Some("step") => launch::step_main(&args[1..]),
         Some("bots") => run(launch::bots(&args[1..])?, true),
         Some("roles") => launch::roles_main(&args[1..]),
+        Some("lifecycle") => launch::lifecycle_main(&args[1..]),
         Some("prices") => pusher::prices(&args[1..]),
-        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles | prices] <config> <cluster> <run dir>"),
+        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles | prices | lifecycle] <config> <cluster> <run dir>"),
     }
 }
 

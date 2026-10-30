@@ -756,6 +756,214 @@ pub fn bots(args: &[String]) -> Result<Staging> {
     Ok(st)
 }
 
+pub fn lifecycle_main(args: &[String]) -> Result<()> {
+    use crate::{binding, cycle, CrankCtx, CuStats, CycleBudget, MarketModeV16, Quarantine, QuarantineConfig, BOUND_SCALE};
+    use serde_json::json;
+    use std::{io::Write, thread::sleep, time::{Duration, Instant}};
+
+    if args.get(1).map(String::as_str) == Some("mainnet") {
+        bail!("lifecycle refuses mainnet");
+    }
+    let (mut st, state, run, _) = open(args)?;
+    if let Some(s) = STEPS.iter().find(|s| !state.done.iter().any(|d| d == *s)) {
+        bail!("step {s} not done; run scripts/launch_market.sh first");
+    }
+    st.admin = key(&run, "multisig", false)?;
+    st.admin_ata = spl_associated_token_account::get_associated_token_address(&st.admin.pubkey(), &st.mint);
+    let emit = |value: serde_json::Value| -> Result<()> {
+        let line = serde_json::to_string(&value)?;
+        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(run.join("lifecycle.jsonl"))?, "{line}")?;
+        println!("{line}");
+        Ok(())
+    };
+    let record = |st: &Staging, phase: &str, extra: serde_json::Value| -> Result<()> {
+        let mut value = json!({"event":"lifecycle", "phase":phase,
+            "sig":st.last_sig.get().map(|s| s.to_string()).unwrap_or_default(),
+            "slot":st.rpc.get_slot()?, "unix_ms":now_ms()});
+        value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        emit(value)
+    };
+    let retired = |st: &Staging| -> Result<bool> {
+        Ok(st.rpc.get_account_with_commitment(&st.market, CommitmentConfig::confirmed())?.value
+            .is_none_or(|a| a.data.len() <= percolator_prog::constants::HEADER_LEN))
+    };
+    let send = |st: &Staging, ixs: &[Instruction], signer: &Keypair| -> Result<solana_sdk::hash::Hash> {
+        let tx = st.tx(ixs, &[signer])?;
+        let r = st.rpc.simulate_transaction(&tx)?;
+        if r.value.err.is_some() {
+            bail!("lifecycle simulation: {:?}; logs: {:?}", r.value.err, r.value.logs);
+        }
+        st.last_sig.set(Some(st.rpc.send_and_confirm_transaction(&tx)?));
+        Ok(tx.message.recent_blockhash)
+    };
+    // A retired slab has only a tombstone, not a readable market config.
+    if !retired(&st)? {
+        let (data, g, _) = st.read()?;
+        let (cfg, _) = read_market(&data).map_err(|e| anyhow!("read_market: {e:?}"))?;
+        if cfg.marketauth != st.admin.pubkey().to_bytes() {
+            bail!("keys/multisig.json is not the on-chain marketauth");
+        }
+        if !run.join("lifecycle.jsonl").exists() {
+            record(&st, "start", json!({"sig":""}))?;
+        }
+        (st.mark, st.feed) = (g.assets[0].effective_price, g.assets[0].effective_price);
+        if g.mode == MarketModeV16::Live && g.assets[0].lifecycle != percolator::AssetLifecycleV16::Recovery {
+            send(&st, &st.shutdown_ixs()?, &st.admin)
+                .context("SHUTDOWN: oracle stale? the market may need the permissionless stale-resolve route")?;
+            record(&st, "recovery", json!({}))?;
+        }
+        if st.read()?.1.mode == MarketModeV16::Live {
+            let started = Instant::now();
+            loop {
+                let ixs = st.resolve_ixs()?;
+                if st.simulates(&ixs, &[&st.admin]) {
+                    st.send(&ixs, &[&st.admin]).context("ResolveMarket")?;
+                    record(&st, "resolved", json!({}))?;
+                    break;
+                }
+                if started.elapsed() >= Duration::from_secs(120) {
+                    let r = st.rpc.simulate_transaction(&st.tx(&ixs, &[&st.admin])?)?;
+                    bail!("ResolveMarket timed out: {:?}; logs: {:?}", r.value.err, r.value.logs);
+                }
+                sleep(Duration::from_secs(2));
+            }
+        }
+        if st.read()?.1.mode != MarketModeV16::Resolved {
+            bail!("lifecycle requires a Live or Resolved market");
+        }
+        let budget = CycleBudget::from_env();
+        let mut quarantine = Quarantine::new(QuarantineConfig::from_env());
+        let mut cu = CuStats::default();
+        for tick in 0..200 {
+            if st.portfolio_settled(&st.lp_pf)? && st.portfolio_settled(&st.trader_pf)? { break; }
+            let ctx = CrankCtx {
+                blockhash: &st.blockhash, rpc: &st.rpc, program_id: &st.program_id,
+                payer: &st.payer, market: &st.market, reward_portfolio: None,
+                pyth: &st.pyth, exclude: &[],
+            };
+            cycle::run_one_cycle(&ctx, tick, &budget, &mut quarantine, &mut Vec::new(), &mut cu)?;
+            sleep(Duration::from_secs(3));
+        }
+        if !(st.portfolio_settled(&st.lp_pf)? && st.portfolio_settled(&st.trader_pf)?) {
+            bail!("portfolios still open after 200 cycles");
+        }
+        st.last_sig.set(None);
+        record(&st, "paid_out", json!({}))?;
+        for pf in [st.lp_pf, st.trader_pf] {
+            let Some(a) = st.rpc.get_account_with_commitment(&pf, CommitmentConfig::confirmed())?.value else { continue };
+            read_portfolio(&a.data).map_err(|e| anyhow!("read_portfolio {pf}: {e:?}"))?;
+            let b = binding::portfolio_binding(&a.data)?;
+            let ix = st.prog_ix(P::ClosePortfolio {
+                portfolio_id: b.portfolio_id, expected_sequence: b.sequence, position_epoch: b.position_epoch,
+            }, vec![AccountMeta::new(st.admin.pubkey(), true), AccountMeta::new(st.market, false), AccountMeta::new(pf, false)]);
+            send(&st, &[ix], &st.admin).context("ClosePortfolio")?;
+            record(&st, "portfolio_closed", json!({"portfolio":pf.to_string()}))?;
+        }
+        for d in 0..2 {
+            let (_, g, s) = st.read()?;
+            let b = &g.source_backing_buckets[d];
+            let amount = b.fresh_unliened_backing_num / BOUND_SCALE;
+            let current_slot = g.current_slot.max(st.rpc.get_slot()?);
+            if b.status != Bucket::Fresh || amount == 0 || b.expiry_slot <= current_slot { continue; }
+            let k = key(&run, "backing_bucket_authority", false)?;
+            let ata = spl_associated_token_account::get_associated_token_address(&k.pubkey(), &st.mint);
+            if st.rpc.get_account_with_commitment(&ata, CommitmentConfig::confirmed())?.value.is_none() {
+                setup::create_ata(&st.rpc, &st.payer, &k.pubkey(), &st.mint)?;
+            }
+            let mut metas = st.role_metas(&k);
+            metas.extend([
+                AccountMeta::new(ata, false), AccountMeta::new(st.vault, false),
+                AccountMeta::new_readonly(st.vault_auth, false), AccountMeta::new_readonly(spl_token::ID, false),
+            ]);
+            let ix = st.prog_ix(P::WithdrawBackingBucket {
+                domain: d as u16, market_id: g.assets[0].market_id,
+                authority_epoch: s.authority_epoch, amount,
+            }, metas);
+            send(&st, &[ix], &k).context("WithdrawBackingBucket")?;
+            record(&st, "backing_withdrawn", json!({"domain":d,"amount":amount}))?;
+        }
+        if st.rpc.get_account_with_commitment(&st.admin_ata, CommitmentConfig::confirmed())?.value.is_none() {
+            setup::create_ata(&st.rpc, &st.payer, &st.admin.pubkey(), &st.mint)?;
+        }
+        let mut previous_blockhash = None;
+        for _ in 0..30 {
+            if retired(&st)? { break; }
+            let (_, g, s) = st.read()?;
+            let amount = g.insurance_domain_budget_remaining_total;
+            let (ix, signer) = if amount > 0 {
+                let k = key(&run, "insurance_authority", false)?;
+                let ata = spl_associated_token_account::get_associated_token_address(&k.pubkey(), &st.mint);
+                if st.rpc.get_account_with_commitment(&ata, CommitmentConfig::confirmed())?.value.is_none() {
+                    setup::create_ata(&st.rpc, &st.payer, &k.pubkey(), &st.mint)?;
+                }
+                let mut metas = st.role_metas(&k);
+                metas.extend([
+                    AccountMeta::new(ata, false), AccountMeta::new(st.vault, false),
+                    AccountMeta::new_readonly(st.vault_auth, false), AccountMeta::new_readonly(spl_token::ID, false),
+                ]);
+                (st.prog_ix(P::WithdrawInsuranceAsset {
+                    asset_index: 0, market_id: g.assets[0].market_id,
+                    authority_epoch: s.authority_epoch, amount,
+                }, metas), k)
+            } else {
+                (st.prog_ix(P::CloseSlab { authority_epoch: s.authority_epoch }, vec![
+                    AccountMeta::new(st.admin.pubkey(), true), AccountMeta::new(st.market, false),
+                    AccountMeta::new(st.vault, false), AccountMeta::new_readonly(st.vault_auth, false),
+                    AccountMeta::new(st.admin_ata, false), AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(st.mint, false),
+                ]), key(&run, "multisig", false)?)
+            };
+            st.blockhash.invalidate();
+            let started = Instant::now();
+            loop {
+                // Cache the fetched hash so the send uses exactly the hash checked here.
+                let blockhash = st.blockhash.get(&st.rpc)?;
+                if Some(blockhash) != previous_blockhash { break; }
+                if started.elapsed() >= Duration::from_secs(5) {
+                    bail!("terminal lifecycle timed out waiting for a new blockhash");
+                }
+                st.blockhash.invalidate();
+                sleep(Duration::from_millis(100));
+            }
+            previous_blockhash = Some(send(&st, &[ix], &signer)
+                .context(if amount > 0 { "WithdrawInsuranceAsset" } else { "CloseSlab" })?);
+            if amount > 0 {
+                record(&st, "insurance_withdrawn", json!({"amount":amount}))?;
+            } else {
+                record(&st, "slab_closed", json!({"retired":retired(&st)?}))?;
+            }
+        }
+        if !retired(&st)? { bail!("market still active after 30 terminal lifecycle calls"); }
+    }
+    let lamports = st.rpc.get_balance(&st.admin.pubkey())?;
+    if lamports != 0 {
+        let a = st.rpc.get_account(&st.admin.pubkey())?;
+        if a.owner != solana_sdk::system_program::ID || !a.data.is_empty() || st.admin.pubkey() == st.payer.pubkey() {
+            bail!("marketauth must be a plain system account distinct from payer");
+        }
+        send(&st, &[system_instruction::transfer(&st.admin.pubkey(), &st.payer.pubkey(), lamports)], &st.admin)?;
+        record(&st, "swept", json!({"lamports":lamports}))?;
+    }
+    let account = |key: &Pubkey| st.rpc.get_account_with_commitment(key, CommitmentConfig::confirmed()).map(|r| r.value);
+    let tokens = |key: &Pubkey| -> Result<u64> {
+        if account(key)?.is_none() { return Ok(0); }
+        Ok(st.rpc.get_token_account_balance(key)?.amount.parse()?)
+    };
+    let market = account(&st.market)?;
+    let vault = account(&st.vault)?;
+    let lp_pf = account(&st.lp_pf)?;
+    let trader_pf = account(&st.trader_pf)?;
+    emit(json!({"event":"lifecycle_final", "slot":st.rpc.get_slot()?, "unix_ms":now_ms(),
+        "market":{"address":st.market.to_string(), "lamports":market.as_ref().map_or(0, |a| a.lamports),
+            "data_len":market.as_ref().map_or(0, |a| a.data.len()), "retired":retired(&st)?},
+        "vault":{"exists":vault.is_some(), "token_amount":tokens(&st.vault)?},
+        "lp_pf":{"exists":lp_pf.is_some(), "lamports":lp_pf.map_or(0, |a| a.lamports)},
+        "trader_pf":{"exists":trader_pf.is_some(), "lamports":trader_pf.map_or(0, |a| a.lamports)},
+        "lp_tokens":tokens(&spl_associated_token_account::get_associated_token_address(&st.lp.pubkey(), &st.mint))?,
+        "trader_tokens":tokens(&spl_associated_token_account::get_associated_token_address(&st.trader.pubkey(), &st.mint))?,
+        "marketauth_tokens":tokens(&st.admin_ata)?, "payer_lamports":st.rpc.get_balance(&st.payer.pubkey())?}))
+}
+
 /// `staging roles <config> <cluster> <run dir>`: print the on-chain role
 /// table; fail unless the handover is complete (the health check).
 pub fn roles_main(args: &[String]) -> Result<()> {
