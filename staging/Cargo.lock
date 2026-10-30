@@ -1285,7 +1285,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
- "percolator",
+ "percolator 0.1.1 (git+https://github.com/aeyakovenko/percolator?rev=4db11a8cb0053815e23a35d3a7d3edc265d8d866)",
  "percolator-prog",
  "serde_json",
  "solana-account-decoder",
@@ -2680,6 +2680,14 @@ dependencies = [
 [[package]]
 name = "percolator"
 version = "0.1.1"
+source = "git+https://github.com/aeyakovenko/percolator?rev=495a5590c97055bd71c6f94d849ff0298f243145#495a5590c97055bd71c6f94d849ff0298f243145"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
+name = "percolator"
+version = "0.1.1"
 source = "git+https://github.com/aeyakovenko/percolator?rev=4db11a8cb0053815e23a35d3a7d3edc265d8d866#4db11a8cb0053815e23a35d3a7d3edc265d8d866"
 dependencies = [
  "bytemuck",
@@ -2695,7 +2703,7 @@ dependencies = [
  "bytemuck",
  "num-derive 0.4.2",
  "num-traits",
- "percolator",
+ "percolator 0.1.1 (git+https://github.com/aeyakovenko/percolator?rev=495a5590c97055bd71c6f94d849ff0298f243145)",
  "pinocchio 0.6.0",
  "pyth-sdk-solana",
  "pythnet-sdk",
@@ -5565,7 +5573,7 @@ dependencies = [
  "bincode",
  "chrono",
  "drip",
- "percolator",
+ "percolator 0.1.1 (git+https://github.com/aeyakovenko/percolator?rev=4db11a8cb0053815e23a35d3a7d3edc265d8d866)",
  "percolator-prog",
  "serde",
  "serde_json",

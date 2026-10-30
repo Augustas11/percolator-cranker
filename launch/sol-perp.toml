@@ -123,10 +123,11 @@ min_nonzero_im_req = 2000
 maintenance_margin_bps = 1000
 initial_margin_bps = 2000        # 5x
 max_trading_fee_bps = 100
-# 12 bps, not the money model's 5: at 5 bps the market loses to latency
-# arbitrage at every reachable lag, and 8 is not enough on its own
-# (research/replay/REPORT.md, headline and "Recommended start").
-trade_fee_base_bps = 12
+# 15 bps (owner, 2026-10-30). 5 bps loses to latency arbitrage at every
+# reachable lag (research/replay/REPORT.md). Post-stall-fix replay
+# (REPORT-post-fix.md): 12 bps nets +4.8 bps, break-even ~$211k/day, and
+# turns negative near 1.4 s lag; 15 bps nets +10.4, break-even ~$98k/day.
+trade_fee_base_bps = 15
 liquidation_fee_bps = 50
 liquidation_fee_cap = 10000000000
 min_liquidation_abs = 0
@@ -163,7 +164,7 @@ max_fill_notional_usd = 100000
 max_lp_inventory_usd = 100000
 size_q = 10000000                # 10 SOL
 spread_bps = 10
-fee_bps = 12                     # >= trade_fee_base_bps (the wrapper refuses less)
+fee_bps = 15                     # >= trade_fee_base_bps (the wrapper refuses less)
 
 [amounts]
 lp_deposit = 30000000000         # $30k
