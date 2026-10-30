@@ -51,8 +51,23 @@ export interface Leaderboard {
   entries: { rank: number; wallet: string; pnl: string; equity: string; net_deposits: string; trades: number; open_positions: number; portfolios: string[] }[];
 }
 
+export interface RecentFills {
+  fills: { signature: string; ix_index: number; leg: number; slot: number; block_time: number | null; side: "buy" | "sell"; size_q: string; mark_price: number | null; wallet: string | null; taker_portfolio: string; status: "executed" | "requested" }[];
+}
+
+export interface Season {
+  season: number;
+  since: number | null;
+  agents: number;
+  trades: number;
+  volume_usd: string;
+  open_interest_usd: string;
+}
+
 export interface IndexerClient {
   readonly mock?: boolean;
+  recentFills?(limit: number): Promise<RecentFills>;
+  season?(): Promise<Season>;
   stats(): Promise<Stats>;
   leaderboard(): Promise<Leaderboard>;
   positions(owner: string): Promise<Positions>;
@@ -90,6 +105,8 @@ export class HttpIndexerClient implements IndexerClient {
     }));
   }
 
+  async recentFills(limit: number) { await this.check(); return this.get<RecentFills>(`/fills/recent?limit=${limit}`); }
+  async season() { await this.check(); return this.get<Season>("/season"); }
   async leaderboard() { await this.check(); return this.get<Leaderboard>("/leaderboard"); }
   async positions(owner: string) { await this.check(); return this.get<Positions>(`/positions?owner=${encodeURIComponent(owner)}`); }
   async fills(portfolio: string) { await this.check(); return this.get<Fills>(`/fills?portfolio=${encodeURIComponent(portfolio)}&limit=50`); }

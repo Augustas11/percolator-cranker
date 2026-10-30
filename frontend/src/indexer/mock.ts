@@ -1,4 +1,4 @@
-import type { Fills, IndexerClient, Leaderboard, Positions, Stats } from "./client";
+import type { Fills, IndexerClient, Leaderboard, Positions, RecentFills, Season, Stats } from "./client";
 
 export class MockIndexerClient implements IndexerClient {
   readonly mock = true;
@@ -10,6 +10,18 @@ export class MockIndexerClient implements IndexerClient {
       liquidations_observed: 2, liquidations_since_slot: 800,
       open_interest: { asset_0: { long_q: "2500000", short_q: "2500000", lifecycle: "active" } },
     };
+  }
+
+  async recentFills(limit: number): Promise<RecentFills> {
+    return { fills: [0, 1, 2].slice(0, limit).map(i => ({
+      signature: `mock-signature-${i}`, ix_index: 0, leg: 0, slot: 999 - i, block_time: Math.floor(Date.now() / 1000) - 12 - i * 60,
+      side: i === 1 ? "sell" : "buy", size_q: i === 1 ? "-1500000" : "500000", mark_price: 97750000,
+      wallet: i === 2 ? null : "Ab12mockwalletlongyZ9q", taker_portfolio: "mock-portfolio", status: "executed",
+    })) };
+  }
+
+  async season(): Promise<Season> {
+    return { season: 0, since: 1793232000, agents: 12, trades: 345, volume_usd: "12345000000", open_interest_usd: "987500000" };
   }
 
   async leaderboard(): Promise<Leaderboard> {
