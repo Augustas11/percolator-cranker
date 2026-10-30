@@ -5,7 +5,7 @@ cranker + service operator** (see `prep.md`). This file orders the work. It
 records facts as of 2026-10-28, and items marked *to verify* are not
 established yet.
 
-## Situation (2026-10-29)
+## Situation (2026-10-29; still current 2026-10-30)
 
 - **Upstream is preparing to launch.** The ~20 PRs merged into the engine
   `master` on 2026-10-27 (`68859b94`) are what the wrapper re-pin PR
@@ -63,37 +63,72 @@ established yet.
   is undeployed and parked; it cannot take a market without its owner's
   signature. We keep maintenance fee 0 and listing closed to stay compatible.
 
-## In flight (money-critical, from the replay)
+## Done (2026-10-29 / 30)
 
-The replay turned two engineering numbers into the business: **fee ≥ 12 bps**
-(set in the launch config) and **mark lag ≤ ~400 ms**. The local drill
-measured 525 ms. These tracks follow from it:
+- **Replay tracks 1, 2, 4, 4b, 4c, 5 and 6 from the old "In flight" list:**
+  - fast pusher on a free exchange median (#18, #28, #29, #31);
+  - order-size caps (#18);
+  - TS client (#20, #23);
+  - on-chain matcher on devnet (#16, #21);
+  - monitor and indexer (#25);
+  - devnet live 24/7 on the Pearl VPS;
+  - replay on real pusher data (#48).
+- **Devnet hosting:** bots, monitor, indexer, faucet and a cost meter in Docker
+  on Pearl (#35). A paid dRPC devnet endpoint is used only by the bots.
+- **Cost:** bot RPC calls ~1.4M → ~122k/day and transactions ~104 → ~15/min
+  (#41, #45, #47), with mark lag p50 ~1.1 s.
+- **Money-path tests** (#32–#34): liquidation in a moving market (with a
+  paired-crank workaround for upstream #248), fast drop, gapped price, funding
+  and Recovery → Resolved, plus matcher refusals and the 12 bps fee floor.
+  #248 and #243 stay as known-bad tests until the next re-pin.
+- **Lifecycle drill on devnet** (#49, #50): PoC criterion 3, see below.
+- **Pusher stalls fixed** (#52): quote feeds instead of trade feeds, and a
+  bounded single-venue fallback. Time in gaps over 10 s fell from ~21% to 0%
+  in a side-by-side run; live confirmation on Pearl is pending.
 
-1. **Fast pusher.** Hermes now needs a paid key (~$500/month), so the
-   pusher uses the **median of free exchange feeds** (Coinbase, Kraken,
-   Binance if keyless) behind a swappable source; a paid Pyth plan is a
-   pre-mainnet decision. Push every slot when the price moved, with priority
-   fees; measure mark lag continuously (alert above 400 ms). The matcher
-   keeps refusing fills while the mark lags.
-2. **Order-size cap and tight OI caps.** Large whole tickets cut the edge
-   (break-even ~$133k → ~$550k/day); the LP co-signs fills, so refuse
-   oversized ones.
-3. **Hedging bot.** The profit assumes a hedged LP. Keep net SOL near zero on
-   a liquid external venue. Owner: open the venue account (~$20k margin per
-   the capital plan).
-4. **TS client for the frontend.** Fresh v16 client so the frontend trades
-   on devnet via **`TradeCpi`**, with the tester as the only signer. Small
-   retail tickets are the profitable flow profile, so the frontend is the
-   volume plan.
-4b. **On-chain matcher program** (fork of upstream `percolator-match`,
-   Apache-2.0): enforces our market only, size and inventory caps, no fills
-   on a stale mark, fee ≥ 12 bps; deployed on devnet for `TradeCpi`.
-4c. **Monitor on devnet** and an **indexer** (fills, positions, crank and
-   uptime stats) for the frontend and for honest public numbers.
-5. **Devnet live 24/7** with `drip`, the bots and the monitor; publish crank
-   and uptime numbers only (bot volume is not traction).
-6. **Re-run the replay on real Pyth data** once the devnet pusher has logged
-   enough of it (the current run uses Binance spot as the oracle stand-in).
+## What the real-data replay changed (#48)
+
+At 12 bps the market **lost money with the pusher as it ran**: −44 bps per $
+hedged, −24 unhedged. Lag was not the cause (p50 1.0 s, p95 2.1 s). The
+cause was **stalls**: quorum failures left the mark 25–120 s old. With
+stalls removed:
+
+- **12 bps:** +3.4 bps, break-even ~$300k/day.
+- **Push on a 5 bps move:** +5.9 bps, ~$174k/day.
+- **Fee 15 bps:** +9.7 bps, ~$105k/day.
+- **Lag p50 at 2 s:** a loss.
+- **Unhedged:** about the same mean, but a 2.5× larger daily swing.
+
+## In flight / next
+
+1. **Confirm the stall fix live on Pearl** (stall metric target: < 1% of time
+   in gaps over 10 s), then re-run the replay on the new logs.
+2. **Mainnet money settings, owner decision:** push trigger (5 vs 10 bps) and
+   fee (12 vs 15 bps), from the re-run.
+3. **Hedge, owner decision before mainnet:** the hedger is built but parked in
+   dry-run (no Hyperliquid account). Unhedged means a ~2.5× larger daily
+   swing.
+4. **PoC phase 2:** publish `drip-mcp` to npm, announce the arena, set
+   prizes, invite testers and agents.
+
+## Ecosystem: drip.tech (owner direction 2026-10-30)
+
+An open ecosystem for Percolator perps, in the style of ClawPump. The Day-0
+plan is unchanged: SOL-PERP only, listing closed, official program ID only.
+
+- **Site:** live on Vercel (`drip-devnet`), with "The House of Percolator Perps",
+  live recent trades and season tiles from the indexer, and pages for Tools,
+  Arena and Build (#37, #40, #43, #51). The domain is not bought yet
+  (drip.tech is parked for sale).
+- **MCP server** `drip-mcp` (#39): any agent can trade devnet SOL-PERP from its
+  own key. npm publish is pending the owner's npm login.
+- **Faucet** (#38, #42): 1,000 test USDC plus 0.08 SOL per new agent, with a
+  1 SOL/day cap and a 3 SOL payer floor.
+- **Arena season 0** (#36, #44, #46): a fresh indexer DB from start slot
+  516687561. It counts season entrants only and excludes our bots. One seed
+  agent has traded so far.
+- **Open source:** the public pieces are built for the public export
+  (Apache-2.0). The operator money stack (hedger, ops, keys) stays private.
 
 ## Immediate (next 2–4 weeks)
 
@@ -184,7 +219,7 @@ open, close, withdraw) with test USDC from a faucet.
    cranker share) against cost (insurance, backing capital, SOL).
 
 **Phases:**
-1. Devnet SOL-PERP with bots only (items 2 and 3 on devnet).
+1. Devnet SOL-PERP with bots only (items 2 and 3 on devnet). **Done.**
 2. Add the trading frontend and invited testers.
 3. Decision: if 1–5 pass, item 4 (mainnet) goes on the table through its
    gates; if not, we have the data and repros to say why.
@@ -284,11 +319,17 @@ competition. Hold until launch and real flow.
 
 ## Order
 
-1, 2, 3 and the Day-0 kit are done. Now, in parallel: fast Pyth pusher +
-size caps (on devnet), hedging bot, TS client → **PoC beta** phase 1 (devnet
-24/7, bots) → phase 2 (frontend + invited testers). Mainnet SOL-PERP only on
-the official program ID, with fee ≥ 12 bps, measured mark lag ≤ ~400 ms and
-the hedge live. 4b only when other operators exist.
+1. Items 1, 2 and 3, the Day-0 kit, the replay tracks and **PoC phase 1**
+   are done: devnet 24/7, bots, lifecycle drill.
+2. Now: confirm the stall fix, re-run the replay, then the owner decides
+   the fee, push trigger and hedge.
+3. Then: **PoC phase 2** (npm publish, arena, invited testers and agents).
+4. Mainnet SOL-PERP only on the official program ID. The gates are:
+   - no stalls;
+   - measured lag p50 ≤ ~1 s;
+   - the fee and push settings from the re-run;
+   - the hedge decision made.
+5. 4b only when other operators exist.
 
 ## Risks
 
@@ -310,6 +351,7 @@ Waits on the owner's designer assets.
 - the keeper-reward decision;
 - fee-share defaults;
 - how backing providers are paid;
+- percolator #248 and #243 fixes merging (re-pin, re-enable the known-bad tests);
 - another public v16 cranker appearing;
 - dcccrypto moving onto the upstream program or opening a funded mainnet
   market;
