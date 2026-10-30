@@ -157,8 +157,10 @@ jobs:
       - name: cache wrapper SBF build
         uses: actions/cache@v4
         with:
-          path: ${{ env.PERCOLATOR_PROG_DIR }}/target
-          key: sbf-${{ runner.os }}-${{ hashFiles('scripts/pins.env') }}
+          path: |
+            ${{ env.PERCOLATOR_PROG_DIR }}/target
+            matcher/program/target
+          key: sbf-${{ runner.os }}-${{ hashFiles('scripts/pins.env', 'matcher/program/Cargo.*', 'matcher/program/src/**') }}
       - name: payer keypair (throwaway, local validator only)
         run: |
           mkdir -p ~/.config/solana
@@ -172,6 +174,11 @@ jobs:
       # ~/.cache/solana/v1.52 before building. The Solana cache keeps both.)
       - name: SBF build + local bring-up
         run: ./scripts/m1_bringup.sh
+      - name: matcher SBF + money-path tests
+        if: ${{ hashFiles('matcher/host/Cargo.toml') != '' }}
+        run: |
+          (cd matcher/program && cargo build-sbf --tools-version v1.52)
+          cargo test --release --manifest-path matcher/host/Cargo.toml
       - name: local money-path tests
         env:
           MONEY_PATH_REQUIRE_SBF: "1"

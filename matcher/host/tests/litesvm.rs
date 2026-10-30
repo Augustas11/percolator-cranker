@@ -87,7 +87,10 @@ impl Env {
     fn new(init: bool, reference: bool) -> Self {
         let mut svm = LiteSVM::new();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let wrapper = root.join("../../repo-prog/target/deploy/percolator_prog.so");
+        let wrapper = std::env::var_os("PERCOLATOR_PROG_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| root.join("../../repo-prog"))
+            .join("target/deploy/percolator_prog.so");
         let matcher = root.join("../program/target/deploy/drip_matcher.so");
         svm.add_program(
             percolator_prog::id(),
@@ -455,6 +458,98 @@ fn fill_within_caps_succeeds() {
     assert_eq!(&d[48..56], &PRICE.to_le_bytes());
     assert_eq!(&d[56..64], &0u64.to_le_bytes());
 }
+#[test]
+fn fill_pays_fee_floor_and_conserves_value() {
+    let mut e = Env::new(true, true);
+    let taker_before = state::read_portfolio(&e.data(e.taker_pf)).unwrap();
+    let lp_before = state::read_portfolio(&e.data(e.lp_pf)).unwrap();
+    let (cfg, market_before) = state::read_market(&e.data(e.market)).unwrap();
+    assert_eq!(cfg.trade_fee_base_bps, 12);
+
+    e.fill(SIZE).unwrap();
+
+    let taker_after = state::read_portfolio(&e.data(e.taker_pf)).unwrap();
+    let lp_after = state::read_portfolio(&e.data(e.lp_pf)).unwrap();
+    let (_, market_after) = state::read_market(&e.data(e.market)).unwrap();
+    // This lower bound floors both divisions; the engine ceils fee notional and
+    // then the bps charge. These inputs divide exactly under either rounding.
+    let notional = SIZE.unsigned_abs() * u128::from(PRICE) / 1_000_000;
+    let fee_floor = notional * 12 / 10_000;
+    assert_eq!(notional, 100_000_000);
+    assert_eq!(fee_floor, 120_000);
+    let taker_debit = taker_before.capital.get() - taker_after.capital.get();
+    let lp_debit = lp_before.capital.get() - lp_after.capital.get();
+    let insurance_fee = market_after.insurance - market_before.insurance;
+    assert!(taker_debit >= fee_floor);
+    assert_eq!(taker_debit, fee_floor);
+    // TradeCpi charges both sides the base fee; the LP's net credit is negative.
+    assert_eq!(lp_debit, fee_floor);
+    let lp_credit = lp_after.capital.get() as i128 - lp_before.capital.get() as i128;
+    assert_eq!(taker_debit as i128, lp_credit + insurance_fee as i128);
+    assert_eq!(insurance_fee, 2 * fee_floor);
+    assert_eq!(market_after.vault, market_before.vault);
+    assert_eq!(market_before.c_tot - market_after.c_tot, insurance_fee);
+    for (before, after) in [(&taker_before, &taker_after), (&lp_before, &lp_after)] {
+        assert_eq!(before.pnl.get(), 0);
+        assert_eq!(after.pnl.get(), 0);
+    }
+    // Domain budgets earmark the same insurance atoms, not additional value.
+    assert_eq!(
+        market_after.insurance_domain_budget_remaining_total
+            - market_before.insurance_domain_budget_remaining_total,
+        insurance_fee
+    );
+    for domain in 0..2 {
+        assert_eq!(
+            market_after.insurance_domain_budget[domain]
+                - market_before.insurance_domain_budget[domain],
+            fee_floor
+        );
+    }
+}
+
+#[test]
+fn fee_below_market_minimum_rejected() {
+    let mut e = Env::new(true, true);
+    let market_before = e.data(e.market);
+    let taker_before = e.data(e.taker_pf);
+    let lp_before = e.data(e.lp_pf);
+    let ctx_before = e.data(e.ctx.pubkey());
+    let minimum = state::read_market(&market_before)
+        .unwrap()
+        .0
+        .trade_fee_base_bps;
+    assert_eq!(minimum, 12);
+    let mut ix = trade(
+        percolator_prog::id(),
+        e.market,
+        e.taker.pubkey(),
+        e.taker_pf,
+        e.lp_pf,
+        e.program,
+        e.ctx.pubkey(),
+        &market_before,
+        &taker_before,
+        &lp_before,
+        SIZE,
+    )
+    .unwrap();
+    let mut instruction = P::decode(&ix.data).unwrap();
+    match &mut instruction {
+        P::TradeCpi { fee_bps, .. } => *fee_bps = minimum - 1,
+        _ => panic!("expected TradeCpi"),
+    }
+    ix.data = instruction.encode();
+    custom(
+        send(&mut e.svm, &e.payer, &[ix], &[&e.taker]),
+        percolator_prog::error::PercolatorError::InvalidInstruction as u32,
+    );
+    assert_eq!(e.data(e.market), market_before);
+    assert_eq!(e.data(e.taker_pf), taker_before);
+    assert_eq!(e.data(e.lp_pf), lp_before);
+    assert_eq!(e.data(e.ctx.pubkey()), ctx_before);
+}
+
 #[test]
 fn oversized_fill_rejected() {
     let mut e = Env::new(true, true);
