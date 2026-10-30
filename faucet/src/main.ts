@@ -20,6 +20,7 @@ async function main() {
     if (!["http:", "https:"].includes(new URL(rpcUrl).protocol)) throw new Error();
     connection = new Connection(rpcUrl, {
       commitment: "confirmed",
+      disableRetryOnRateLimit: true,
       fetch: (input, init) => {
         const timeout = AbortSignal.timeout(10_000);
         return fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout });
