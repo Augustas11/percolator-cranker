@@ -34,7 +34,7 @@ export default function Site({ client, indexer, indexerBase = null }: { client: 
   const titles: Record<string, string> = { [site.paths.home]: "drip", [site.paths.tools]: "Tools · drip", [site.paths.arena]: "Arena · drip", [site.paths.build]: "Build · drip", [site.paths.trade]: "Trade · drip" };
   const title = titles[path] ?? "Page not found · drip";
   useEffect(() => { document.title = title; }, [title]);
-  const page = path === site.paths.home ? <Home client={client} indexerBase={indexerBase} />
+  const page = path === site.paths.home ? <Home client={client} indexer={indexer} indexerBase={indexerBase} />
     : path === site.paths.tools ? <Tools />
     : path === site.paths.arena ? <Arena indexerBase={indexerBase} />
     : path === site.paths.build ? <Build />

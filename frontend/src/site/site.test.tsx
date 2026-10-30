@@ -48,11 +48,15 @@ test.each([
   expect(container.querySelector("footer")?.textContent).toContain("Devnet only. Test tokens, no real value.");
 });
 
-test("home shows its live mark, illustrative chart and honest unpublished tools", async () => {
+test("home shows its live mark, recent trades and honest unpublished tools", async () => {
   const container = await render(site.paths.home);
   expect(container.textContent).toContain("$150.00");
   expect(container.textContent).toContain("From agent to leaderboard.");
-  expect(container.textContent).toContain("Illustrative chart");
+  expect(container.textContent).not.toMatch(/PERCOLATOR PERPS · SOLANA|LIVE|Illustrative/);
+  expect(container.textContent).toContain("Give agents a wallet, leverage and a live SOL-PERP market.");
+  expect(container.textContent).toContain("Mark price");
+  expect(container.querySelector('.hero-actions a[href="/trade"]')?.textContent?.trim()).toBe("Trade SOL-PERP");
+  expect(container.querySelector('.hero-actions a[href="/arena"]')?.textContent).toBe("Watch agents trade");
   expect(container.textContent).toContain("Prizes TBD.");
   expect(container.textContent).toContain("Indexer not configured");
   expect(container.textContent).not.toMatch(/\[TBD\]|\[NPM-PACKAGE\]|npx/);
@@ -228,4 +232,77 @@ test("unknown paths offer a link home", async () => {
   const container = await render("/missing");
   expect(container.querySelector("h1")?.textContent).toBe("Page not found");
   expect(container.querySelector("main a")?.getAttribute("href")).toBe(site.paths.home);
+});
+
+
+test("home renders recent fills and live season totals", async () => {
+  const container = await render(site.paths.home);
+  const ticker = container.querySelector(".recent-trades")!;
+  expect(ticker.querySelectorAll("li")).toHaveLength(3);
+  for (const text of ["Long", "Short", "0.5 SOL", "1.5 SOL", "$97.75", "Ab12…yZ9q", "mock…olio"]) expect(ticker.textContent).toContain(text);
+  expect(ticker.textContent).toMatch(/\d+[smhd] ago/);
+  const link = ticker.querySelector("li a")!;
+  expect(link.getAttribute("href")).toBe("https://explorer.solana.com/tx/mock-signature-0?cluster=devnet");
+  expect(link.getAttribute("target")).toBe("_blank");
+  expect(link.getAttribute("rel")).toBe("noreferrer");
+  const season = container.querySelector('[aria-label="Season 0"]')!;
+  expect(Array.from(season.querySelectorAll(".fact-label"), el => el.textContent)).toEqual(["Agents", "Trades", "Volume (USD)", "Open interest (USD)"]);
+  expect(Array.from(season.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["12", "345", "$12,345", "$987.50"]);
+  expect(season.textContent).toContain("Season 0 · devnet · since " + new Date(1793232000 * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }));
+});
+
+test.each(["rejects", "missing", "none", "empty"])("home handles unavailable data: %s", async mode => {
+  const indexer: IndexerClient = new MockIndexerClient();
+  indexer.recentFills = mode === "missing" ? undefined : mode === "empty" ? vi.fn().mockResolvedValue({ fills: [] }) : vi.fn().mockRejectedValue(new Error("indexer 404"));
+  indexer.season = mode === "missing" ? undefined : vi.fn().mockRejectedValue(new Error("indexer 404"));
+  const container = await render(site.paths.home, mode === "none" ? null : indexer);
+  expect(container.querySelector(".recent-trades")?.textContent).toContain("No agent trades yet.");
+  expect(container.querySelector('.recent-trades a[href="/tools"]')?.textContent).toBe("Be the first.");
+  expect(Array.from(container.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["—", "—", "—", "—"]);
+  expect(container.querySelector(".home-facts")?.textContent).toContain("Season 0 · devnet · since —");
+});
+
+test.each([
+  ["0", "0", "$0.00", "$0.00"],
+  ["bad", "broken", "—", "—"],
+  ["9007199254740993000000", "12345678", "$9,007,199,254,740,993", "$12.35"],
+])("home formats season atoms %s and %s", async (volume, interest, expectedVolume, expectedInterest) => {
+  const indexer = new MockIndexerClient();
+  vi.spyOn(indexer, "season").mockResolvedValue({ season: 0, since: null, agents: 0, trades: 0, volume_usd: volume, open_interest_usd: interest });
+  const container = await render(site.paths.home, indexer);
+  expect(Array.from(container.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["0", "0", expectedVolume, expectedInterest]);
+  expect(container.querySelector(".home-facts")?.textContent).toContain("since —");
+});
+
+test("home polls and retains last good data on errors, then stops on unmount", async () => {
+  vi.useFakeTimers();
+  const indexer = new MockIndexerClient();
+  const fills = vi.spyOn(indexer, "recentFills"), season = vi.spyOn(indexer, "season");
+  const container = await render(site.paths.home, indexer);
+  expect(fills).toHaveBeenCalledWith(20);
+  fills.mockRejectedValue(new Error("indexer 404"));
+  season.mockRejectedValue(new Error("indexer 404"));
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  expect(fills).toHaveBeenCalledTimes(4);
+  expect(season).toHaveBeenCalledTimes(2);
+  expect(container.querySelectorAll(".recent-trades li")).toHaveLength(3);
+  expect(container.querySelector(".facts-grid")?.textContent).toContain("$12,345");
+  await cleanup?.();
+  cleanup = undefined;
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  expect(fills).toHaveBeenCalledTimes(4);
+  expect(season).toHaveBeenCalledTimes(2);
+});
+
+test("home explains why Percolator", async () => {
+  const container = await render(site.paths.home);
+  const why = container.querySelector('[aria-labelledby="why-title"]')!;
+  expect(why.querySelector("h2")?.textContent).toBe("Why Percolator");
+  expect(Array.from(why.querySelectorAll("h3"), el => el.textContent)).toEqual(["Built by Anatoly Yakovenko", "Profits are backed", "Each market stands alone", "Anyone can run it"]);
+  expect(Array.from(why.querySelectorAll("p"), el => el.textContent)).toEqual([
+    "Solana's co-founder wrote Percolator as an open-source perps engine.",
+    "Gains pay out only up to what the market can cover. No paper profits.",
+    "A blow-up in one market can't take money from another. The engine ships proofs that trades can't create value.",
+    "Any keeper can crank a market. No company-run matching server.",
+  ]);
 });
