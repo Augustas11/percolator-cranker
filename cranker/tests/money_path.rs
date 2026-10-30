@@ -759,36 +759,76 @@ fn funding_over_many_slots_stays_consistent() -> Result<()> {
     let mut control = Env::with_positions("funding control", &[1_000_000], 0)?.unwrap();
     // AUTH_MARK is price-managed. canonical_accrual_path_for_target_view
     // invokes funding_rate_from_checkpoint_view even with an oracle-less
-    // hint. Hold a target above the 1% clamp to produce a sustained premium.
+    // hint. Re-offset the target above the 1% clamp on every push so the
+    // premium persists after the initial ramp, including the final 100 slots.
+    let initial = common::decode_market(&funded.data(funded.market))?;
+    let initial_legs: Vec<_> = funded
+        .portfolios
+        .iter()
+        .map(|pf| common::decode_portfolio(&funded.data(*pf)).unwrap().legs[0])
+        .collect();
+    let mut window_epochs = vec![initial.funding_epoch];
     let mut max_attempts = 0;
     for step in 1..=300 {
         for e in [&mut funded, &mut control] {
-            e.push(PRICE * 120 / 100);
+            let price = common::decode_market(&e.data(e.market))?.assets[0].effective_price;
+            e.push(price * 120 / 100);
             if step % 4 == 0 {
                 for pf in e.portfolios.clone() {
                     max_attempts = max_attempts.max(converge(e, pf, 8)?);
                 }
             }
         }
+        if step % 100 == 0 {
+            let epoch = common::decode_market(&funded.data(funded.market))?.funding_epoch;
+            assert!(
+                epoch > *window_epochs.last().unwrap(),
+                "funding must advance in every 100-slot window"
+            );
+            window_epochs.push(epoch);
+        }
     }
     let mg = common::decode_market(&funded.data(funded.market))?;
-    assert!(mg.assets[0].f_long_num != 0 && mg.assets[0].f_short_num != 0);
-    assert!(mg.funding_epoch > 0);
+    let cg = common::decode_market(&control.data(control.market))?;
+    // Positive mark premium charges longs and credits shorts.
+    assert!(mg.assets[0].f_long_num < initial.assets[0].f_long_num);
+    assert!(mg.assets[0].f_short_num > initial.assets[0].f_short_num);
+    assert_eq!(cg.assets[0].f_long_num, 0);
+    assert_eq!(cg.assets[0].f_short_num, 0);
+    assert_eq!(mg.assets[0].effective_price, cg.assets[0].effective_price);
     let mut transfers = Vec::new();
+    let mut expected_transfers = Vec::new();
     for i in 0..funded.portfolios.len() {
         let f = common::decode_portfolio(&funded.data(funded.portfolios[i]))?;
         let c = common::decode_portfolio(&control.data(control.portfolios[i]))?;
         transfers
             .push(f.capital.get() as i128 + f.pnl.get() - c.capital.get() as i128 - c.pnl.get());
-        assert_ne!(
-            transfers[i], 0,
-            "funding must reach each account, not only the index"
+        let leg = &initial_legs[i];
+        assert_eq!(f.legs[0].basis_pos_q, leg.basis_pos_q);
+        assert_eq!(f.legs[0].a_basis, leg.a_basis);
+        let index = if leg.basis_pos_q.get() > 0 {
+            mg.assets[0].f_long_num
+        } else {
+            mg.assets[0].f_short_num
+        };
+        // v16::leg_kf_delta_components_for_settlement_from_asset floors
+        // abs(basis_pos_q) * (f_now - f_snap) / (a_basis * POS_SCALE).
+        // Summing <=75 separately floored settlements differs from one
+        // aggregate floor by <75 atoms per portfolio (no position changes).
+        let expected = (leg.basis_pos_q.get().abs() * (index - leg.f_snap.get()))
+            .div_euclid(leg.a_basis.get() as i128 * percolator::POS_SCALE as i128);
+        expected_transfers.push(expected);
+        assert_eq!(transfers[i].signum(), -leg.basis_pos_q.get().signum());
+        assert!(
+            (transfers[i] - expected).abs() < 75,
+            "portfolio {i}: transfer={} expected={expected}",
+            transfers[i]
         );
     }
     // Two portfolios, <=75 settlements: at most one atom per side/settlement.
     let rounding_bound = 2 * 75;
     assert!(transfers.iter().sum::<i128>().abs() <= rounding_bound);
-    eprintln!("funding: 300 slots epoch={} f_long={} f_short={} transfers={transfers:?} net={} rounding_bound={rounding_bound} max_paired_attempts={max_attempts}", mg.funding_epoch, mg.assets[0].f_long_num, mg.assets[0].f_short_num, transfers.iter().sum::<i128>());
+    eprintln!("funding: 300 slots window_epochs={window_epochs:?} epoch={} f_long={} f_short={} transfers={transfers:?} expected={expected_transfers:?} net={} rounding_bound={rounding_bound} max_paired_attempts={max_attempts}", mg.funding_epoch, mg.assets[0].f_long_num, mg.assets[0].f_short_num, transfers.iter().sum::<i128>());
     Ok(())
 }
 
@@ -881,6 +921,7 @@ fn recovery_to_resolved_pays_every_claimant() -> Result<()> {
     else {
         return Ok(());
     };
+    let total_deposits = common::decode_market(&e.data(e.market))?.vault;
     e.svm.warp_to_slot(50);
     e.push(PRICE / 2);
     let counterparty = e.portfolios[0];
@@ -888,6 +929,14 @@ fn recovery_to_resolved_pays_every_claimant() -> Result<()> {
     // before its first health refresh and is bankrupt rather than partially
     // liquidated at the first crossing of maintenance.
     converge(&mut e, counterparty, 16)?;
+    // Only the preceding oracle push needs the market/oracle authority.
+    // Every crank entering/advancing Recovery and paying Resolved claims
+    // below is signed solely by this fresh, unprivileged keeper.
+    let keeper = Keypair::new();
+    e.svm.airdrop(&keeper.pubkey(), 100_000_000_000).unwrap();
+    assert_ne!(keeper.pubkey(), e.payer.pubkey());
+    assert!(e.owners.iter().all(|owner| owner.pubkey() != keeper.pubkey()));
+    e.payer = keeper;
     let victim = e.victim;
     for _ in 0..8 {
         e.crank_portfolio(victim, true)
@@ -933,8 +982,10 @@ fn recovery_to_resolved_pays_every_claimant() -> Result<()> {
         .map(|b| b.expiry_slot)
         .max()
         .unwrap_or(mg.resolved_slot);
-    e.svm.warp_to_slot(expiry + 1);
-    assert!(!drip::resolved::resolved_crank_hints(&mg, expiry + 1, 0).is_empty());
+    let delay = state::read_market(&e.data(e.market))?.0.force_close_delay_slots;
+    let payout_slot = (expiry + 1).max(mg.resolved_slot + delay);
+    e.svm.warp_to_slot(payout_slot);
+    assert!(!drip::resolved::resolved_crank_hints(&mg, payout_slot, 0).is_empty());
     let vault_authority =
         Pubkey::find_program_address(&[b"vault", e.market.as_ref()], &percolator_prog::id()).0;
     let mut paid = vec![0u128; e.portfolios.len()];
@@ -1016,11 +1067,17 @@ fn recovery_to_resolved_pays_every_claimant() -> Result<()> {
             );
             match e.send_crank(&ixs) {
                 Ok(_) => assert!(expected.is_ok(), "SBF must agree with pinned engine"),
-                Err(f) => assert_eq!(
-                    drip::submit::wrapper_error_name(&f.err.to_string()),
-                    Some("EngineNonProgress"),
-                    "resolved reject: {f:?}"
-                ),
+                Err(f) => {
+                    assert!(
+                        matches!(expected, Err(percolator::V16Error::NonProgress)),
+                        "SBF rejection must agree with engine preview: {expected:?}"
+                    );
+                    assert_eq!(
+                        drip::submit::wrapper_error_name(&f.err.to_string()),
+                        Some("EngineNonProgress"),
+                        "resolved reject: {f:?}"
+                    );
+                }
             }
             assert_eq!(
                 u128::from(balance(&e) - before),
@@ -1056,12 +1113,18 @@ fn recovery_to_resolved_pays_every_claimant() -> Result<()> {
             .deregister_empty_materialized_portfolio_not_atomic(&portfolio.as_view())
             .expect("every portfolio must satisfy the engine's closed predicate");
     }
-    assert!(paid[0] > 0, "solvent short claimant must receive payment");
+    // The short receives its own deposit and the bankrupt long's deposit,
+    // less one retained 12-bps entry fee. The other entry fee is consumed
+    // as bankruptcy insurance; the passive depositor's principal is untouched.
+    let entry_fee = SIZE as u128 * u128::from(PRICE) / percolator::POS_SCALE * 12 / 10_000;
+    assert_eq!(paid[0], 10_000_000_000 + 210_000_000 - entry_fee);
+    assert_eq!(paid[1], 0, "bankrupt long has no remaining claim");
     assert_eq!(
         paid[2], 210_000_000,
         "passive depositor receives its entire principal"
     );
     let mg = common::decode_market(&e.data(e.market))?;
+    assert_eq!(paid.iter().sum::<u128>() + mg.vault, total_deposits);
     // No externally deposited backing in this scenario. Allow one atom per account and
     // per side for integer settlement dust beyond protocol-owned insurance.
     let dust = e.portfolios.len() as u128 + 2;
