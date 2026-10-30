@@ -7,14 +7,14 @@
 //! health certificate, refreshes, and never reaches the Liquidate arm.
 //! Two cranks in one transaction share the slot and price: the first
 //! refreshes, the second sees a current certificate and liquidates.
-//! Self-skips when the SBF is not built (CI host job).
+//! Self-skips locally when the SBF is not built; CI requires it.
 
 mod common;
 
 use anyhow::Result;
 use drip::{
     observation::{fetch_observation_for_asset, PythFeedResolver},
-    submit::{build_crank_instructions, should_fallback_to_single, CrankRoute, TX_CU_LIMIT},
+    submit::{build_crank_instructions, single_crank_retry_instructions, CrankRoute, TX_CU_LIMIT},
 };
 use litesvm::{
     types::{FailedTransactionMetadata, TransactionMetadata},
@@ -88,6 +88,7 @@ impl Env {
             });
         let path = root.join("target/deploy/percolator_prog.so");
         if !path.exists() {
+            assert!(std::env::var_os("CI").is_none(), "{test}: pinned wrapper SBF not built: {}", path.display());
             eprintln!("SKIP {test}: pinned wrapper SBF not built");
             return Ok(None);
         }
@@ -344,10 +345,13 @@ impl Env {
                 "slot {slot} paired={paired}: {} logs={:?}",
                 failure.err, failure.meta.logs
             );
-            if paired && should_fallback_to_single(true, &failure.err.to_string(), idx) {
-                let retry = self.send_crank(&ixs[..idx + 1]);
-                assert!(retry.is_ok(), "single fallback: {retry:?}");
-                return retry;
+            // LiteSVM failure models preflight rejection: no instruction changes landed.
+            if paired {
+                if let Some(single) = single_crank_retry_instructions(&ixs, idx, true, &failure.err.to_string()) {
+                    let retry = self.send_crank(&single);
+                    assert!(retry.is_ok(), "single fallback: {retry:?}");
+                    return retry;
+                }
             }
         }
         result
@@ -501,12 +505,10 @@ fn paired_crank_on_healthy_account_keeps_first_step() -> Result<()> {
         before,
         "failed pair rolls back first refresh"
     );
-    assert!(should_fallback_to_single(
-        true,
-        &failure.err.to_string(),
-        idx
-    ));
-    e.send_crank(&ixs[..idx + 1]).expect("single refresh lands");
+    // LiteSVM failure models preflight rejection: no instruction changes landed.
+    let single = single_crank_retry_instructions(&ixs, idx, true, &failure.err.to_string())
+        .expect("preflight rejection retries the first crank");
+    e.send_crank(&single).expect("single refresh lands");
     assert_ne!(e.data(e.victim), before, "fallback keeps refresh progress");
     let prior = common::decode_portfolio(&before)?;
     let after = common::decode_portfolio(&e.data(e.victim))?;

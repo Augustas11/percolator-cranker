@@ -296,7 +296,7 @@ impl Staging {
         for pf in portfolios {
             let route = CrankRoute::Live { reward_portfolio: None };
             let (mut ixs, i) = submit::build_crank_instructions(
-                &self.program_id, &self.payer.pubkey(), &self.market, pf, &route, &[obs.clone()], now,
+                &self.program_id, &self.payer.pubkey(), &self.market, pf, &route, &[obs.clone()], now, false,
             );
             // Simulate after the cranks already kept: the first one may
             // accrue the asset and leave this one with nothing to do.

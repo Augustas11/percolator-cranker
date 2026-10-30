@@ -144,13 +144,24 @@ pub fn is_non_progress(error_name: Option<&str>) -> bool {
 }
 
 /// Parse `Program <id> consumed N of M compute units` for `program_id`.
-/// Takes the last match: the top-level invocation logs its total last.
+/// Sum top-level invocations; nested consumption is already included in their totals.
 pub fn program_cu_from_logs(program_id: &Pubkey, logs: &[String]) -> Option<u64> {
-    let prefix = format!("Program {program_id} consumed ");
-    logs.iter().rev().find_map(|l| {
-        let rest = l.strip_prefix(&prefix)?;
-        rest.split_whitespace().next()?.parse().ok()
-    })
+    let invoke_prefix = format!("Program {program_id} invoke [");
+    let consumed_prefix = format!("Program {program_id} consumed ");
+    let mut invocations = Vec::new();
+    let mut total = None;
+    for log in logs {
+        if let Some(depth) = log.strip_prefix(&invoke_prefix) {
+            invocations.push(depth == "1]");
+        } else if let Some(rest) = log.strip_prefix(&consumed_prefix) {
+            if invocations.pop() == Some(true) {
+                if let Some(cu) = rest.split_whitespace().next().and_then(|n| n.parse::<u64>().ok()) {
+                    *total.get_or_insert(0) += cu;
+                }
+            }
+        }
+    }
+    total
 }
 
 /// `(program_cu, tx_cu)` from a preflight-simulation failure, when the RPC
@@ -467,14 +478,15 @@ pub fn submit_crank_routed(
                 // executed and failed. Anything else (transport error, status
                 // poll failure, "unable to confirm") is UNCERTAIN: the tx may
                 // have landed. Ask for its status once before assigning blame.
-                let definitive = matches!(
+                let preflight_rejected = matches!(
                     e.kind(),
-                    ClientErrorKind::TransactionError(_)
-                        | ClientErrorKind::RpcError(RpcError::RpcResponseError {
-                            data: RpcResponseErrorData::SendTransactionPreflightFailure(_),
-                            ..
-                        })
+                    ClientErrorKind::RpcError(RpcError::RpcResponseError {
+                        data: RpcResponseErrorData::SendTransactionPreflightFailure(_),
+                        ..
+                    })
                 );
+                let definitive = preflight_rejected
+                    || matches!(e.kind(), ClientErrorKind::TransactionError(_));
                 if !definitive {
                     let signature = tx.signatures[0];
                     match rpc.get_signature_status(&signature) {
@@ -494,21 +506,20 @@ pub fn submit_crank_routed(
                         }
                         Ok(Some(Err(te))) => {
                             let error = format!("{te}");
-                            if paired && should_fallback_to_single(true, &error, crank_ix_index) {
-                                paired = false;
-                                ixs.truncate(crank_ix_index + 1);
-                                continue;
-                            }
                             let error_name = wrapper_error_name_for_ix(&error, crank_ix_index);
                             return Ok(CrankOutcome::HardReject { error, error_name, program_cu, tx_cu });
                         }
                         _ => return Err(Unconfirmed { signature, error: msg }.into()),
                     }
                 }
-                if paired && should_fallback_to_single(definitive, &msg, crank_ix_index) {
-                    paired = false;
-                    ixs.truncate(crank_ix_index + 1);
-                    continue;
+                if paired {
+                    if let Some(single) = single_crank_retry_instructions(
+                        &ixs, crank_ix_index, preflight_rejected, &msg,
+                    ) {
+                        paired = false;
+                        ixs = single;
+                        continue;
+                    }
                 }
                 let error_name = wrapper_error_name_for_ix(&msg, crank_ix_index);
                 return Ok(CrankOutcome::HardReject { error: msg, error_name, program_cu, tx_cu });
@@ -603,13 +614,26 @@ pub fn build_crank_instructions(
     (ixs, crank_index)
 }
 
-/// Retry only a known atomic failure of the second crank, never an uncertain send.
-pub fn should_fallback_to_single(definitive: bool, msg: &str, crank_ix_index: usize) -> bool {
+/// Retry only a preflight rejection of the second crank, before any fee is paid.
+pub fn should_fallback_to_single(preflight_rejected: bool, msg: &str, crank_ix_index: usize) -> bool {
     let Some((_, rest)) = msg.split_once("Error processing Instruction ") else {
         return false;
     };
     let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    definitive && n.parse::<usize>().ok() == Some(crank_ix_index + 1)
+    preflight_rejected && n.parse::<usize>().ok() == Some(crank_ix_index + 1)
+}
+
+/// Preserve the first crank only when the pair was rejected before submission.
+pub fn single_crank_retry_instructions(
+    ixs: &[Instruction],
+    crank_ix_index: usize,
+    preflight_rejected: bool,
+    msg: &str,
+) -> Option<Vec<Instruction>> {
+    if !should_fallback_to_single(preflight_rejected, msg, crank_ix_index) {
+        return None;
+    }
+    ixs.get(..crank_ix_index + 1).map(|single| single.to_vec())
 }
 
 /// Pairing is on unless explicitly disabled, like CRANKER_MEASURE_CU.
@@ -848,15 +872,19 @@ mod tests {
     }
 
     #[test]
-    fn fallback_requires_definitive_second_instruction_attribution() {
+    fn fallback_requires_preflight_rejection_and_second_instruction_attribution() {
+        let ixs = vec![cu_ix(), heap_ix(), cu_ix(), cu_ix()];
         for suffix in [
             "custom program error: 0x16",
             "Computational budget exceeded",
         ] {
-            let msg = format!("Error processing Instruction 3: {suffix}");
+            let msg = format!("RPC response error -32002: Transaction simulation failed: Error processing Instruction 3: {suffix} [3 log messages]");
             assert!(should_fallback_to_single(true, &msg, 2));
             assert!(!should_fallback_to_single(false, &msg, 2));
             assert!(!should_fallback_to_single(true, &msg, 3));
+            assert_eq!(single_crank_retry_instructions(&ixs, 2, true, &msg), Some(ixs[..3].to_vec()));
+            assert_eq!(single_crank_retry_instructions(&ixs, 2, false, &msg), None);
+            assert_eq!(single_crank_retry_instructions(&ixs, 3, true, &msg), None);
         }
         for msg in [
             "custom program error: 0x16",
@@ -889,6 +917,23 @@ mod tests {
         ];
         assert_eq!(program_cu_from_logs(&pid, &logs), Some(17_975));
         assert_eq!(program_cu_from_logs(&Pubkey::new_unique(), &logs), None);
+    }
+
+    #[test]
+    fn program_cu_sums_top_level_invocations_without_nested_double_counting() {
+        let pid = Pubkey::new_unique();
+        let logs = vec![
+            format!("Program {pid} invoke [1]"),
+            format!("Program {pid} invoke [2]"),
+            format!("Program {pid} consumed 100 of 1000 compute units"),
+            format!("Program {pid} success"),
+            format!("Program {pid} consumed 300 of 1000 compute units"),
+            format!("Program {pid} success"),
+            format!("Program {pid} invoke [1]"),
+            format!("Program {pid} consumed 200 of 700 compute units"),
+            format!("Program {pid} success"),
+        ];
+        assert_eq!(program_cu_from_logs(&pid, &logs), Some(500));
     }
 
     #[test]
