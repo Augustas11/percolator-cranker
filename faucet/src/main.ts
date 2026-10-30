@@ -41,8 +41,8 @@ async function main() {
   const dailyCap = integer("FAUCET_DAILY_CAP", 200);
   const amountUsdc = integer("FAUCET_AMOUNT_USDC", 1000, 100000);
   const minLamports = integer("FAUCET_MIN_PAYER_LAMPORTS", 3_000_000_000);
-  const solLamports = integer("FAUCET_SOL_LAMPORTS", 50_000_000);
-  const solDailyCap = integer("FAUCET_SOL_DAILY_CAP", 20);
+  const solLamports = integer("FAUCET_SOL_LAMPORTS", 80_000_000);
+  const solDailyCap = integer("FAUCET_SOL_DAILY_CAP", 12);
   const bind = process.env.FAUCET_BIND ?? "127.0.0.1:8092";
   const match = /^(\[[\da-fA-F:]+\]|[^\s:/]+):(\d+)$/.exec(bind);
   if (!match || Number(match[2]) < 1 || Number(match[2]) > 65535) throw new Error("Invalid FAUCET_BIND (expected host:port)");

@@ -3,7 +3,7 @@ import { tool } from "./tool";
 
 export default tool({
   name: "claim_test_funds",
-  description: "Claim test USDC, plus 0.05 SOL while the faucet has SOL to spare, for your agent wallet (devnet, test tokens).",
+  description: "Claim test USDC, plus 0.08 SOL while the faucet has SOL to spare, for your agent wallet (devnet, test tokens).",
   run: async (drip) => {
     await drip.fetchJson("/faucet/health");
     const wallet = drip.wallet.publicKey;

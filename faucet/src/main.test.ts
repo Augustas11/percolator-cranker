@@ -177,7 +177,7 @@ it("funds a zero-SOL wallet and creates its ATA in the mint transaction", async 
   await start();
   mocks.rpc.getBalance.mockResolvedValueOnce(4_000_000_000).mockResolvedValueOnce(0);
   mocks.rpc.getAccountInfo.mockResolvedValueOnce(null);
-  expect(await claim()).toMatchObject({ status: 200, sol: 0.05 });
+  expect(await claim()).toMatchObject({ status: 200, sol: 0.08 });
   const tx = mocks.rpc.simulateTransaction.mock.calls[0][0];
   const instructions = tx.message.instructions;
   expect(instructions).toHaveLength(3);
@@ -189,7 +189,7 @@ it("funds a zero-SOL wallet and creates its ATA in the mint transaction", async 
     keys: instructions[1].accounts.map((index: number) => ({ pubkey: tx.message.accountKeys[index], isSigner: tx.message.isAccountSigner(index), isWritable: tx.message.isAccountWritable(index) })),
     data: Transaction.populate(tx.message).instructions[1].data,
   });
-  expect(transfer.lamports).toBe(50_000_000n);
+  expect(transfer.lamports).toBe(80_000_000n);
   expect(transfer.fromPubkey.equals(payer.publicKey)).toBe(true);
   expect(transfer.toPubkey.equals(wallet)).toBe(true);
   expect(JSON.parse(mocks.writeFile.mock.calls[0][1])).toMatchObject({ count: 1, sol_count: 1 });
@@ -201,7 +201,7 @@ it.each(["funded wallet", "low payer", "SOL cap"])("mints USDC only with %s", as
   }
   await start();
   mocks.rpc.getBalance.mockResolvedValueOnce(reason === "low payer" ? 2_000_000_000 : 4_000_000_000)
-    .mockResolvedValueOnce(reason === "funded wallet" ? 50_000_000 : 0);
+    .mockResolvedValueOnce(reason === "funded wallet" ? 80_000_000 : 0);
   expect(await claim()).toMatchObject({ status: 200, sol: 0, amount_usdc: 1000 });
   expect(mocks.rpc.simulateTransaction.mock.calls[0][0].message.instructions).toHaveLength(1);
   expect(JSON.parse(mocks.writeFile.mock.calls.at(-1)![1])).toMatchObject({ count: 1, sol_count: reason === "SOL cap" ? 20 : 0 });
@@ -217,11 +217,11 @@ it("requires an existing ATA when no SOL is available", async () => {
 });
 
 it("serves health from startup balance without more RPC calls", async () => {
-  mocks.rpc.getBalance.mockResolvedValueOnce(3_049_999_999);
+  mocks.rpc.getBalance.mockResolvedValueOnce(3_079_999_999);
   await start();
   const res = { setHeader: vi.fn(), end: vi.fn() };
   await mocks.handler({ method: "GET", url: "/health", headers: {} }, res);
-  expect(JSON.parse(res.end.mock.calls[0][0])).toMatchObject({ sol_drips_today: 0, sol_daily_cap: 20, sol_paused: true });
+  expect(JSON.parse(res.end.mock.calls[0][0])).toMatchObject({ sol_drips_today: 0, sol_daily_cap: 12, sol_paused: true });
   expect(mocks.rpc.getBalance).toHaveBeenCalledTimes(1);
 });
 
@@ -230,7 +230,7 @@ it("drips SOL with an existing ATA using the configured amount and floor", async
   vi.stubEnv("FAUCET_MIN_PAYER_LAMPORTS", "1000000000");
   vi.stubEnv("FAUCET_SOL_DAILY_CAP", "2");
   await start();
-  mocks.rpc.getBalance.mockResolvedValueOnce(1_050_000_000).mockResolvedValueOnce(0).mockResolvedValueOnce(1_024_999_999);
+  mocks.rpc.getBalance.mockResolvedValueOnce(1_080_000_000).mockResolvedValueOnce(0).mockResolvedValueOnce(1_024_999_999);
   expect(await claim()).toMatchObject({ status: 200, sol: 0.025 });
   const tx = mocks.rpc.simulateTransaction.mock.calls[0][0];
   const instructions = Transaction.populate(tx.message).instructions;
@@ -245,7 +245,7 @@ it("drips SOL with an existing ATA using the configured amount and floor", async
 
 it("refreshes payer health after a confirmed USDC-only transaction", async () => {
   await start();
-  mocks.rpc.getBalance.mockResolvedValueOnce(4_000_000_000).mockResolvedValueOnce(50_000_000).mockResolvedValueOnce(3_049_999_999);
+  mocks.rpc.getBalance.mockResolvedValueOnce(4_000_000_000).mockResolvedValueOnce(80_000_000).mockResolvedValueOnce(3_079_999_999);
   expect(await claim()).toMatchObject({ status: 200, sol: 0 });
   const res = { setHeader: vi.fn(), end: vi.fn() };
   await mocks.handler({ method: "GET", url: "/health", headers: {} }, res);
@@ -253,10 +253,10 @@ it("refreshes payer health after a confirmed USDC-only transaction", async () =>
   expect(mocks.rpc.getBalance).toHaveBeenLastCalledWith(payer.publicKey);
 });
 
-it.each([0, 50_000_000])("returns the confirmed claim when the payer balance re-read fails with wallet balance %s", async walletBalance => {
+it.each([0, 80_000_000])("returns the confirmed claim when the payer balance re-read fails with wallet balance %s", async walletBalance => {
   await start();
-  mocks.rpc.getBalance.mockResolvedValueOnce(3_050_000_000).mockResolvedValueOnce(walletBalance).mockRejectedValueOnce(new Error("network"));
-  expect(await claim()).toMatchObject({ status: 200, signature: "signature", sol: walletBalance === 0 ? 0.05 : 0 });
+  mocks.rpc.getBalance.mockResolvedValueOnce(3_080_000_000).mockResolvedValueOnce(walletBalance).mockRejectedValueOnce(new Error("network"));
+  expect(await claim()).toMatchObject({ status: 200, signature: "signature", sol: walletBalance === 0 ? 0.08 : 0 });
   const res = { setHeader: vi.fn(), end: vi.fn() };
   await mocks.handler({ method: "GET", url: "/health", headers: {} }, res);
   expect(JSON.parse(res.end.mock.calls[0][0])).toMatchObject({ sol_paused: walletBalance === 0 });

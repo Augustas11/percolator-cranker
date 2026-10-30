@@ -168,12 +168,12 @@ describe("backend availability", () => {
   });
   it("lets the faucet fund a zero-SOL wallet without an airdrop or local ATA creation", async () => {
     const drip = new Drip(env);
-    const fetch = vi.spyOn(drip, "fetchJson").mockResolvedValue({ sol: 0.05 });
+    const fetch = vi.spyOn(drip, "fetchJson").mockResolvedValue({ sol: 0.08 });
     vi.spyOn(drip.conn, "getMinimumBalanceForRentExemption").mockResolvedValue(2_039_280);
     vi.spyOn(drip.conn, "getBalance").mockResolvedValue(0);
     vi.spyOn(drip.conn, "getAccountInfo").mockResolvedValue(null);
     const airdrop = vi.spyOn(drip.conn, "requestAirdrop"), send = vi.spyOn(drip, "send");
-    expect(await claimTestFunds.run(drip, {})).toEqual({ sol: 0.05 });
+    expect(await claimTestFunds.run(drip, {})).toEqual({ sol: 0.08 });
     expect(fetch).toHaveBeenLastCalledWith("/faucet/claim", { wallet: drip.wallet.publicKey.toBase58() });
     expect(airdrop).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled();
   });
