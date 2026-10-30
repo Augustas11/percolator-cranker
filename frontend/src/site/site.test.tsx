@@ -33,7 +33,7 @@ async function render(path: string, indexer: IndexerClient | null = new MockInde
 }
 
 test.each([
-  [site.paths.home, "drip", "How it works", "drip"],
+  [site.paths.home, "The House ofPercolatorPerps.", "From agent to leaderboard.", "drip"],
   [site.paths.tools, "Tools", "Keeper CLI", "Tools · drip"],
   [site.paths.arena, "Arena", "Rules", "Arena · drip"],
   [site.paths.build, "Build", "Add an MCP tool", "Build · drip"],
@@ -44,60 +44,42 @@ test.each([
   expect(container.textContent).toContain(text);
   expect(document.title).toBe(title);
   expect(container.querySelector("nav")).not.toBeNull();
-  expect(container.querySelector("footer")?.textContent).toContain("Devnet only. Test tokens have no value. Software provided as-is.");
+  expect(container.querySelector("footer")?.textContent).toContain("Devnet only. Test tokens, no real value.");
 });
 
-test("home renders mock metrics and optional fills honestly", async () => {
+test("home shows its live mark, illustrative chart and honest unpublished tools", async () => {
   const container = await render(site.paths.home);
-  expect(Array.from(container.querySelectorAll(".metric-grid dd")).map(dd => dd.textContent)).toEqual(["200", "—", "2.5 SOL", "99.5%"]);
-  expect(container.textContent).toContain("Devnet, test tokens. (mock data)");
-  expect(container.textContent).toContain(`As of ${new Date(1793232000 * 1000).toLocaleString()}`);
-});
-
-test("home handles an unconfigured indexer", async () => {
-  const container = await render(site.paths.home, null);
+  expect(container.textContent).toContain("$150.00");
+  expect(container.textContent).toContain("From agent to leaderboard.");
+  expect(container.textContent).toContain("Illustrative chart");
+  expect(container.textContent).toContain("Prizes TBD.");
   expect(container.textContent).toContain("Indexer not configured");
+  expect(container.textContent).not.toMatch(/\[TBD\]|\[NPM-PACKAGE\]|npx/);
+  expect(container.querySelector(".terminal button")).toBeNull();
 });
 
-test("home handles omitted metrics", async () => {
-  const indexer = new MockIndexerClient();
-  vi.spyOn(indexer, "stats").mockResolvedValue({} as Awaited<ReturnType<IndexerClient["stats"]>>);
-  const container = await render(site.paths.home, indexer);
-  expect(Array.from(container.querySelectorAll(".metric-grid dd")).map(dd => dd.textContent)).toEqual(["—", "—", "—", "—"]);
+test("footer community destinations stay plain text until configured", async () => {
+  const container = await render(site.paths.home);
+  const footer = container.querySelector("footer")!;
+  for (const label of ["X", "Telegram", "Status"]) {
+    expect(Array.from(footer.querySelectorAll("span")).some(el => el.textContent === label)).toBe(true);
+    expect(Array.from(footer.querySelectorAll("a")).some(el => el.textContent === label)).toBe(false);
+  }
 });
 
-test("home handles an unavailable indexer", async () => {
-  const indexer = new MockIndexerClient();
-  vi.spyOn(indexer, "stats").mockRejectedValue(new Error("offline"));
-  const container = await render(site.paths.home, indexer);
-  expect(container.textContent).toContain("Market data unavailable");
-});
-
-test("home keeps the last good metrics when a refresh fails", async () => {
-  vi.useFakeTimers();
-  const indexer = new MockIndexerClient();
-  const stats = await indexer.stats();
-  vi.spyOn(indexer, "stats").mockResolvedValueOnce(stats).mockRejectedValue(new Error("offline"));
-  const container = await render(site.paths.home, indexer);
-  await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
-  expect(container.textContent).toContain("Market data unavailable");
-  expect(Array.from(container.querySelectorAll(".metric-grid dd")).map(dd => dd.textContent)).toEqual(["200", "—", "2.5 SOL", "99.5%"]);
-});
-
-test("home refreshes every 30 seconds and stops on unmount", async () => {
-  vi.useFakeTimers();
-  const indexer = new MockIndexerClient();
-  const stats = await indexer.stats();
-  const fetch = vi.spyOn(indexer, "stats").mockResolvedValue({ ...stats, fills: 12, as_of: null, uptime: { uptime_pct: null } });
-  const container = await render(site.paths.home, indexer);
-  expect(container.textContent).toContain("No data yet");
-  expect(Array.from(container.querySelectorAll(".metric-grid dd")).map(dd => dd.textContent)).toEqual(["200", "12", "2.5 SOL", "—"]);
-  await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
-  expect(fetch).toHaveBeenCalledTimes(2);
-  await cleanup!();
-  cleanup = undefined;
-  await vi.advanceTimersByTimeAsync(30000);
-  expect(fetch).toHaveBeenCalledTimes(2);
+test("published home terminal copies the package command", async () => {
+  const final = site.mcp.final;
+  site.mcp.final = true;
+  try {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", Object.create(navigator, { clipboard: { value: { writeText } } }));
+    const container = await render(site.paths.home);
+    expect(container.querySelector(".terminal")?.textContent).toContain("npx drip-mcp");
+    const button = container.querySelector<HTMLButtonElement>(".terminal button")!;
+    await act(async () => { button.click(); });
+    expect(writeText).toHaveBeenCalledWith("claude mcp add drip -- npx drip-mcp");
+    expect(button.textContent).toBe("Copied");
+  } finally { site.mcp.final = final; }
 });
 
 test("nav links update history and render without reloading", async () => {
@@ -115,12 +97,6 @@ test("nav links update history and render without reloading", async () => {
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
   expect(container.querySelector("h1")?.textContent).toBe("Build");
-});
-
-test("arena shows the placeholder when no leaderboard file exists", async () => {
-  if (Object.keys(import.meta.glob("../arena/Leaderboard.tsx")).length) return;
-  const container = await render(site.paths.arena);
-  expect(container.textContent).toContain("Leaderboard coming soon.");
 });
 
 test("trailing slash renders Tools and its nav link only scrolls to top", async () => {

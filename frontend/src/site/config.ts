@@ -7,6 +7,13 @@ export const site = {
   heroLine: null as string | null, // TODO-OWNER: hero line slot. null = not rendered.
   paths: { home: "/", tools: "/tools", arena: "/arena", build: "/build", trade: "/trade" },
   repo,
+  docs: `${repo}/blob/main/docs/RUNBOOK.md`,
+  x: null as string | null, // TODO-OWNER: X profile URL
+  telegram: null as string | null, // TODO-OWNER: Telegram URL
+  status: null as string | null, // TODO-OWNER: status page URL
+  feeBps: 12,
+  maxFill: "$100k",
+  markLag: { value: "0.7 s", note: "p50, devnet, measured" }, // static until measured live
   issues: `${repo}/issues`,
   runbook: `${repo}/blob/main/docs/RUNBOOK.md`,
   officialSite: "https://drip-devnet.vercel.app",
@@ -14,6 +21,7 @@ export const site = {
   programId: devnetConfig.programId.toBase58(),
   market,
   mcp: {
+    package: "drip-mcp",
     final: false, // TODO-MCP: flip when the MCP package ships
     install: "claude mcp add drip -- npx -y drip-mcp", // TODO-MCP
     json: `{\n  "mcpServers": {\n    "drip": { "command": "npx", "args": ["-y", "drip-mcp"] }\n  }\n}`, // TODO-MCP

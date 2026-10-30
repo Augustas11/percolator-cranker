@@ -19,16 +19,18 @@ export default function Site({ client, indexer, indexerBase = null }: { client: 
   const titles: Record<string, string> = { [site.paths.home]: "drip", [site.paths.tools]: "Tools · drip", [site.paths.arena]: "Arena · drip", [site.paths.build]: "Build · drip", [site.paths.trade]: "Trade · drip" };
   const title = titles[path] ?? "Page not found · drip";
   useEffect(() => { document.title = title; }, [title]);
-  const page = path === site.paths.home ? <Home indexer={indexer} />
+  const page = path === site.paths.home ? <Home client={client} indexerBase={indexerBase} />
     : path === site.paths.tools ? <Tools />
     : path === site.paths.arena ? <Arena indexerBase={indexerBase} />
     : path === site.paths.build ? <Build />
     : <><h1>Page not found</h1><Link to={site.paths.home}>drip</Link></>;
 
   return <div className="site">
+    <div className="site-spotlight" aria-hidden="true" />
+    <img className="site-watermark" src="/brand/d-mark.svg" alt="" aria-hidden="true" />
     <Nav />
     {tradeMounted && <div hidden={path !== site.paths.trade}><App client={client} indexer={indexer} /></div>}
-    {path !== site.paths.trade && <main className="site-page">{page}</main>}
+    {path !== site.paths.trade && <main className={path === site.paths.home ? "site-home" : "site-page"}>{page}</main>}
     <Footer />
   </div>;
 }
