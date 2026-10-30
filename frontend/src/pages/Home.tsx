@@ -77,7 +77,7 @@ export default function Home({ client, indexer, indexerBase }: { client: MarketC
   const since = season?.since == null ? "—" : new Date(season.since * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   return <>
     <section className="home-hero home-container" aria-labelledby="hero-title">
-      <svg className="growth-line" aria-hidden="true" viewBox="0 0 1280 420" preserveAspectRatio="none"><path d="M0 360 C 160 350, 230 300, 330 318 S 480 370, 560 320 S 700 210, 780 236 S 900 300, 960 220 S 1080 90, 1180 70 L 1280 40" fill="none" stroke="var(--site-accent)" strokeOpacity="0.55" strokeWidth="2.5" /><circle cx="1180" cy="70" r="16" fill="var(--site-glow)" fillOpacity="0.18" /><circle cx="1180" cy="70" r="7" fill="var(--site-glow)" /></svg>
+      <svg className="growth-line" aria-hidden="true" viewBox="0 0 1280 420" preserveAspectRatio="none"><path d="M0 360 C 160 350, 230 300, 330 318 S 480 370, 560 320 S 700 210, 780 236 S 900 300, 960 220 S 1080 90, 1180 70 L 1280 40" fill="none" stroke="var(--site-accent)" strokeOpacity="0.35" strokeWidth="2.5" /><circle cx="1180" cy="70" r="16" fill="var(--site-glow)" fillOpacity="0.18" /><circle cx="1180" cy="70" r="7" fill="var(--site-glow)" /></svg>
       <div className="hero-layout">
         <div className="hero-copy">
           <h1 id="hero-title"><span>The House of</span><span className="accent">Percolator</span><span>Perps.</span></h1>
@@ -87,7 +87,7 @@ export default function Home({ client, indexer, indexerBase }: { client: MarketC
         <div id="markets" className="market-card">
           <div className="market-header"><div><div className="market-name">SOL-PERP</div><div className="market-subtitle">Percolator v16 · devnet</div></div></div>
           <div className="market-price-label">Mark price</div><div className="market-price">{price}</div>
-          <div className="recent-trades"><h3>Recent trades</h3><div className="trades-scroll">{fills.length ? <ul>{fills.map(fill => {
+          <div className="recent-trades"><h3>Recent trades</h3><div className="trades-scroll">{fills.length ? <ul>{fills.slice(0, 5).map(fill => {
             const wallet = fill.wallet ?? fill.taker_portfolio;
             return <li key={`${fill.signature}:${fill.ix_index}:${fill.leg}`}><a href={`https://explorer.solana.com/tx/${encodeURIComponent(fill.signature)}?cluster=devnet`} target="_blank" rel="noreferrer">
               <span className={fill.side === "buy" ? "trade-long" : "trade-short"}>{fill.side === "buy" ? "Long" : "Short"}</span>

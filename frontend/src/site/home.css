@@ -3,26 +3,26 @@
 .site .home-container { max-width: 1280px; margin: 0 auto; padding: 0 var(--site-gutter); }
 .site .home-section { padding: 110px var(--site-gutter); }
 .site .home-hero { position: relative; padding: 88px var(--site-gutter) 64px; }
-.site .growth-line { position: absolute; left: 0; right: 0; top: 150px; width: 100%; height: 420px; pointer-events: none; }
-.site .hero-layout { position: relative; display: flex; flex-wrap: wrap; gap: 56px; align-items: center; }
+.site .growth-line { position: absolute; left: 0; right: 0; top: auto; bottom: -40px; width: 100%; height: 300px; z-index: 0; opacity: 0.6; pointer-events: none; }
+.site .hero-layout { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 56px; align-items: flex-start; }
 .site .hero-copy { flex: 999 1 560px; }
 .site .hero-copy h1 { margin: 0; font-weight: 700; font-size: clamp(44px,6.4vw,88px); line-height: 1.02; letter-spacing: -2px; text-transform: uppercase; }
 .site .hero-copy h1 > span { display: block; white-space: nowrap; }
 .site .accent { color: var(--site-accent); }
-.site .hero-description { margin: 28px 0 0; max-width: 560px; font-size: 20px; line-height: 1.5; color: var(--site-secondary); }
-.site .hero-actions { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 36px; }
+.site .hero-description { margin: 36px 0 0; max-width: 620px; font-size: 22px; line-height: 1.45; color: var(--site-secondary); }
+.site .hero-actions { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 44px; }
 .site .hero-actions .button-link, .site .cta-actions .button-link { min-height: 56px; padding: 0 30px; border-radius: 14px; font-size: 17px; }
 .site .hero-primary { box-shadow: 0 10px 40px var(--site-accent-25); }
-.site .market-card { flex: 1 1 400px; max-width: 480px; background: linear-gradient(180deg,var(--site-card-top),var(--site-card-bottom)); border: 1px solid var(--site-line-8); border-radius: 24px; padding: 24px; box-shadow: 0 30px 80px var(--site-shadow); }
+.site .market-card { flex: 1 1 400px; max-width: 480px; background: linear-gradient(180deg,var(--site-card-top),var(--site-card-bottom)); border: 1px solid var(--site-line-8); border-radius: 24px; padding: 20px; box-shadow: 0 30px 80px var(--site-shadow); }
 .site .market-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .site .market-name { font: 600 18px var(--site-display); }
 .site .market-subtitle { font-size: 13px; color: var(--site-muted); }
-.site .market-stats { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; margin-top: 18px; }
-.site .market-stats > div { padding: 12px; background: var(--site-white-3); border: 1px solid var(--site-line-6); border-radius: 12px; }
+.site .market-stats { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; margin-top: 12px; }
+.site .market-stats > div { padding: 8px 12px; background: var(--site-white-3); border: 1px solid var(--site-line-6); border-radius: 12px; }
 .site .market-stats > div > div { font-size: 12px; color: var(--site-muted); }
-.site .market-stats strong { display: block; margin-top: 4px; font: 700 16px var(--site-mono); }
-.site .market-actions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin-top: 16px; }
-.site .market-actions .button-link { min-height: 48px; font-size: 16px; }
+.site .market-stats strong { display: block; margin-top: 2px; font: 700 16px var(--site-mono); }
+.site .market-actions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin-top: 10px; }
+.site .market-actions .button-link { min-height: 44px; font-size: 16px; }
 .site .market-actions .short { background: var(--site-coral-14); border: 1px solid var(--site-coral-45); color: var(--site-down); }
 .site .home-facts { padding: 0 var(--site-gutter) 96px; }
 .site .facts-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 1px; background: var(--site-line-7); border: 1px solid var(--site-line-7); border-radius: 20px; overflow: hidden; }
@@ -84,6 +84,9 @@
 .site .cta-actions .docs-button { border: 1px solid var(--site-text-line); color: var(--site-text); background: none; }
 @media (max-width: 640px) {
   .site .home-hero { padding-top: 48px; }
+  .site .growth-line { display: none; }
+  .site .hero-description { font-size: 18px; }
+  .site .hero-actions { margin-top: 28px; }
   .site .market-card { max-width: none; width: 100%; }
   .site .facts-grid { grid-template-columns: 1fr; }
   .site .cta-card { padding: 40px 24px; }
@@ -93,14 +96,14 @@
   .site .tool-chips > div { padding: 14px 10px; font-size: 11px; }
 }
 
-.site .market-price-label { margin-top: 22px; font-size: 12px; color: var(--site-muted); }
-.site .market-price { margin-top: 4px; font: 700 40px var(--site-mono); letter-spacing: -1px; }
-.site .recent-trades { margin-top: 18px; }
-.site .recent-trades h3 { margin: 0 0 8px; font-size: 12px; font-weight: 400; color: var(--site-muted); }
-.site .trades-scroll { height: 192px; overflow-y: auto; }
+.site .market-price-label { margin-top: 12px; font-size: 12px; color: var(--site-muted); }
+.site .market-price { margin-top: 4px; font: 700 32px var(--site-mono); letter-spacing: -1px; }
+.site .recent-trades { margin-top: 12px; }
+.site .recent-trades h3 { margin: 0 0 4px; font-size: 12px; font-weight: 400; color: var(--site-muted); }
+.site .trades-scroll { height: 120px; overflow: hidden; }
 .site .trades-scroll ul { list-style: none; padding: 0; margin: 0; }
 .site .trades-scroll li { margin: 0; }
-.site .trades-scroll a { display: grid; grid-template-columns: 0.7fr 1fr 1fr 0.9fr 1.2fr; gap: 6px; align-items: center; height: 32px; font: 11px var(--site-mono); color: var(--site-text); white-space: nowrap; }
+.site .trades-scroll a { display: grid; grid-template-columns: 0.7fr 1fr 1fr 0.9fr 1.2fr; gap: 6px; align-items: center; height: 24px; font: 11px var(--site-mono); color: var(--site-text); white-space: nowrap; }
 .site .trades-scroll .trade-long { color: var(--site-accent); }
 .site .trades-scroll .trade-short { color: var(--site-down); }
 .site .trades-scroll p { margin: 0; color: var(--site-muted); font-size: 14px; }
