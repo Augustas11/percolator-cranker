@@ -255,7 +255,11 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                             }
                             return Ok(Some(format!("ok({lag}ms)")));
                         }
-                        if sent.elapsed() > Duration::from_secs(30) { bail!("PushAuthMark {sig} not processed in 30 s"); }
+                        if sent.elapsed() > Duration::from_millis(cfg.push_confirm_timeout_ms) {
+                            // Dropped; the next round re-reads the sequence, so at most one lands.
+                            *blockhash.lock().unwrap() = None;
+                            bail!("PushAuthMark {sig} not processed in {} ms", cfg.push_confirm_timeout_ms);
+                        }
                         std::thread::sleep(Duration::from_millis(cfg.confirm_poll_ms.max(1)));
                     }
                 })();
