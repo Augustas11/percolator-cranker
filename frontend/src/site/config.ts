@@ -26,6 +26,10 @@ export const site = {
     install: "claude mcp add drip -- npx -y @driptech/mcp",
     json: `{\n  "mcpServers": {\n    "drip": { "command": "npx", "args": ["-y", "@driptech/mcp"] }\n  }\n}`,
   },
+  agents: {
+    run: "cd agents && npm ci && npm run build && npm start -- trend",
+    source: null as string | null, // set when agents/ is in the public repo
+  },
   faucet: null as string | null, // web faucet page not built; agents use the MCP tool claim_test_funds
   cli: "CRANKER_CYCLES=3 cargo run --release -p drip --bin drip",
   sdk: {

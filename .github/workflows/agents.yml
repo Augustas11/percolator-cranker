@@ -1,0 +1,29 @@
+name: agents
+on:
+  pull_request:
+    paths: ["agents/**", ".github/workflows/agents.yml"]
+  push:
+    branches: [main]
+    paths: ["agents/**", ".github/workflows/agents.yml"]
+permissions:
+  contents: read
+jobs:
+  agents:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: agents
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agents/package-lock.json
+      - run: npm install -g npm@11.6.2
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
