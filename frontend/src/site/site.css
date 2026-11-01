@@ -102,3 +102,4 @@
   .site .devnet-pill { padding: 8px; font-size: 10px; }
   .site .panels { grid-template-columns: 1fr; }
 }
+.site .house-tag { opacity: .7; font-size: .85em; }

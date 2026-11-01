@@ -30,6 +30,14 @@ test("renders ranked rows and marks the connected wallet", async () => {
   act(() => root.unmount());
 });
 
+test("tags house agents", async () => {
+  const { container, root } = await render({ as_of_slot: 1, note: "n", entries: [
+    { rank: 1, wallet: "J4DM567mVzWy5YvCsrPYihduwhZhVa8o5aZxDgXU22S4", pnl: "0", equity: "0", net_deposits: "0", trades: 2, open_positions: 0, portfolios: ["p"] },
+  ] });
+  expect(container.querySelector("tbody td:nth-child(2)")!.textContent).toBe("J4DM…22S4 house: trend");
+  act(() => root.unmount());
+});
+
 test("shows the empty state, errors and a missing indexer", async () => {
   let { container, root } = await render({ as_of_slot: 1, note: "n", entries: [] });
   expect(container.textContent).toContain("No traders yet");

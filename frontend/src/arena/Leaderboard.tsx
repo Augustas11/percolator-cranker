@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { devnetConfig } from "../chain/config";
 import { HttpIndexerClient } from "../indexer/client";
 import type { Leaderboard as Board } from "../indexer/client";
+import { houseName } from "./house";
 
 const usdFormatter = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const usd = (atoms: string) => {
@@ -37,7 +38,7 @@ export default function Leaderboard({ indexerUrl, owner = null }: { indexerUrl: 
         <thead><tr><th scope="col">Rank</th><th scope="col">Wallet</th><th scope="col">PnL (USD)</th><th scope="col">Trades</th><th scope="col">Open positions</th></tr></thead>
         <tbody>{board?.entries.map(entry => <tr key={entry.wallet}>
           <td>{entry.rank}</td>
-          <td><a href={`https://explorer.solana.com/address/${encodeURIComponent(entry.wallet)}?cluster=devnet`} target="_blank" rel="noreferrer">{entry.wallet.slice(0, 4)}…{entry.wallet.slice(-4)}</a>{entry.wallet === owner && <strong> (you)</strong>}</td>
+          <td><a href={`https://explorer.solana.com/address/${encodeURIComponent(entry.wallet)}?cluster=devnet`} target="_blank" rel="noreferrer">{entry.wallet.slice(0, 4)}…{entry.wallet.slice(-4)}</a>{houseName(entry.wallet) && <span className="house-tag" title="drip starter agent, not prize-eligible"> house: {houseName(entry.wallet)}</span>}{entry.wallet === owner && <strong> (you)</strong>}</td>
           <td>{usd(entry.pnl)}</td><td>{entry.trades}</td><td>{entry.open_positions}</td>
         </tr>)}</tbody>
       </table></div>

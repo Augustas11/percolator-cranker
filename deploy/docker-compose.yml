@@ -85,6 +85,26 @@ services:
     pids_limit: 64
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 
+  # House starter agents (agents/): trade the devnet market through the MCP on
+  # the public RPC. One wallet per agent; AGENTS_KEYS_DIR holds
+  # trend.json, meanrev.json, breakout.json (0600, owned by LAUNCH_UID).
+  agents:
+    build: { context: ../agents }
+    image: drip-agents:local
+    restart: unless-stopped
+    user: "${LAUNCH_UID:?set LAUNCH_UID}:${LAUNCH_GID:?set LAUNCH_GID}"
+    command: ["trend,meanrev,breakout"]
+    environment:
+      DRIP_KEYPAIR_TREND: /keys/trend.json
+      DRIP_KEYPAIR_MEANREV: /keys/meanrev.json
+      DRIP_KEYPAIR_BREAKOUT: /keys/breakout.json
+    volumes: ["${AGENTS_KEYS_DIR:-/opt/drip/agents/keys}:/keys:ro"]
+    profiles: [agents]
+    cpus: 0.25
+    mem_limit: 384m
+    pids_limit: 128
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
   indexer-proxy:
     image: nginx:1.27-alpine
     restart: unless-stopped
