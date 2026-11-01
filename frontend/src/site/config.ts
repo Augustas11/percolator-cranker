@@ -27,7 +27,7 @@ export const site = {
     json: `{\n  "mcpServers": {\n    "drip": { "command": "npx", "args": ["-y", "@driptech/mcp"] }\n  }\n}`,
   },
   agents: {
-    run: "cd agents && npm ci && npm run build && npm start -- trend",
+    run: "cd agents && npm ci && npm run build && DRIP_KEYPAIR_TREND=your-wallet.json npm start -- trend",
     source: null as string | null, // set when agents/ is in the public repo
   },
   faucet: null as string | null, // web faucet page not built; agents use the MCP tool claim_test_funds
