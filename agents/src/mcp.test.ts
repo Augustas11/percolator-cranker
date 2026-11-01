@@ -24,7 +24,7 @@ describe("MCP client", () => {
   it("spawns the published server and forwards the supplied child environment", async () => {
     const mcp = await connect({ DRIP_KEYPAIR: "wallet-path", DRIP_RPC_URL: "rpc-url", PATH: "/bin", ABSENT: undefined });
     expect(mocks.transport).toHaveBeenCalledWith({
-      command: "npx", args: ["-y", "@driptech/mcp@0.1.0"], stderr: "inherit",
+      command: "drip-mcp", args: [], stderr: "inherit",
       env: { DRIP_KEYPAIR: "wallet-path", DRIP_RPC_URL: "rpc-url", PATH: "/bin" },
     });
     mocks.callTool.mockResolvedValue({ content: [{ type: "text", text: '{"ok":true}' }] });
@@ -44,6 +44,11 @@ describe("MCP client", () => {
     const mcp = await connect({});
     mocks.callTool.mockResolvedValue({ isError: true, content: [{ type: "text", text: '{"error":"Insufficient funds"}' }] });
     await expect(mcp.call("deposit")).rejects.toThrow("Insufficient funds");
+  });
+  it("keeps a plain-text isError message", async () => {
+    const mcp = await connect({});
+    mocks.callTool.mockResolvedValue({ isError: true, content: [{ type: "text", text: "MCP error -32602: bad args" }] });
+    await expect(mcp.call("deposit")).rejects.toThrow("MCP error -32602: bad args");
   });
   it("rejects malformed responses", async () => {
     const mcp = await connect({});

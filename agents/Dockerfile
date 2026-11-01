@@ -8,9 +8,8 @@ RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine
 ENV NODE_ENV=production
-# Pinned MCP baked in, so containers don't download it at start.
-RUN npm install -g @driptech/mcp@0.1.0 && npm cache clean --force
-ENV DRIP_MCP_CMD=drip-mcp
+# The MCP comes from package-lock.json via npm ci, like every other dependency.
+ENV DRIP_MCP_CMD=/app/node_modules/.bin/drip-mcp
 WORKDIR /app
 COPY --from=build --chown=node:node /app/package*.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules

@@ -7,7 +7,7 @@ export interface Mcp {
 }
 
 export async function connect(env: NodeJS.ProcessEnv = process.env): Promise<Mcp> {
-  const [command, ...args] = (env.DRIP_MCP_CMD ?? "npx -y @driptech/mcp@0.1.0").trim().split(/\s+/);
+  const [command, ...args] = (env.DRIP_MCP_CMD ?? "drip-mcp").trim().split(/\s+/);
   if (!command) throw new Error("DRIP_MCP_CMD must not be empty");
   const transport = new StdioClientTransport({
     command, args,
@@ -28,9 +28,13 @@ export async function connect(env: NodeJS.ProcessEnv = process.env): Promise<Mcp
       if (!Array.isArray(content) || content.length !== 1 || content[0].type !== "text") {
         throw new Error("Expected one JSON text item from MCP");
       }
-      const json = JSON.parse(content[0].text as string);
-      if (result.isError) throw new Error(json.error);
-      return json;
+      const text = content[0].text as string;
+      if (result.isError) {
+        let message = text;
+        try { message = JSON.parse(text).error ?? text; } catch { /* plain-text SDK error */ }
+        throw new Error(message);
+      }
+      return JSON.parse(text);
     },
     close: () => client.close(),
   };

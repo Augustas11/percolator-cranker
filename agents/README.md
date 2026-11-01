@@ -12,17 +12,21 @@ server over stdio; there is no chain SDK here. House agents are not prize-eligib
 
 Requires Node >=20 and npm. From `agents/`:
 
+Give each agent its own wallet. Don't reuse `~/.config/drip/devnet-agent.json`:
+that is the wallet the drip MCP uses in Claude, and the agent would close
+positions you opened there.
+
 ```sh
-npm ci && npm run build && npm start -- trend
+solana-keygen new --no-bip39-passphrase -o ~/.config/drip/agent-trend.json
+npm ci && npm run build
+DRIP_KEYPAIR_TREND=~/.config/drip/agent-trend.json npm start -- trend
 ```
 
-The MCP uses `~/.config/drip/devnet-agent.json` (created if missing), or the
-JSON keypair file at `DRIP_KEYPAIR`. With no portfolio, the agent claims test
-funds if needed and deposits 500 test USDC. Existing portfolios are left funded
-as they are. Samples start empty on each run.
+If the portfolio is missing or holds no capital, the agent claims test funds
+if needed and deposits 500 test USDC. Samples start empty on each run.
 
-Each strategy runs with its own MCP child. Multiple strategies require explicit,
-separate wallet files; the shared `DRIP_KEYPAIR` fallback is refused:
+Each strategy runs with its own MCP child and needs its own wallet; two agents
+given the same wallet are refused:
 
 ```sh
 DRIP_KEYPAIR_TREND=/path/trend.json DRIP_KEYPAIR_MEANREV=/path/meanrev.json \
@@ -31,10 +35,10 @@ DRIP_KEYPAIR_TREND=/path/trend.json DRIP_KEYPAIR_MEANREV=/path/meanrev.json \
 
 | Environment | Default | Meaning |
 | --- | --- | --- |
-| `DRIP_KEYPAIR` | MCP default above | Single-agent wallet file |
-| `DRIP_KEYPAIR_<NAME>` | unset | Per-agent wallet override, e.g. `DRIP_KEYPAIR_TREND` |
+| `DRIP_KEYPAIR_<NAME>` | unset | Agent wallet file, e.g. `DRIP_KEYPAIR_TREND` (required) |
+| `DRIP_KEYPAIR` | unset | Wallet file when running a single agent |
 | `DRIP_RPC_URL` | MCP devnet default | RPC endpoint, passed through to MCP |
-| `DRIP_MCP_CMD` | `npx -y @driptech/mcp@0.1.0` | MCP command, split on whitespace (no shell quoting) |
+| `DRIP_MCP_CMD` | `drip-mcp` (pinned in package-lock, on PATH under `npm start`) | MCP command, split on whitespace (no shell quoting) |
 | `DEPOSIT_USDC` | `500` | Initial test USDC deposit when no portfolio exists |
 | `INTERVAL_S` | `60` | Delay between samples, in seconds |
 | `SIZE_SOL` | `0.5` | Size of each new position |
@@ -56,13 +60,15 @@ are `-1` (short), `0` (flat), and `1` (long). History holds at most 200 samples.
 
 ## Docker
 
-Build from this directory, then mount a wallet at runtime:
+Build from this directory, then mount one wallet file read-only:
 
 ```sh
 docker build -t drip-agents .
-docker run --rm --init -v "$HOME/.config/drip:/home/node/.config/drip" drip-agents trend
+docker run --rm --init --user "$(id -u):$(id -g)" \
+  -v ~/.config/drip/agent-trend.json:/keys/trend.json:ro \
+  -e DRIP_KEYPAIR_TREND=/keys/trend.json drip-agents trend
 ```
 
-The container runs as `node`; mounted wallet files must be readable by that user.
-The MCP is fetched by `npx` at runtime and can be overridden with `DRIP_MCP_CMD`.
-Supply configuration at runtime; no wallet or secrets are copied into the image.
+`--user` lets the container read a 0600 wallet file you own. The MCP is
+installed in the image from package-lock.json. No wallet or secrets are copied
+into the image.

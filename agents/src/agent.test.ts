@@ -4,7 +4,7 @@ import type { Strategy } from "./strategies/types";
 
 const position: Position = {
   wallet: "test-wallet", sol_balance: 1, wallet_usdc: 1000,
-  portfolio: "test-portfolio", equity: 500, mark_price: 100, position: null,
+  portfolio: "test-portfolio", capital: 500, equity: 500, mark_price: 100, position: null,
 };
 
 async function run(options: {
@@ -34,7 +34,7 @@ async function run(options: {
     async call(name, args) {
       calls.push({ name, args });
       if (options.error?.(name, calls.filter(call => call.name === name).length)) throw new Error("test failure");
-      if (name === "deposit") state.portfolio = "created";
+      if (name === "deposit") { state.portfolio = "created"; state.capital = 500; }
       if (name === "close_position") state.position = null;
       if (name === "open_position") state.position = { side: args!.side as "long" | "short", size_sol: args!.size_sol as number };
       return { ...state };
@@ -53,6 +53,14 @@ describe("agent loop", () => {
     expect(result.calls.filter(call => call.name === "deposit")).toHaveLength(1);
     expect(result.events.filter(event => event.event === "bootstrap")).toHaveLength(1);
     expect(result.close).toHaveBeenCalledOnce();
+  });
+  it("funds an existing portfolio that has no capital", async () => {
+    const result = await run({ position: { capital: 0 } });
+    expect(result.calls.map(call => call.name)).toEqual(["get_position", "deposit", "get_position"]);
+  });
+  it("leaves a funded portfolio alone", async () => {
+    const result = await run();
+    expect(result.calls.map(call => call.name)).toEqual(["get_position", "get_position"]);
   });
   it("does not claim when the wallet already has enough USDC", async () => {
     const result = await run({ position: { portfolio: null } });

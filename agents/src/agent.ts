@@ -6,6 +6,7 @@ export interface Position {
   sol_balance: number;
   wallet_usdc: number;
   portfolio: string | null;
+  capital: number;
   equity: number;
   mark_price: number;
   position: { side: "long" | "short"; size_sol: number } | null;
@@ -74,7 +75,8 @@ export async function runAgent(strategy: Strategy, cfg: Config, mcp: Mcp, time: 
         if (!bootstrapped) {
           const initial = await mcp.call("get_position") as Position;
           if (cfg.signal.aborted) break;
-          if (initial.portfolio === null) {
+          // Fund a missing portfolio, and one with no capital (half-done deposit, liquidation).
+          if (initial.portfolio === null || !(initial.capital > 0)) {
             if (initial.wallet_usdc < cfg.depositUsdc) await mcp.call("claim_test_funds");
             if (cfg.signal.aborted) break;
             await mcp.call("deposit", { amount_usdc: cfg.depositUsdc });

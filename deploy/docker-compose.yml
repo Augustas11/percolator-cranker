@@ -87,11 +87,12 @@ services:
 
   # House starter agents (agents/): trade the devnet market through the MCP on
   # the public RPC. One wallet per agent; AGENTS_KEYS_DIR holds
-  # trend.json, meanrev.json, breakout.json readable by uid 1000 (node).
+  # trend.json, meanrev.json, breakout.json (0600, owned by LAUNCH_UID).
   agents:
     build: { context: ../agents }
     image: drip-agents:local
     restart: unless-stopped
+    user: "${LAUNCH_UID:?set LAUNCH_UID}:${LAUNCH_GID:?set LAUNCH_GID}"
     command: ["trend,meanrev,breakout"]
     environment:
       DRIP_KEYPAIR_TREND: /keys/trend.json
