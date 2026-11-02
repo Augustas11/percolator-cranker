@@ -86,3 +86,23 @@ frontend/src/chain/instructions.ts frontend/src/chain/instructions.ts
 frontend/src/chain/layout.ts frontend/src/chain/layout.ts
 frontend/src/chain/tx.ts frontend/src/chain/tx.ts
 frontend/src/chain/fixtures/layout.json frontend/src/chain/fixtures/layout.json
+# Starter agents
+agents/.gitignore agents/.gitignore
+agents/Dockerfile agents/Dockerfile
+agents/README.md agents/README.md
+agents/package-lock.json agents/package-lock.json
+agents/package.json agents/package.json
+agents/src/agent.test.ts agents/src/agent.test.ts
+agents/src/agent.ts agents/src/agent.ts
+agents/src/mcp.test.ts agents/src/mcp.test.ts
+agents/src/mcp.ts agents/src/mcp.ts
+agents/src/run.test.ts agents/src/run.test.ts
+agents/src/run.ts agents/src/run.ts
+agents/src/strategies.test.ts agents/src/strategies.test.ts
+agents/src/strategies/breakout.ts agents/src/strategies/breakout.ts
+agents/src/strategies/index.ts agents/src/strategies/index.ts
+agents/src/strategies/meanrev.ts agents/src/strategies/meanrev.ts
+agents/src/strategies/trend.ts agents/src/strategies/trend.ts
+agents/src/strategies/types.ts agents/src/strategies/types.ts
+agents/tsconfig.json agents/tsconfig.json
+.github/workflows/agents.yml .github/workflows/agents.yml

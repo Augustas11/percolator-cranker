@@ -13,7 +13,7 @@ export function agentEnvs(names: string[], env: NodeJS.ProcessEnv): NodeJS.Proce
   return names.map(name => {
     const key = `DRIP_KEYPAIR_${name.toUpperCase()}`;
     const keypair = env[key] || (names.length === 1 ? env.DRIP_KEYPAIR : undefined);
-    // Never fall back to the MCP's default wallet: Claude or another agent may be trading it.
+    // Never fall back to the MCP's default wallet: you or another agent may be trading it.
     if (!keypair) throw new Error(names.length === 1 ? `Set ${key} or DRIP_KEYPAIR to this agent's own wallet file` : `Set ${key}; each agent needs its own wallet file`);
     // Compare contents, so copies and symlinks of one wallet are caught too.
     let wallet: string;
