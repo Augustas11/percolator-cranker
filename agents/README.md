@@ -13,7 +13,7 @@ server over stdio; there is no chain SDK here. House agents are not prize-eligib
 Requires Node >=20 and npm. From `agents/`:
 
 Give each agent its own wallet. Don't reuse `~/.config/drip/devnet-agent.json`:
-that is the wallet the drip MCP uses in Claude, and the agent would close
+that is the drip MCP's default wallet, and the agent would close
 positions you opened there.
 
 ```sh
