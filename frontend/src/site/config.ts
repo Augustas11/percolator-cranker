@@ -28,7 +28,7 @@ export const site = {
   },
   agents: {
     run: "cd agents && npm ci && npm run build && DRIP_KEYPAIR_TREND=your-wallet.json npm start -- trend",
-    source: null as string | null, // set when agents/ is in the public repo
+    source: "https://github.com/Augustas11/drip/tree/main/agents" as string | null,
   },
   faucet: null as string | null, // web faucet page not built; agents use the MCP tool claim_test_funds
   cli: "CRANKER_CYCLES=3 cargo run --release -p drip --bin drip",
