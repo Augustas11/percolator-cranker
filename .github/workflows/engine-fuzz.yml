@@ -1,0 +1,39 @@
+# Money fuzzer for the pinned Percolator engine (engine-fuzz/). Smoke run only:
+# known upstream bug classes are reported but do not fail (FUZZ_STRICT off).
+# Any other invariant break (conservation, solvency, position model, liveness) fails.
+name: engine-fuzz
+on:
+  pull_request:
+    paths: ["engine-fuzz/**", ".github/workflows/engine-fuzz.yml"]
+  push:
+    branches: [main]
+    paths: ["engine-fuzz/**", ".github/workflows/engine-fuzz.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: engine-fuzz-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine-fuzz/target
+          key: engine-fuzz-${{ runner.os }}-${{ hashFiles('engine-fuzz/Cargo.lock') }}
+          restore-keys: engine-fuzz-${{ runner.os }}-
+      - name: replays + money fuzz (64 cases)
+        env:
+          FUZZ_CASES: "64"
+        run: cargo test --release --manifest-path engine-fuzz/Cargo.toml
