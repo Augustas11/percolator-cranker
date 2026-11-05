@@ -175,6 +175,7 @@ fn money_survey() {
     let (mut defaults, mut recoveries, mut liquidated) = (0usize, 0usize, 0usize);
     let mut always_fatal = Vec::new();
     let mut all_bad = Vec::new();
+    let mut provider_after_default = 0usize;
     for _ in 0..n {
         let scn = strategy.new_tree(&mut runner).unwrap().current();
         let r = run(scn.setup, &scn.actions);
@@ -201,6 +202,9 @@ fn money_survey() {
                     .join(" | ")
             });
         }
+        if r.had_default() && labels.contains(&Invariant::ProviderPrincipal.label()) {
+            provider_after_default += 1;
+        }
         if v.iter().any(|x| !x.invariant.is_known_bug_class()) {
             always_fatal.push(r.explain(&v));
         }
@@ -218,6 +222,7 @@ fn money_survey() {
             if inv.is_known_bug_class() { "  (known bug class)" } else { "" }
         );
     }
+    println!("  of which inv4 after a default   {provider_after_default:>6} runs");
     for (l, d) in &first {
         println!("  first {l}: {d}");
     }
