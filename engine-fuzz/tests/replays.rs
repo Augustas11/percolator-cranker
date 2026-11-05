@@ -309,3 +309,49 @@ fn new_bankruptcy_after_winner_refresh_control_passes() {
     assert_clean(&r);
     assert_eq!(r.defaults.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Upstream #212 case (b), engine level: a provider backs the short winner's domain
+// and the long loser goes bankrupt. Fair: provider recovers its principal, the
+// winner gets its deposit plus the loser's. Accounts: 0 = long loser, 1 = short winner.
+// ---------------------------------------------------------------------------
+
+fn case_212_provider(loser_first: bool) -> Report {
+    let mut s = Setup::leveraged(3, [78_464, 0]);
+    s.initial_margin_bps = 2_000;
+    s.maintenance_margin_bps = 1_000;
+    s.price_cap_bps = 500;
+    let mut acts = vec![
+        Deposit { acct: 0, amount: 200_000 },
+        Deposit { acct: 1, amount: 1_000_000 },
+        Trade { buyer: 0, seller: 1, units: 100 },
+        Jump { up: false, slots: 6 },
+    ];
+    acts.extend(if loser_first {
+        [Crank { acct: 0 }, Crank { acct: 1 }]
+    } else {
+        [Crank { acct: 1 }, Crank { acct: 0 }]
+    });
+    run(s, &acts)
+}
+
+/// At the pin the provider sweeps the loser's payment and the winner is paid short
+/// (engine #172 site 2). On #212's head (96f70b43) the winner is paid in full but the
+/// provider recovers 13_764 (inv4). Same numbers as the LiteSVM run through the wrapper.
+/// Flip to `assert_clean` once fixed upstream.
+#[test]
+fn upstream_212_provider_case_is_present() {
+    let r = case_212_provider(true);
+    assert_violates(&r, &[Invariant::LossShareTotal, Invariant::LossSharePerWinner]);
+    assert_eq!(r.accounts[1].out(), 935_300);
+    assert_eq!(r.provider_out, 278_464);
+}
+
+#[test]
+fn upstream_212_provider_case_control_passes() {
+    let r = case_212_provider(false);
+    assert_clean(&r);
+    assert_eq!(r.accounts[1].out(), 1_200_000);
+    assert_eq!(r.provider_out, 78_464);
+    assert_eq!(r.defaults.len(), 1);
+}

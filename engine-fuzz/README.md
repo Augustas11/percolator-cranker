@@ -18,15 +18,16 @@ wound down. At the end it checks:
    fair amount, the provider gets its full principal, and nothing is retired.
 3. **Fair loss sharing**: if someone went bankrupt, winners lose exactly the shortfall
    in total, split by their exposure at that moment.
-4. **Provider principal**: the provider never loses principal unless a loser defaulted.
+4. **Provider principal**: the provider recovers its full principal, with or without a
+   default (a default's shortfall is borne by winners, not the provider).
 
 It also checks solvency and positions after every step and that the market can
 always be closed. Rounding slack is 2 atoms per operation.
 
 Tests:
 
-- `tests/replays.rs`: fixed replays of upstream issues #250, #252 and #253, plus two
-  new cases the fuzzer found. Each must show its bug; each has a control that must
+- `tests/replays.rs`: fixed replays of upstream issues #250, #252 and #253, plus the #212 provider case and
+  two new cases the fuzzer found. Each must show its bug; each has a control that must
   pass. When upstream fixes one and we re-pin, flip its assertion.
 - `tests/money_fuzz.rs`: the random fuzzer (proptest).
 

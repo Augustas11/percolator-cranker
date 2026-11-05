@@ -1441,7 +1441,22 @@ impl Report {
                     ),
                 });
             }
-            if !self.defaults.iter().any(|d| d.terminal) {
+            // A default's shortfall is borne by winners through B, never by the provider:
+            // with no fees its fair recovery is still its full principal. Terminal
+            // defaults (resolved-mode split) are outside the model, as for inv3 below.
+            let terminal = self.defaults.iter().any(|d| d.terminal);
+            if !terminal && self.provider_out + tol < self.provider_principal {
+                v.push(Violation {
+                    invariant: Invariant::ProviderPrincipal,
+                    detail: format!(
+                        "after default: provider recovered {} of principal {} (short {}), shadow shortfall {shortfall}, tol {tol}",
+                        self.provider_out,
+                        self.provider_principal,
+                        self.provider_principal - self.provider_out
+                    ),
+                });
+            }
+            if !terminal {
                 for (i, a) in self.accounts.iter().enumerate() {
                     let diff = a.out() as i128 - a.fair;
                     if diff.unsigned_abs() > a.tol {
