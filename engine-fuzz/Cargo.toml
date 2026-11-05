@@ -1,0 +1,18 @@
+[package]
+name = "engine-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Shadow-ledger money fuzzer for the Percolator v16 engine"
+
+[dependencies]
+# Production pin: same rev as repo-prog/Cargo.toml. run.sh master patches this to a local checkout.
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "4db11a8cb0053815e23a35d3a7d3edc265d8d866" }
+
+[dev-dependencies]
+proptest = "1.4"
+
+# Same release flags the engine uses for its own tests.
+[profile.release]
+opt-level = 3
+overflow-checks = true
