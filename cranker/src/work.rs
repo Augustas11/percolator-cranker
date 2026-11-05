@@ -142,6 +142,51 @@ pub fn assess(portfolio: &PortfolioAccountV16Account, group: &MarketGroupV16) ->
     }
 }
 
+/// `(asset, side)` pairs this portfolio can settle a gain on first, or empty
+/// when it is not a safe winner (side 0 = long).
+///
+/// Winner-first guard (engine #172 site 2): if a bankrupt loser is liquidated
+/// before any winner on the other side has settled its gain, the engine burns
+/// that gain. Settling one winner per gaining side first avoids it, so the
+/// cycle cranks one such account before anything else.
+///
+/// The account must not be losing on ANY leg, or its own crank could be the
+/// bankruptcy. Per active leg (K is per side; pending K PnL is
+/// `|basis| · (K_side − k_snap)`, so `K_side > k_snap` is a gain for long and
+/// short alike, and an unaccrued price move is `raw_oracle_target_price` vs
+/// `effective_price`):
+/// * changed `kf_epoch`, `K_side < k_snap`, unpaid funding (`F_side <
+///   f_snap`), or a price move against it: not a safe winner, return empty;
+/// * `K_side > k_snap` or a price move in its favour: a gaining side;
+/// * otherwise neutral.
+///
+/// This only reorders cranks; it cannot see a Pyth move no one has accrued.
+pub fn pending_gains(portfolio: &PortfolioAccountV16Account, group: &MarketGroupV16) -> Vec<(u32, u8)> {
+    let mut out = Vec::new();
+    for leg in portfolio.legs.iter().filter(|l| l.active != 0 && l.basis_pos_q.get() != 0) {
+        let Some(asset) = group.assets.get(leg.asset_index.get() as usize) else {
+            return Vec::new();
+        };
+        let long = leg.side == 0;
+        let (k, f, kf_epoch) = if long {
+            (asset.k_long, asset.f_long_num, asset.kf_epoch_long)
+        } else {
+            (asset.k_short, asset.f_short_num, asset.kf_epoch_short)
+        };
+        let snap = leg.k_snap.get();
+        let (target, eff) = (asset.raw_oracle_target_price, asset.effective_price);
+        let (favours, against) = if long { (target > eff, target < eff) } else { (target < eff, target > eff) };
+        // A negative F gap is at least a one-atom funding debit (see `leg_f_settled`).
+        if leg.kf_epoch_snap.get() != kf_epoch || k < snap || f < leg.f_snap.get() || against {
+            return Vec::new();
+        }
+        if k > snap || favours {
+            out.push((leg.asset_index.get(), leg.side));
+        }
+    }
+    out
+}
+
 /// Prices are indexed by asset, from the market snapshot used for landed progress.
 #[derive(Debug, Clone)]
 pub struct RefreshRecord {
@@ -739,6 +784,7 @@ mod tests {
                 priority: work.priority,
                 plan_class: "live:liquidatable".into(),
                 pending_work: true,
+                winner_first: false,
             }]
         } else {
             vec![]
@@ -784,6 +830,60 @@ mod tests {
     #[test]
     fn overflowing_gap_is_not_settled() {
         assert!(!leg_f_settled(i128::MAX, 1, i128::MIN, i128::MAX));
+    }
+
+    #[test]
+    fn pending_gains_reads_side_k_and_skips_epoch_resets() {
+        let (mut pf, mut group, _, _) = quiet_fixture();
+        pf.legs[0].basis_pos_q = percolator::V16PodI128::new(5);
+        // Long leg, K_long above snapshot: a gain.
+        group.assets[0].k_long = 10;
+        assert_eq!(pending_gains(&pf, &group), vec![(0, 0)]);
+        // K_long below snapshot: a loss, not a winner.
+        group.assets[0].k_long = -10;
+        assert!(pending_gains(&pf, &group).is_empty());
+        // Short leg reads K_short, not K_long.
+        pf.legs[0].side = 1;
+        group.assets[0].k_short = 3;
+        assert_eq!(pending_gains(&pf, &group), vec![(0, 1)]);
+        // A kf_epoch change is a reset, not a known gain.
+        group.assets[0].kf_epoch_short += 1;
+        assert!(pending_gains(&pf, &group).is_empty());
+        // Unaccrued price move: long wins when the target is above the
+        // effective price, but not over an accrued K loss.
+        group.assets[0].k_short = 0;
+        pf.legs[0].side = 0;
+        group.assets[0].k_long = 0;
+        group.assets[0].raw_oracle_target_price = 101_000;
+        assert_eq!(pending_gains(&pf, &group), vec![(0, 0)]);
+        pf.legs[0].side = 1;
+        assert!(pending_gains(&pf, &group).is_empty());
+        pf.legs[0].side = 0;
+        group.assets[0].k_long = -1;
+        assert!(pending_gains(&pf, &group).is_empty());
+        // Accrued gain but funding owed: not safe.
+        group.assets[0].k_long = 10;
+        group.assets[0].f_long_num = -1;
+        assert!(pending_gains(&pf, &group).is_empty());
+        group.assets[0].f_long_num = 0;
+        // Accrued gain but a price move against it: not safe.
+        group.assets[0].k_long = 10;
+        group.assets[0].raw_oracle_target_price = 99_000;
+        assert!(pending_gains(&pf, &group).is_empty());
+        // A gaining leg plus a losing leg on another asset: not safe.
+        group.assets[0].raw_oracle_target_price = 100_000;
+        pf.legs[1] = pf.legs[0];
+        pf.legs[1].asset_index = percolator::V16PodU32::new(1);
+        group.assets[1].k_long = -5;
+        assert!(pending_gains(&pf, &group).is_empty());
+        group.assets[1].k_long = 0;
+        assert_eq!(pending_gains(&pf, &group), vec![(0, 0)], "neutral second leg is fine");
+        pf.legs[1].active = 0;
+        group.assets[0].k_long = 0;
+        // Flat legs are never winners.
+        group.assets[0].kf_epoch_short -= 1;
+        pf.legs[0].basis_pos_q = percolator::V16PodI128::new(0);
+        assert!(pending_gains(&pf, &group).is_empty());
     }
 
     #[test]
