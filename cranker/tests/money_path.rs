@@ -1136,3 +1136,37 @@ fn recovery_to_resolved_pays_every_claimant() -> Result<()> {
     e.check();
     Ok(())
 }
+
+/// Winner-first guard (engine #172 site 2) on the pinned wrapper: after a
+/// price drop that no crank has accrued yet, `pending_gains` must flag the
+/// short counterparty and not the long victim, on real account state. Then
+/// cranking the winner to its fixpoint (what the cycle's front pass does; the
+/// selection itself is unit-tested in cycle.rs) settles its gain while the
+/// victim is still unliquidated.
+#[test]
+fn pending_gains_flags_the_winner_before_any_crank() -> Result<()> {
+    let Some(mut e) = Env::new("pending_gains_flags_the_winner_before_any_crank")? else {
+        return Ok(());
+    };
+    let counterparty = e.portfolios[0];
+    let victim = e.victim;
+    e.svm.warp_to_slot(50);
+    e.push(PRICE / 2);
+    let gains = |e: &Env, pf: Pubkey| {
+        drip::work::pending_gains(
+            &common::decode_portfolio(&e.data(pf)).unwrap(),
+            &common::decode_market(&e.data(e.market)).unwrap(),
+        )
+    };
+    assert_eq!(gains(&e, counterparty), vec![(0, 1)], "short winner flagged before accrual");
+    assert!(gains(&e, victim).is_empty(), "long loser is never a winner");
+    // Crank the winner to its fixpoint first: the catch-up accrues the move,
+    // then the leg settles a gain.
+    converge(&mut e, counterparty, 16)?;
+    let winner = common::decode_portfolio(&e.data(counterparty))?;
+    let mg = common::decode_market(&e.data(e.market))?;
+    assert_eq!(winner.legs[0].k_snap.get(), mg.assets[0].k_short, "winner settled K");
+    assert!(winner.pnl.get() > 0, "winner holds the gain: {}", winner.pnl.get());
+    assert!(gains(&e, victim).is_empty());
+    Ok(())
+}

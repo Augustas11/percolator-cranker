@@ -307,11 +307,32 @@ pub fn run_one_cycle(
     } else {
         None
     };
+    // Winner-first guard, chosen over every decoded account (a well-margined
+    // winner is often not due for refresh). Never a liquidatable or
+    // quarantined account.
+    let winners = if group.mode == MarketModeV16::Live {
+        let gains: Vec<_> = ranked
+            .iter()
+            .zip(&decoded)
+            .zip(&assessed)
+            .filter(|((p, _), a)| {
+                a.is_some_and(|(w, _)| w.priority != Priority::Liquidatable)
+                    && !quarantine.is_blocked(&p.pubkey, cycle)
+                    // Only crankable accounts, so a pick never leaves its side unguarded.
+                    && plan_hints(&group, &market_data, &p.account.data, ctx.pyth, now_slot, cycle).is_ok()
+            })
+            .filter_map(|((p, pf), _)| pf.as_ref().map(|pf| (p.pubkey, work::pending_gains(pf, &group))))
+            .collect();
+        pick_winners(&gains, cycle)
+    } else {
+        std::collections::HashSet::new()
+    };
     let mut plans = std::collections::HashMap::new();
     let mut candidates = Vec::with_capacity(ranked.len());
     for ((p, decoded), assessed) in ranked.iter().zip(&decoded).zip(&assessed) {
         let priority = assessed.map(|(w, _)| w.priority).unwrap_or(Priority::Pending);
-        if assessed.is_some_and(|(_, due)| !due) && heartbeat != Some(p.pubkey) {
+        let winner = winners.contains(&p.pubkey);
+        if assessed.is_some_and(|(_, due)| !due) && heartbeat != Some(p.pubkey) && !winner {
             quiet_skipped += 1;
             continue;
         }
@@ -351,12 +372,14 @@ pub fn run_one_cycle(
                 }
             };
         let pending_work = owed && matches!(plan, Plan::Submit { .. });
+        let winner_first = winner && matches!(plan, Plan::Submit { route_owner: None, .. });
         plans.insert(p.pubkey, plan);
         candidates.push(Candidate {
             pubkey: p.pubkey,
             priority,
             plan_class,
             pending_work,
+            winner_first,
         });
     }
 
@@ -482,10 +505,45 @@ pub fn run_one_cycle(
     Ok(summary)
 }
 
+/// Winner-first guard: one account per `(asset, side)` with a pending gain,
+/// rotated by `cycle` so an idle winner cannot hold its side forever. See
+/// `work::pending_gains`.
+fn pick_winners(gains: &[(Pubkey, Vec<(u32, u8)>)], cycle: u64) -> std::collections::HashSet<Pubkey> {
+    let mut by_side: std::collections::BTreeMap<(u32, u8), Vec<Pubkey>> = Default::default();
+    for (pk, sides) in gains {
+        for side in sides {
+            by_side.entry(*side).or_default().push(*pk);
+        }
+    }
+    by_side
+        .into_values()
+        .map(|mut v| {
+            v.sort_by_key(|pk| pk.to_bytes());
+            v[(cycle % v.len() as u64) as usize]
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use solana_sdk::signature::Signature;
+
+    #[test]
+    fn pick_winners_one_per_side_rotating() {
+        let pk = |i: u8| Pubkey::new_from_array([i; 32]);
+        let gains = vec![
+            (pk(3), vec![(0, 0), (1, 1)]),
+            (pk(2), vec![(0, 0)]),
+            (pk(4), vec![(1, 1)]),
+            (pk(5), vec![]),
+        ];
+        let w0 = pick_winners(&gains, 0);
+        assert_eq!(w0, [pk(2), pk(3)].into_iter().collect());
+        let w1 = pick_winners(&gains, 1);
+        assert_eq!(w1, [pk(3), pk(4)].into_iter().collect());
+        assert!(pick_winners(&[], 7).is_empty());
+    }
 
     #[test]
     fn flat_first_sight_seeds_refresh_without_cranking() {

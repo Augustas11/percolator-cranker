@@ -43,6 +43,9 @@ pub struct Candidate {
     /// claimant with capital or PnL left). Persistent idle on such an
     /// account is reported as stuck.
     pub pending_work: bool,
+    /// Crank before every class (winner-first guard, see
+    /// `work::pending_gains`). Does not move the class's fairness cursor.
+    pub winner_first: bool,
 }
 
 /// What one candidate's submission (including any A6 drain steps) came to.
@@ -334,8 +337,16 @@ where
     let last_visited = quarantine.schedule_state().last_visited;
     let mut turn = quarantine.schedule_state().turn;
     let mut queues: [std::collections::VecDeque<Candidate>; 3] = Default::default();
+    // Winner-first candidates go before every class, outside the rotation.
+    let mut front: std::collections::VecDeque<Candidate> =
+        cands.iter().filter(|x| x.winner_first).cloned().collect();
+    // The front pass may use at most half the cycle's txs, so liquidations
+    // always keep a share.
+    let front_cap = (budget.max_submissions / 2).max(1);
+    let mut front_used = 0usize;
     for (c, p) in [Priority::Liquidatable, Priority::Pending, Priority::Quiet].into_iter().enumerate() {
-        let mut class: Vec<Candidate> = cands.iter().filter(|x| x.priority == p).cloned().collect();
+        let mut class: Vec<Candidate> =
+            cands.iter().filter(|x| x.priority == p && !x.winner_first).cloned().collect();
         if let Some(last) = last_visited[c] {
             // Sorted by pubkey: start at the first one after `last`.
             let start = class
@@ -346,7 +357,10 @@ where
         }
         queues[c] = class.into();
     }
-    let quotas = class_quotas(budget.max_submissions, [0, 1, 2].map(|c| !queues[c].is_empty()));
+    let quotas = class_quotas(
+        budget.max_submissions,
+        [0, 1, 2].map(|c| !queues[c].is_empty() || front.iter().any(|x| x.priority as usize == c)),
+    );
     let mut used = [0usize; 3];
     let mut visited: [Option<Pubkey>; 3] = [None; 3];
 
@@ -364,12 +378,25 @@ where
                 break;
             }
         }
-        let Some((c, pos)) = pick else { break };
-        turn = (pos + 1) % CLASS_PATTERN.len();
-        let cand = queues[c].pop_front().expect("non-empty");
+        if front_used >= front_cap {
+            // Out of front budget: the rest go back to their classes.
+            for rest in front.drain(..) {
+                queues[rest.priority as usize].push_back(rest);
+            }
+        }
+        let (c, pos, cand, is_front) = if let Some(cand) = front.pop_front() {
+            // Turn and cursors stay put: the front pass is outside the rotation.
+            (cand.priority as usize, turn, cand, true)
+        } else {
+            let Some((c, pos)) = pick else { break };
+            turn = (pos + 1) % CLASS_PATTERN.len();
+            (c, pos, queues[c].pop_front().expect("non-empty"), false)
+        };
         if quarantine.is_blocked(&cand.pubkey, cycle) {
             s.quarantined_skipped += 1;
-            visited[c] = Some(cand.pubkey);
+            if !is_front {
+                visited[c] = Some(cand.pubkey);
+            }
             continue;
         }
         if !meter.can_send() {
@@ -379,7 +406,7 @@ where
             // stays on this class so it opens the next cycle.
             turn = pos;
             s.budget_deferred += 1;
-            for q in queues.iter_mut() {
+            for q in std::iter::once(&mut front).chain(queues.iter_mut()) {
                 for rest in q.drain(..) {
                     if quarantine.is_blocked(&rest.pubkey, cycle) {
                         s.quarantined_skipped += 1;
@@ -391,7 +418,9 @@ where
             break;
         }
         let prev_visited = visited[c];
-        visited[c] = Some(cand.pubkey);
+        if !is_front {
+            visited[c] = Some(cand.pubkey);
+        }
         let txs_before = meter.txs_left;
         let cu_before = meter.cu_left;
         let others_need = (0..3).any(|o| o != c && !queues[o].is_empty() && used[o] < quotas[o]);
@@ -400,6 +429,7 @@ where
         } else {
             meter.per_attempt
         };
+        let cap = if is_front { cap.max(1).min(front_cap - front_used).max(1) } else { cap };
         let mut ab = AttemptBudget {
             meter: &mut meter,
             txs: 0,
@@ -424,6 +454,9 @@ where
         }
         let sent = txs_before - meter.txs_left;
         used[c] += sent;
+        if is_front {
+            front_used += sent;
+        }
         s.txs += sent;
         // Charged = what the meter actually kept (measured CU, or the full
         // reservation when unknown), so the summary agrees with the budget.
@@ -452,7 +485,7 @@ where
             // cycle here so no later candidate can overwrite that.
             visited[c] = prev_visited;
             turn = pos;
-            for q in queues.iter_mut() {
+            for q in std::iter::once(&mut front).chain(queues.iter_mut()) {
                 for rest in q.drain(..) {
                     if quarantine.is_blocked(&rest.pubkey, cycle) {
                         s.quarantined_skipped += 1;
@@ -548,6 +581,7 @@ mod tests {
             priority,
             plan_class: format!("live:{}", priority.label()),
             pending_work: false,
+            winner_first: false,
         }
     }
 
@@ -573,6 +607,52 @@ mod tests {
 
     /// Deferred accounts are first in their class next cycle (cursors
     /// advance by the number visited, not by one).
+    /// Winner-first guard: a marked winner is cranked before a liquidatable
+    /// account, and the front pass does not move the class cursor.
+    #[test]
+    fn winner_first_runs_before_liquidatable_and_keeps_rotation() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let mut order = Vec::new();
+        for cycle in 0..2 {
+            let mut w = cand(pk(9), Priority::Pending);
+            w.winner_first = cycle == 0;
+            let cands = vec![
+                cand(pk(1), Priority::Liquidatable),
+                cand(pk(2), Priority::Pending),
+                cand(pk(3), Priority::Pending),
+                w,
+            ];
+            run(cycle, cands, &CycleBudget::default(), &mut q, |c, ab| {
+                order.push(c.pubkey.to_bytes()[0]);
+                one_tx(ab, 1, Attempt::Progress { cu: 1, steps: 1 })
+            });
+        }
+        assert_eq!(order[0], 9, "winner first: {order:?}");
+        // Cycle 0 visited pending 2 and 3 after the front pass; the pending
+        // cursor is 3 (not 9), so cycle 1 still reaches 9 in rotation.
+        assert_eq!(order.len(), 8, "{order:?}");
+        assert!(order[4..].contains(&9), "{order:?}");
+    }
+
+    /// The front pass takes at most half the cycle's txs: a liquidatable
+    /// account still gets one when winners would fill the budget.
+    #[test]
+    fn winner_front_pass_is_capped() {
+        let mut q = Quarantine::new(QuarantineConfig::default());
+        let budget = CycleBudget { max_submissions: 2, ..CycleBudget::default() };
+        let mut w1 = cand(pk(8), Priority::Pending);
+        w1.winner_first = true;
+        let mut w2 = cand(pk(9), Priority::Quiet);
+        w2.winner_first = true;
+        let mut order = Vec::new();
+        run(0, vec![cand(pk(1), Priority::Liquidatable), w1, w2], &budget, &mut q, |c, ab| {
+            order.push(c.pubkey.to_bytes()[0]);
+            one_tx(ab, 1, Attempt::Progress { cu: 1, steps: 1 })
+        });
+        assert_eq!(order[0], 8, "{order:?}");
+        assert!(order.contains(&1), "liquidatable kept a tx: {order:?}");
+    }
+
     #[test]
     fn deferred_accounts_come_first_next_cycle() {
         let mut q = Quarantine::new(QuarantineConfig::default());
