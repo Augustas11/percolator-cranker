@@ -73,7 +73,50 @@ fn action_strategy() -> impl Strategy<Value = Action> {
     ]
 }
 
+/// Straight into the window after a bankruptcy: positions, a price gap, then only
+/// cranks and trades in that same slot, so accounts can act before their loss
+/// share settles (the #253 shape). Random action lists almost never get here.
+fn bankruptcy_window_strategy() -> impl Strategy<Value = Scenario> {
+    let acct = 0usize..5;
+    let opening = (acct.clone(), acct.clone(), 1u64..=100)
+        .prop_map(|(buyer, seller, units)| Action::Trade { buyer, seller, units });
+    let in_window = prop_oneof![
+        1 => acct.clone().prop_map(|acct| Action::CrankOnce { acct }),
+        1 => acct.clone().prop_map(|acct| Action::Crank { acct }),
+        4 => (acct.clone(), acct.clone(), 1u64..=100)
+            .prop_map(|(buyer, seller, units)| Action::Trade { buyer, seller, units }),
+    ];
+    (
+        setup_strategy(),
+        prop::collection::vec(10_000u128..=2_000_000, 5),
+        prop::collection::vec(opening, 2..8),
+        (any::<bool>(), 1u8..=6),
+        Just((0usize..5).collect::<Vec<_>>()).prop_shuffle(),
+        prop::collection::vec(in_window, 1..12),
+    )
+        .prop_map(|(setup, initial, opening, (up, slots), refresh_order, window)| {
+            let mut actions: Vec<Action> = initial
+                .into_iter()
+                .take(setup.accounts)
+                .enumerate()
+                .map(|(acct, amount)| Action::Deposit { acct, amount })
+                .collect();
+            actions.extend(opening);
+            actions.push(Action::Jump { up, slots });
+            // Refresh everyone (certificates current), then crank the worst account until
+            // its liquidation books the loss. Nobody else has settled it yet.
+            actions.extend(refresh_order.into_iter().map(|acct| Action::CrankOnce { acct }));
+            actions.extend([Action::CrankWorst; 3]);
+            actions.extend(window);
+            Scenario { setup, actions }
+        })
+}
+
 fn scenario_strategy() -> impl Strategy<Value = Scenario> {
+    prop_oneof![3 => random_scenario_strategy(), 1 => bankruptcy_window_strategy()]
+}
+
+fn random_scenario_strategy() -> impl Strategy<Value = Scenario> {
     (
         setup_strategy(),
         prop::collection::vec(10_000u128..=1_000_000, 5),
@@ -151,6 +194,12 @@ fn money_fuzz() {
         if !fatal.is_empty() {
             return Err(TestCaseError::fail(r.explain(&fatal)));
         }
+        if r.unexplained_transfer(&v) {
+            return Err(TestCaseError::fail(format!(
+                "money moved between winners with no known cause (new bug?)\n{}",
+                r.explain(&v)
+            )));
+        }
         Ok(())
     });
     if let Err(e) = result {
@@ -176,6 +225,8 @@ fn money_survey() {
     let mut always_fatal = Vec::new();
     let mut all_bad = Vec::new();
     let mut provider_after_default = 0usize;
+    let mut resized = 0usize;
+    let mut unexplained = 0usize;
     for _ in 0..n {
         let scn = strategy.new_tree(&mut runner).unwrap().current();
         let r = run(scn.setup, &scn.actions);
@@ -202,6 +253,13 @@ fn money_survey() {
                     .join(" | ")
             });
         }
+        if r.resized_before_loss_settled {
+            resized += 1;
+        }
+        if r.unexplained_transfer(&v) {
+            unexplained += 1;
+            always_fatal.push(format!("money moved between winners, no known cause\n{}", r.explain(&v)));
+        }
         if r.had_default() && labels.contains(&Invariant::ProviderPrincipal.label()) {
             provider_after_default += 1;
         }
@@ -223,6 +281,8 @@ fn money_survey() {
         );
     }
     println!("  of which inv4 after a default   {provider_after_default:>6} runs");
+    println!("  resized before loss settled {resized:>6} runs");
+    println!("  winner transfers, no known cause {unexplained:>4} runs");
     for (l, d) in &first {
         println!("  first {l}: {d}");
     }

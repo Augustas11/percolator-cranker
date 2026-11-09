@@ -67,6 +67,17 @@ Invariant labels: `inv1_conservation`, `step_solvency`, `position_model`,
 `terminal_stuck_unbacked_claim` are known upstream bug classes and only fail with
 `FUZZ_STRICT=1`.
 
+One check always fails, even outside strict mode, and it ignores `FUZZ_INVARIANT`:
+a winner's share is off by more than 1,000 atoms in a way that moved money between
+traders (total right, or someone paid over fair value), and no known cause happened
+in that run. That means money moved between traders in a new way. The only known cause so far is #253
+(a same-side resize before the loss settles). When upstream fixes a cause and we
+re-pin, or a new one is understood, update `Report::unexplained_transfer`. A quarter of the
+random scenarios go straight into the slot after a bankruptcy, since plain random
+action lists never reach that state. Money leaving traders for the provider or
+retired funds (`inv3_loss_share_total`) is not covered by this alarm, and one #253
+resize silences it for the rest of that run.
+
 `inv2` and `inv4` are stricter than the engine promises. The engine never nets
 value across source domains (spec §2.2), so when the price reverses before a
 winner settles, a trader or the provider can come out a little off mark-to-market

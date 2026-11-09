@@ -39,6 +39,11 @@ const PS: i128 = POS_SCALE as i128;
 /// Whole-unit positions with integer prices are exact, so most runs check at 2 atoms.
 pub const TOL_ATOMS_PER_OP: u128 = 2;
 
+/// A winner off by more than this, with the total right, counts as money moved
+/// between traders. Rounding alone reached 111 atoms in our surveys; the #253
+/// replay moves 21,391.
+pub const TRANSFER_ALARM_ATOMS: u128 = 1_000;
+
 /// Market parameters for one run.
 #[derive(Clone, Copy, Debug)]
 pub struct Setup {
@@ -114,6 +119,8 @@ pub enum Action {
     Crank { acct: usize },
     /// One permissionless auto-crank step.
     CrankOnce { acct: usize },
+    /// One auto-crank step on the open account with the lowest shadow equity.
+    CrankWorst,
     /// Full account refresh.
     Refresh { acct: usize },
     Liquidate { acct: usize },
@@ -283,6 +290,7 @@ pub struct World {
     /// Resolved close payout per account (closed by a direct close or by a crank).
     closed_payout: Vec<Option<u128>>,
     provider_out_domain: [u128; 2],
+    resized_before_loss_settled: bool,
 }
 
 type Snap = (
@@ -336,6 +344,7 @@ impl World {
             recovery: false,
             closed_payout: vec![None; n],
             provider_out_domain: [0; 2],
+            resized_before_loss_settled: false,
         };
         for d in 0..2 {
             let amount = setup.provider[d];
@@ -417,6 +426,25 @@ impl World {
             };
         }
         0
+    }
+
+    /// Account i has a booked loss it has not settled yet.
+    fn loss_unsettled(&self, i: usize) -> bool {
+        let Ok(asset) = self.markets[0].engine.asset.try_to_runtime() else {
+            return false;
+        };
+        let leg = self.accts[i]
+            .legs
+            .iter()
+            .filter_map(|l| l.try_to_runtime().ok())
+            .find(|l| l.active && l.asset_index == 0);
+        leg.is_some_and(|l| {
+            let (b, epoch) = match l.side {
+                SideV16::Long => (asset.b_long_num, asset.epoch_long),
+                SideV16::Short => (asset.b_short_num, asset.epoch_short),
+            };
+            l.b_epoch_snap == epoch && l.b_snap != b
+        })
     }
 
     fn bucket_fresh_atoms(&self, d: usize) -> u128 {
@@ -768,6 +796,11 @@ impl World {
                 } else {
                     let snap = self.snap();
                     let price = self.shadow.price;
+                    let q = units as i128 * PS;
+                    let (pos_b, pos_s) = (self.shadow.pos[b], self.shadow.pos[s]);
+                    let same_side = |pos: i128, next: i128| pos != 0 && next != 0 && pos.signum() == next.signum();
+                    let skips_loss = (same_side(pos_b, pos_b + q) && self.loss_unsettled(b))
+                        || (same_side(pos_s, pos_s - q) && self.loss_unsettled(s));
                     let r = {
                         let mut m =
                             MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
@@ -792,7 +825,7 @@ impl World {
                     };
                     match r {
                         Ok(_) => {
-                            let q = units as i128 * PS;
+                            self.resized_before_loss_settled |= skips_loss;
                             self.shadow.pos[b] += q;
                             self.shadow.pos[s] -= q;
                             StepResult::Applied
@@ -884,6 +917,18 @@ impl World {
                 }
                 Err(e) => StepResult::Rejected(e),
             },
+            Action::CrankWorst => {
+                let Some(i) = (0..n).filter(|&i| self.shadow.pos[i] != 0).min_by_key(|&i| self.shadow.equity(i)) else {
+                    return StepResult::Skipped("no open account");
+                };
+                match self.crank_step(step, i) {
+                    Ok(p) => {
+                        self.trace.push(format!("  crank-worst acct {i}: {p:?}"));
+                        StepResult::Applied
+                    }
+                    Err(e) => StepResult::Rejected(e),
+                }
+            }
             Action::Refresh { acct } => {
                 let i = acct % n;
                 let snap = self.snap();
@@ -1141,6 +1186,7 @@ impl World {
             stuck_unbacked,
             step_violations: self.step_violations,
             trace: self.trace,
+            resized_before_loss_settled: self.resized_before_loss_settled,
         }
     }
 
@@ -1334,6 +1380,8 @@ pub struct Report {
     pub stuck_unbacked: Vec<String>,
     pub step_violations: Vec<Violation>,
     pub trace: Vec<String>,
+    /// A same-side resize ran with a booked loss unsettled (#253).
+    pub resized_before_loss_settled: bool,
 }
 
 impl Report {
@@ -1473,6 +1521,20 @@ impl Report {
             }
         }
         v
+    }
+
+    /// Money moved between traders (one winner paid for another), and the one known
+    /// way to do that (#253) did not happen in this run.
+    pub fn unexplained_transfer(&self, violations: &[Violation]) -> bool {
+        let has = |inv| violations.iter().any(|x| x.invariant == inv);
+        let floor = TRANSFER_ALARM_ATOMS as i128;
+        // A leak out of the trader pool only leaves traders short, so with the
+        // total wrong, only someone paid over their fair value is a transfer.
+        let moved = self.accounts.iter().any(|a| {
+            let diff = a.out() as i128 - a.fair;
+            if has(Invariant::LossShareTotal) { diff > floor } else { diff.abs() > floor }
+        });
+        has(Invariant::LossSharePerWinner) && moved && !self.resized_before_loss_settled
     }
 
     /// Full failure text: invariant, terms, action sequence, trace.

@@ -183,10 +183,34 @@ fn upstream_253_b_skip_resize_is_present() {
     let r = case_253(false);
     // Expected +150_000 each; L1 nets +171_391 and L2 +128_608.
     assert_violates(&r, &[Invariant::LossSharePerWinner]);
+    assert!(r.resized_before_loss_settled);
+    assert!(!r.unexplained_transfer(&r.check()), "#253 is a known cause");
     assert_eq!(r.accounts[0].out(), 1_171_391);
     assert_eq!(r.accounts[1].out(), 1_128_608);
     assert_eq!(r.accounts[0].fair, 1_150_000);
     assert_eq!(r.accounts[1].fair, 1_150_000);
+}
+
+/// Without the #253 label the same run must raise the alarm: this is how a new
+/// cause of winners paying for each other shows up.
+#[test]
+fn transfer_alarm_fires_when_no_known_cause() {
+    let mut r = case_253(false);
+    let v = r.check();
+    r.resized_before_loss_settled = false;
+    assert!(r.unexplained_transfer(&v));
+}
+
+/// With the total wrong, a shortfall alone is a leak; only an overpayment is a transfer.
+#[test]
+fn transfer_alarm_with_a_wrong_total_needs_an_overpayment() {
+    let mut r = case_253(false);
+    r.resized_before_loss_settled = false;
+    let mut v = r.check();
+    v.push(Violation { invariant: Invariant::LossShareTotal, detail: String::new() });
+    assert!(r.unexplained_transfer(&v), "account 0 is overpaid");
+    r.accounts[0].fair = r.accounts[0].out() as i128;
+    assert!(!r.unexplained_transfer(&v), "only a shortfall remains");
 }
 
 #[test]
