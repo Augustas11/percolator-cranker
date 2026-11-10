@@ -5567,6 +5567,7 @@ dependencies = [
  "drip",
  "percolator",
  "percolator-prog",
+ "reqwest",
  "serde",
  "serde_json",
  "solana-client",

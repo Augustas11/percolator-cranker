@@ -23,4 +23,6 @@ toml = "0.5"
 bincode = "1.3"
 # Reuse the websocket/TLS and timestamp crates already in solana-client's graph.
 tungstenite = { version = "0.20.1", features = ["rustls-tls-webpki-roots"] }
+# FLOP index reads (pusher/flop.rs); same reqwest as solana-client's graph.
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }

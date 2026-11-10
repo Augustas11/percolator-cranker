@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 
 mod exchanges;
+mod flop;
 pub use exchanges::Exchanges;
+pub use flop::FlopIndex;
 
 const STALL_WINDOW_MS: u64 = 3_600_000;
 
@@ -54,6 +56,7 @@ impl StallStats {
 // Later: paid pyth.dourolabs.app/hermes source, Authorization: Bearer from env.
 pub enum PriceSource {
     Exchanges(Exchanges),
+    Flop(FlopIndex),
     Mock { price: u64, initial: u64, rng: u64, max_bps: u64 },
     Pyth { rpc: RpcClient, feed: [u8; 32], cfg: launch::OracleCfg },
 }
@@ -61,6 +64,7 @@ impl PriceSource {
     pub fn latest(&mut self) -> Result<(u64, u64, bool)> {
         match self {
             Self::Exchanges(source) => source.latest().map(|r| (r.price, r.publish_time_ms, r.fallback)),
+            Self::Flop(source) => source.latest().map(|(price, at)| (price, at, false)),
             Self::Pyth { rpc, feed, cfg } => launch::pyth_sol_usd(rpc, feed, cfg).map(|(price, at)| (price, at, false)),
             Self::Mock { price, initial, rng, max_bps } => {
                 *rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -101,6 +105,8 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
     let rpc = RpcClient::new_with_commitment(st.rpc.url(), CommitmentConfig::processed());
     let mut source = if let Some(source) = &st.exchanges {
         PriceSource::Exchanges(source.clone())
+    } else if let Some(source) = &st.flop {
+        PriceSource::Flop(source.clone())
     } else { match st.pyth_feed {
         Some(feed) => PriceSource::Pyth {
             rpc: RpcClient::new_with_commitment(launch::pyth_rpc_url(&st.cfg.oracle, &st.rpc.url()), CommitmentConfig::confirmed()),

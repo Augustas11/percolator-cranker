@@ -50,6 +50,7 @@ stop_bots() {
 alive() { [ -f "$RUN_DIR/pids/$1.pid" ] && kill -0 "$(cat "$RUN_DIR/pids/$1.pid")" 2>/dev/null; }
 
 if [ "${1:-}" = stop ]; then
+  # Another market's run dir: LAUNCH_RUN_DIR=launch-runs/<config stem>-<cluster>.
   RUN_DIR="${LAUNCH_RUN_DIR:-$REPO_ROOT/launch-runs/${2:?usage: $0 stop <cluster>}}"
   stop_bots
   exit 0
@@ -59,7 +60,11 @@ fi
 CONFIG="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 CLUSTER="$2"
 case "$CLUSTER" in local|devnet|mainnet) ;; *) die "cluster must be local, devnet or mainnet" ;; esac
-RUN_DIR="${LAUNCH_RUN_DIR:-$REPO_ROOT/launch-runs/$CLUSTER}"
+# Any market other than SOL-PERP gets its own run dir, so it never resumes
+# (or stops) SOL-PERP's: launch-runs/<config stem>-<cluster>.
+STEM="$(basename "$CONFIG" .toml)"
+if [ "$STEM" = sol-perp ]; then DEFAULT_RUN="$CLUSTER"; else DEFAULT_RUN="$STEM-$CLUSTER"; fi
+RUN_DIR="${LAUNCH_RUN_DIR:-$REPO_ROOT/launch-runs/$DEFAULT_RUN}"
 mkdir -p "$RUN_DIR/pids"
 cfg() { python3 -I -c 'import sys, tomllib
 c = tomllib.load(open(sys.argv[1], "rb"))
@@ -209,4 +214,4 @@ PY
 }
 timed "8 health" health || die "health check failed; bots left running (stop: $0 stop $CLUSTER)"
 printf '%-16s %7ss\n' "total" "$(since "$T_START")" | tee -a "$RUN_DIR/timings.txt"
-echo "==> SOL-PERP live on $CLUSTER: market $MARKET, monitor http://$LISTEN/ ; stop: $0 stop $CLUSTER"
+echo "==> $STEM live on $CLUSTER: market $MARKET, monitor http://$LISTEN/ ; stop: LAUNCH_RUN_DIR=$RUN_DIR $0 stop $CLUSTER"

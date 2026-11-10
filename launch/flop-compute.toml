@@ -1,0 +1,137 @@
+# FLOP-COMPUTE launch config: a devnet DEMO market on FLOP Network's compute
+# price (docs/flop-compute/INDEX.md). Devnet and local only; never mainnet,
+# never real money. Separate from SOL-PERP and changes nothing about it.
+# The mark is FLOP per TFLOP, e6, from real FLOP settlements; PnL is paid in
+# the test mint as if that number were dollars (the devnet token has no value).
+# Same layout as launch/sol-perp.toml; only the differences are commented.
+
+# Must equal scripts/pins.env, the single source of truth that
+# scripts/fetch_upstream.sh and the crates' build.rs read. launch_market.sh
+# refuses to run when they differ.
+[pins]
+wrapper_sha = "5cb331dde354517c6371a8acf92cecb194f3bb73"
+engine_rev = "4db11a8cb0053815e23a35d3a7d3edc265d8d866"
+
+# Steps, roles and keys work as in sol-perp.toml (docs/LAUNCH.md).
+[cluster.local]
+rpc = "http://127.0.0.1:8799"
+program_id = ""
+collateral_mint = "create"
+# Real FLOP settlements even on a local validator (reads only).
+price_source = "flop"
+matcher_ctxs = []
+matcher_max_ref_age_slots = 5
+
+[cluster.devnet]
+rpc = "https://api.devnet.solana.com"
+# Our devnet wrapper.
+program_id = "GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS"
+collateral_mint = "create"
+price_source = "flop"
+# No on-chain matcher: the bots' off-chain matcher co-signs TradeNoCpi between
+# the run's LP and test trader.
+matcher_ctxs = []
+matcher_max_ref_age_slots = 80
+
+[oracle]
+# FLOP index (pusher/flop.rs): GN-weighted median over spot, non-self-trade
+# settlements in the last flop_window_s; stale (no push) with fewer than
+# flop_min_prints in the window or when the newest is older than flop_max_age_s.
+# FLOP devnet ran ~35 settlements an hour on 2026-11-10.
+flop_mcp_url = "https://mcp.flop.network/mcp"
+flop_window_s = 21600
+flop_min_prints = 20
+flop_max_age_s = 1800
+flop_refresh_s = 60
+# Status polling interval for mark pushes and accrual transactions.
+confirm_poll_ms = 500
+# Unused by price_source = "flop"; the config loader requires them.
+pyth_feed_id = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
+pyth_price_account = "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE"
+pyth_max_age_s = 120
+pyth_max_conf_bps = 100
+# Settlements land minutes apart; lag here is the newest print's age.
+lag_target_ms = 1800000
+# Main bots tick; the pusher has its own RPC and thread.
+push_interval_ms = 3000
+push_heartbeat_slots = 25
+push_poll_ms = 400
+accrual_lag_slots = 32
+accrual_max_cranks_per_tx = 10
+push_min_move_bps = 1
+priority_fee_micro_lamports = 10000
+# Local landed PushAuthMark: 6,596 CU including budget instructions; ~2x.
+push_cu_limit = 14000
+# Source publish age, not landing age. Slow sources (e.g. devnet Pyth
+# fallback, ~13 s) refuse opens unless this is raised for that run.
+open_max_mark_age_ms = 1900000
+
+# InitMarket. Values and reasoning: docs/OPERATOR_PLAYBOOK.md section 2.
+[market]
+max_portfolio_assets = 1
+initial_price = 2970000          # 2.97 FLOP/TFLOP; the live index sets it
+h_min = 0
+h_max = 150
+min_nonzero_mm_req = 1000
+min_nonzero_im_req = 2000
+maintenance_margin_bps = 2500
+initial_margin_bps = 5000        # 2x: thin, gappy index
+max_trading_fee_bps = 100
+# 15 bps (owner, 2026-10-30). 5 bps loses to latency arbitrage at every
+# reachable lag (research/replay/REPORT.md). Post-stall-fix replay
+# (REPORT-post-fix.md): 12 bps nets +4.8 bps, break-even ~$211k/day, and
+# turns negative near 1.4 s lag; 15 bps nets +10.4, break-even ~$98k/day.
+trade_fee_base_bps = 15
+liquidation_fee_bps = 50
+liquidation_fee_cap = 10000000000
+min_liquidation_abs = 0
+# The median can jump between FLOP's few price levels (~3%); at 20 bps a slot
+# the mark follows in ~15 slots.
+max_price_move_bps_per_slot = 20
+# The engine caps accrual at 32 slots per crank anyway.
+max_accrual_dt_slots = 64
+max_abs_funding_e9_per_slot = 10000
+min_funding_lifetime_slots = 64
+max_account_b_settlement_chunks = 4
+max_bankrupt_close_chunks = 4
+max_bankrupt_close_lifetime_slots = 1500
+public_b_chunk_atoms = "max"     # MAX_VAULT_TVL
+# 0 keeps the market Meta reward- and donation-compatible: percolator-meta's
+# reward epochs reject a nonzero maintenance fee (residual-distributor
+# lib.rs:2100-2113). The permissionless asset-init fee stays 0 (InitMarket
+# default, never raised here): listing closed, as donation requires.
+maintenance_fee_per_slot = 0
+
+# ConfigurePermissionlessResolve. The index can go stale for hours, so a
+# stale resolve needs ~24 h without a mark (SOL-PERP: ~1 h).
+[resolve]
+stale_slots = 216000
+force_close_delay_slots = 20
+
+# Off-chain matcher: LP and trader co-sign TradeNoCpi at mark +- spread.
+# Pushes also refresh any configured on-chain TradeCpi matcher contexts.
+[matcher]
+program_id = "8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE"
+# REPORT.md: tickets above $100k carry 2.7–4.8 bps adverse selection.
+max_fill_notional_usd = 100000
+# REPORT.md inventory limit (~line 260), ops/CAPITAL_PLAN.md: 10% of
+# $1M daily volume. No on-chain OI cap at this pin: this IS the OI cap.
+# Keep the engine refusal when AuthMark target != effective mark.
+max_lp_inventory_usd = 100000
+size_q = 1000000000               # 1,000 TFLOP (~2,970 test dollars)
+spread_bps = 10
+fee_bps = 15                     # >= trade_fee_base_bps (the wrapper refuses less)
+
+[amounts]
+lp_deposit = 30000000000         # $30k
+trader_deposit = 30000000000     # test trader (local, devnet only)
+insurance_seed = 10000000        # $10
+insurance_topup = 10000000       # bots: every insurance_every ticks
+insurance_every = 30
+backing_per_domain = 10000000000 # $10k on domains 0 (long) and 1 (short)
+backing_tenor_slots = 9000       # ~1 h
+# Test mint only: minted to the authority for backing and insurance.
+authority_test_mint = 10000000000000
+
+[monitor]
+listen = "127.0.0.1:9185"     # SOL-PERP uses 9184

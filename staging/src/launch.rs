@@ -128,6 +128,19 @@ pub struct OracleCfg {
     pub push_cu_limit: u32,
     #[serde(default = "default_open_mark_age")]
     pub open_max_mark_age_ms: u64,
+    /// price_source = "flop" (devnet demo, docs/flop-compute/INDEX.md): FLOP's
+    /// read-only MCP endpoint, rolling window, minimum prints in it, max age of
+    /// the newest print, and how often to refetch.
+    #[serde(default = "default_flop_mcp_url")]
+    pub flop_mcp_url: String,
+    #[serde(default = "default_flop_window_s")]
+    pub flop_window_s: u64,
+    #[serde(default = "default_flop_min_prints")]
+    pub flop_min_prints: usize,
+    #[serde(default = "default_flop_max_age_s")]
+    pub flop_max_age_s: u64,
+    #[serde(default = "default_flop_refresh_s")]
+    pub flop_refresh_s: u64,
 }
 
 fn default_exchange_binance_url() -> String { "wss://stream.binance.com:9443/ws/solusdt@ticker".into() }
@@ -146,6 +159,11 @@ fn default_push_min_move_bps() -> u64 { 1 }
 fn default_priority_fee() -> u64 { 10_000 }
 fn default_push_cu_limit() -> u32 { 14_000 }
 fn default_open_mark_age() -> u64 { 1000 }
+fn default_flop_mcp_url() -> String { "https://mcp.flop.network/mcp".into() }
+fn default_flop_window_s() -> u64 { 6 * 3600 }
+fn default_flop_min_prints() -> usize { 20 }
+fn default_flop_max_age_s() -> u64 { 1800 }
+fn default_flop_refresh_s() -> u64 { 60 }
 
 /// InitMarket, field for field (`initial_price` is the mock start). TOML
 /// integers are i64, so u128 fields are read as u64.
@@ -584,6 +602,8 @@ fn open(args: &[String]) -> Result<(Staging, State, PathBuf, String)> {
     match c.price_source.as_str() {
         "pyth" => st.pyth_feed = Some(feed_id(&st.cfg.oracle)?),
         "exchanges" => st.exchanges = Some(crate::pusher::Exchanges::new(&st.cfg.oracle)?),
+        "flop" if mainnet => bail!("price_source = flop is a devnet demo only"),
+        "flop" => st.flop = Some(crate::pusher::FlopIndex::new(&st.cfg.oracle)?),
         "mock" => {},
         other => bail!("unknown price_source {other:?}"),
     }
@@ -639,16 +659,17 @@ pub fn step_main(args: &[String]) -> Result<()> {
 }
 
 fn run_step(st: &mut Staging, state: &mut State, run: &Path, cluster: &str, name: &str) -> Result<()> {
-    if (st.pyth_feed.is_some() || st.exchanges.is_some()) && matches!(name, "init-market" | "oracle") {
+    if (st.pyth_feed.is_some() || st.exchanges.is_some() || st.flop.is_some()) && matches!(name, "init-market" | "oracle") {
         // InitMarket and AuthMark start at the live price; no other step
         // (handover least of all) needs a price.
-        // Allow websocket subscriptions to produce the initial quorum; never
+        // Allow websocket subscriptions (or the FLOP reader's first fetch) to
+        // produce the first price; never
         // substitute the mock price when the live source is unavailable.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
             match st.source_price(0) {
                 Ok((price, _)) => { st.mark = price; break; },
-                Err(_) if st.exchanges.is_some() && std::time::Instant::now() < deadline =>
+                Err(_) if (st.exchanges.is_some() || st.flop.is_some()) && std::time::Instant::now() < deadline =>
                     std::thread::sleep(std::time::Duration::from_millis(100)),
                 Err(e) => return Err(e),
             }
