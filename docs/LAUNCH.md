@@ -59,7 +59,7 @@ The launch key (local and devnet: `keys/admin.json`; mainnet: a fresh
 create + init until the handover. `staging roles` prints the on-chain table
 and fails unless every role is with its holder and none with the launch key.
 
-**Run dir** `launch-runs/<cluster>/` (gitignored; `LAUNCH_RUN_DIR`
+**Run dir** `launch-runs/<cluster>/` for `sol-perp.toml`, `launch-runs/<config stem>-<cluster>/` for any other config (gitignored; `LAUNCH_RUN_DIR`
 overrides): `state.json` (program id, mint, market, portfolios, completed
 steps), `keys/` (generated on local and devnet; on mainnet the owner places
 the hot `payer.json` and `lp.json`), `handover/` (mainnet), `bots.log`,

@@ -14,7 +14,8 @@
 # keeper) and the monitor, 8 health check (a clean crank cycle, a fill, the
 # mark lag, sane monitor metrics, the on-chain role table).
 #
-# Run dir launch-runs/<cluster>/ (LAUNCH_RUN_DIR overrides; gitignored):
+# Run dir launch-runs/<cluster>/ for sol-perp.toml, launch-runs/<config stem>-<cluster>/
+# for any other config (LAUNCH_RUN_DIR overrides; gitignored):
 # state.json (addresses, completed steps), keys/, handover/ (mainnet),
 # bots.log, monitor.log, pids/, timings.txt.
 # Local expects a running validator at the config's RPC (scripts/day0_drill.sh
@@ -212,6 +213,6 @@ if p50 > target:
 PY
   "$STAGING" roles "$CONFIG" "$CLUSTER" "$RUN_DIR"
 }
-timed "8 health" health || die "health check failed; bots left running (stop: $0 stop $CLUSTER)"
+timed "8 health" health || die "health check failed; bots left running (stop: LAUNCH_RUN_DIR=$RUN_DIR $0 stop $CLUSTER)"
 printf '%-16s %7ss\n' "total" "$(since "$T_START")" | tee -a "$RUN_DIR/timings.txt"
 echo "==> $STEM live on $CLUSTER: market $MARKET, monitor http://$LISTEN/ ; stop: LAUNCH_RUN_DIR=$RUN_DIR $0 stop $CLUSTER"

@@ -70,7 +70,8 @@ impl Row {
         if self.market_kind != "spot" || self.settlement_kind != "settled" || self.self_trade {
             return None;
         }
-        let gn = self.aggregate_gn.parse().ok().filter(|&g: &u128| g > 0)?;
+        // Bounded so the GN sums in `index` can't overflow.
+        let gn = self.aggregate_gn.parse().ok().filter(|&g: &u128| g > 0 && g <= u64::MAX as u128)?;
         let price = integer_part(&self.price_per_gflop).filter(|&p| p > 0)?;
         Some(Print { at_ms: self.settled_at, gn, planck_per_gflop: price })
     }
@@ -118,22 +119,33 @@ impl FlopIndex {
         if cfg.flop_max_age_s >= cfg.flop_window_s || cfg.flop_refresh_s < 5 {
             bail!("flop_max_age_s must be under flop_window_s, and flop_refresh_s at least 5");
         }
-        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build()?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
         let cached = Arc::new(Mutex::new(None));
         let (writer, o) = (Arc::clone(&cached), cfg.clone());
         std::thread::spawn(move || loop {
             let fetched = fetch(&client, &o).map_err(|e| format!("{e:#}"));
-            if let Err(e) = &fetched {
-                eprintln!("flop read failed: {e}");
+            let mut cache = writer.lock().unwrap_or_else(|p| p.into_inner());
+            match fetched {
+                // One failed read keeps the last good prints; `index` still
+                // ages them out after `flop_max_age_s`.
+                Err(e) if matches!(*cache, Some(Ok(_))) => eprintln!("flop read failed (keeping last read): {e}"),
+                Err(e) => {
+                    eprintln!("flop read failed: {e}");
+                    *cache = Some(Err(e));
+                }
+                Ok(prints) => *cache = Some(Ok(prints)),
             }
-            *writer.lock().unwrap() = Some(fetched);
+            drop(cache);
             std::thread::sleep(Duration::from_secs(o.flop_refresh_s));
         });
         Ok(Self { cfg: cfg.clone(), cached })
     }
 
     pub fn latest(&mut self) -> Result<(u64, u64)> {
-        match &*self.cached.lock().unwrap() {
+        match &*self.cached.lock().unwrap_or_else(|p| p.into_inner()) {
             None => bail!("flop index: no read yet"),
             Some(Ok(prints)) => index(prints, launch::now_ms(), &self.cfg),
             Some(Err(e)) => bail!("flop read failed: {e}"),
@@ -174,16 +186,24 @@ fn fetch(client: &reqwest::blocking::Client, o: &launch::OracleCfg) -> Result<Ve
     bail!("more than {} settlements in the window; raise MAX_PAGES", PAGE * MAX_PAGES)
 }
 
-/// The MCP reply is JSON or one server-sent event (its `data:` lines joined);
-/// the tool result is JSON text.
+/// The MCP reply is JSON or server-sent events; the first event carrying a
+/// `result` or `error` is the reply. The tool result is JSON text.
 fn parse_page(text: &str) -> Result<Page> {
-    let data: Vec<&str> = text
-        .lines()
-        .filter_map(|l| l.strip_prefix("data:"))
-        .map(|l| l.strip_prefix(' ').unwrap_or(l))
-        .collect();
-    let json = if data.is_empty() { text.to_string() } else { data.join("\n") };
-    let reply: serde_json::Value = serde_json::from_str(&json).context("flop: reply is not JSON")?;
+    let normalized = text.replace("\r\n", "\n");
+    let mut events = normalized.split("\n\n").filter_map(|event| {
+        let data: Vec<&str> = event
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(|l| l.strip_prefix(' ').unwrap_or(l))
+            .collect();
+        (!data.is_empty()).then(|| data.join("\n"))
+    });
+    let reply: serde_json::Value = match events
+        .find_map(|d| serde_json::from_str::<serde_json::Value>(&d).ok().filter(|v| v.get("result").is_some() || v.get("error").is_some()))
+    {
+        Some(v) => v,
+        None => serde_json::from_str(text).context("flop: reply is not JSON")?,
+    };
     if let Some(err) = reply.get("error") {
         bail!("flop: {err}");
     }
@@ -287,6 +307,7 @@ mod tests {
         assert!(row("spot", "settled", false, "0", "1").print().is_none(), "zero GN");
         assert!(row("spot", "settled", false, "16", "0.5").print().is_none(), "sub-planck price");
         assert!(row("spot", "settled", false, "x", "1").print().is_none(), "unparseable");
+        assert!(row("spot", "settled", false, "18446744073709551616", "1").print().is_none(), "GN over u64");
     }
 
     #[test]
@@ -296,6 +317,9 @@ mod tests {
         let sse = format!("event: message\ndata: {reply}\n\n");
         // `data:` with no space is valid SSE too.
         assert_eq!(parse_page(&format!("data:{reply}\n")).unwrap().data.len(), 1);
+        // A notification event before the reply is skipped.
+        let note = r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{}}"#;
+        assert_eq!(parse_page(&format!("data: {note}\n\ndata: {reply}\n\n")).unwrap().data.len(), 1);
         let page = parse_page(&sse).unwrap();
         assert_eq!(page.data.len(), 1);
         assert!(!page.pagination.has_more);
