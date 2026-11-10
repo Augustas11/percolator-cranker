@@ -29,7 +29,7 @@ use percolator_prog::ix::{CrankObservationHint, Instruction as ProgInstruction};
 use solana_client::{
     client_error::{ClientError, ClientErrorKind},
     rpc_client::RpcClient,
-    rpc_config::RpcTransactionConfig,
+    rpc_config::{RpcSendTransactionConfig, RpcTransactionConfig},
     rpc_request::{RpcError, RpcResponseErrorData},
 };
 use solana_transaction_status::{option_serializer::OptionSerializer, UiTransactionEncoding};
@@ -63,12 +63,84 @@ impl BlockhashCache {
     pub fn invalidate(&self) { *self.0.lock().unwrap() = None; }
 }
 
+/// One crank sender at a time in this process. A crank that lands after
+/// another one already did its work reverts on chain (EngineNonProgress) and
+/// still pays its fee. Gated senders hold this from a preflight at
+/// `processed` (which sees every earlier landed crank) through confirmation,
+/// so a crank gone stale fails preflight instead, for free. The keeper's send
+/// below holds it; the staging bots' sends and the pusher's accrual share it.
+/// Only senders in this process are covered.
+pub static SEND_GATE: std::sync::Mutex<SendGate> = std::sync::Mutex::new(SendGate { pending: None, last_send: None });
+
+/// How long a blocking holder waits for a pending send before relying on its
+/// own preflight (callers may hold other locks, e.g. the pusher's).
+pub const SEND_GATE_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// A pending send is forgotten after this even if its blockhash can't be
+/// checked (blockhashes expire in about 60-90 s).
+pub const SEND_GATE_PENDING_MAX: std::time::Duration = std::time::Duration::from_secs(120);
+
+pub struct SendGate {
+    /// Sent, outcome unknown: it may land until its blockhash expires.
+    pending: Option<(Signature, solana_sdk::hash::Hash, std::time::Instant)>,
+    /// When a holder last sent: a market read from before then can be stale.
+    pub last_send: Option<std::time::Instant>,
+}
+
+impl SendGate {
+    /// Keeps an older unsettled send: one slot, and the first may land first.
+    pub fn set_pending(&mut self, tx: &Transaction) {
+        if self.pending.is_none() {
+            self.pending = Some((tx.signatures[0], tx.message.recent_blockhash, std::time::Instant::now()));
+        }
+    }
+
+    /// One check: true when no earlier uncertain send can still land.
+    pub fn try_settle(&mut self, rpc: &RpcClient) -> bool {
+        let Some((sig, hash, at)) = self.pending else { return true };
+        let seen = matches!(rpc.get_signature_status_with_commitment(&sig, CommitmentConfig::processed()), Ok(Some(_)));
+        let expired = matches!(rpc.is_blockhash_valid(&hash, CommitmentConfig::processed()), Ok(false));
+        if seen || expired || at.elapsed() >= SEND_GATE_PENDING_MAX {
+            self.pending = None;
+            return true;
+        }
+        false
+    }
+}
+
+/// Take the gate, waiting up to SEND_GATE_MAX_WAIT for a pending send.
+pub fn hold_send_gate(rpc: &RpcClient) -> std::sync::MutexGuard<'static, SendGate> {
+    let mut gate = SEND_GATE.lock().unwrap_or_else(|p| p.into_inner());
+    let started = std::time::Instant::now();
+    while !gate.try_settle(rpc) && started.elapsed() < SEND_GATE_MAX_WAIT {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    gate
+}
+
+/// The tx may have landed (or may still): not a preflight rejection and not
+/// an on-chain failure.
+pub fn send_outcome_uncertain(e: &ClientError) -> bool {
+    !matches!(
+        e.kind(),
+        ClientErrorKind::TransactionError(_)
+            | ClientErrorKind::RpcError(RpcError::RpcResponseError {
+                data: RpcResponseErrorData::SendTransactionPreflightFailure(_),
+                ..
+            })
+    )
+}
+
 fn send_and_confirm(rpc: &RpcClient, tx: &Transaction) -> std::result::Result<Signature, Box<ClientError>> {
     send_and_confirm_with_timeout(rpc, tx, std::time::Duration::from_secs(60))
 }
 
 fn send_and_confirm_with_timeout(rpc: &RpcClient, tx: &Transaction, timeout: std::time::Duration) -> std::result::Result<Signature, Box<ClientError>> {
-    let signature = rpc.send_transaction(tx)?;
+    // Preflight at `processed`: under SEND_GATE it then sees every earlier
+    // landed crank; at `confirmed` it could miss one landed a slot ago.
+    let signature = rpc.send_transaction_with_config(tx, RpcSendTransactionConfig {
+        preflight_commitment: Some(CommitmentConfig::processed().commitment),
+        ..Default::default()
+    })?;
     let started = std::time::Instant::now();
     let poll = std::time::Duration::from_millis(std::env::var("CRANKER_CONFIRM_POLL_MS")
         .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(2000).max(1));
@@ -472,7 +544,16 @@ pub fn submit_crank_routed_cached(
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Err(DeadlineReached.into());
         }
-        match send_and_confirm(rpc, &tx) {
+        let mut gate = hold_send_gate(rpc);
+        // The gate wait counts against the admission deadline too.
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err(DeadlineReached.into());
+        }
+        let sent = send_and_confirm(rpc, &tx);
+        gate.last_send = Some(std::time::Instant::now());
+        if sent.as_ref().is_err_and(|e| send_outcome_uncertain(e)) { gate.set_pending(&tx); }
+        drop(gate);
+        match sent {
             Ok(signature) => {
                 // The tx LANDED. From here on, read failures must not turn it
                 // into a failure (that would strike a healthy account and drop
@@ -1152,5 +1233,25 @@ mod scrub_tests {
         let line = serde_json::json!({ "error": scrub_urls(r#"send "https://rpc.example.com/KEY" failed"#) }).to_string();
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert!(!v["error"].as_str().unwrap().contains("KEY"));
+    }
+}
+
+#[cfg(test)]
+mod send_gate_tests {
+    use super::*;
+
+    #[test]
+    fn send_gate_keeps_an_unseen_send_pending_until_the_cap() {
+        // Unreachable RPC: the pending send is never seen, its blockhash never checked.
+        let rpc = RpcClient::new("http://127.0.0.1:9".to_string());
+        let tx = Transaction { signatures: vec![Signature::default()], ..Default::default() };
+        let mut gate = SendGate { pending: None, last_send: None };
+        assert!(gate.try_settle(&rpc), "nothing pending");
+        gate.set_pending(&tx);
+        assert!(!gate.try_settle(&rpc), "an unseen send may still land");
+        let Some(old) = std::time::Instant::now().checked_sub(SEND_GATE_PENDING_MAX) else { return };
+        gate.pending = Some((Signature::default(), tx.message.recent_blockhash, old));
+        assert!(gate.try_settle(&rpc), "past the cap it counts as dropped");
+        assert!(gate.pending.is_none());
     }
 }

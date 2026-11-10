@@ -283,7 +283,21 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                 // The lifecycle lock still covers this send and confirmation.
                 let accrual_due = market_snapshot.is_some() || last_accrual_read.is_none_or(
                     |at| at.elapsed() >= Duration::from_millis(cfg.accrual_lag_slots.saturating_mul(400) / 2));
+                // Another sender holds the gate (its cranks accrue too): skip
+                // this round rather than stall pushes behind it.
+                let mut gate = match submit::SEND_GATE.try_lock() {
+                    Ok(g) => Some(g),
+                    Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+                    Err(std::sync::TryLockError::WouldBlock) => None,
+                };
+                let accrual_due = accrual_due && gate.as_mut().is_some_and(|g| g.try_settle(&rpc));
                 if accrual_due {
+                    let g = gate.as_mut().expect("gate held");
+                    // A read from before another sender's last send could
+                    // size too many cranks; the extra one would revert.
+                    let market_snapshot = market_snapshot.filter(|(_, _, read_at)| g.last_send.is_none_or(|at| *read_at > at));
+                    let sent = Arc::new(Mutex::new(None::<Transaction>));
+                    let accrual_sent = Arc::clone(&sent);
                     last_accrual_read = Some(Instant::now());
                     let client = Arc::clone(accrual_rpc.get_inner_client());
                     let accrual_payer = payer.insecure_clone();
@@ -330,7 +344,7 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                             for _ in 0..cranks { ixs.push(crank.clone()); }
                             if Instant::now() >= deadline { bail!("accrual deadline before send"); }
                             let tx = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &[&payer], hash);
-                            let result = send_accrual(&client, &tx, deadline, cfg.confirm_poll_ms).await;
+                            let result = send_accrual(&client, &tx, deadline, cfg.confirm_poll_ms, &accrual_sent).await;
                             if result.as_ref().err().is_some_and(|e| e.to_string().contains("Blockhash not found")) {
                                 *accrual_blockhash.lock().unwrap() = None;
                             }
@@ -343,9 +357,16 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                         }
                         Ok(Some(format!("ok({cranks} cranks)")))
                     });
+                    g.last_send = Some(Instant::now());
+                    // Cut short after sending: it may still land, so the
+                    // next holder waits for it first.
+                    if accrual.is_err() {
+                        if let Some(tx) = sent.lock().unwrap().take() { g.set_pending(&tx); }
+                    }
                     let outcome = state.lock().unwrap().accrual.record(accrual);
                     if outcome != "-" { println!("accrual={outcome}"); }
                 }
+                drop(gate);
 
                 let now = launch::now_ms();
                 if now.saturating_sub(stats_at) >= 60_000 {
@@ -396,8 +417,10 @@ fn push_instructions(cfg: &launch::OracleCfg, push: Instruction, matcher: Pubkey
     ixs
 }
 
-async fn send_accrual(rpc: &solana_client::nonblocking::rpc_client::RpcClient, tx: &Transaction, deadline: Instant, confirm_poll_ms: u64) -> Result<()> {
+async fn send_accrual(rpc: &solana_client::nonblocking::rpc_client::RpcClient, tx: &Transaction, deadline: Instant, confirm_poll_ms: u64, sent: &Mutex<Option<Transaction>>) -> Result<()> {
     let sig = rpc.send_transaction_with_config(tx, RpcSendTransactionConfig { skip_preflight: true, ..Default::default() }).await?;
+    // Only once the RPC took it: it can land from here on.
+    *sent.lock().unwrap() = Some(tx.clone());
     while Instant::now() < deadline {
         if let Some(status) = rpc.get_signature_status_with_commitment(&sig, CommitmentConfig::processed()).await? {
             status?;
