@@ -122,8 +122,10 @@ impl FlopIndex {
         if cfg.flop_max_age_s >= cfg.flop_window_s || cfg.flop_refresh_s < 5 {
             bail!("flop_max_age_s must be under flop_window_s, and flop_refresh_s at least 5");
         }
+        // A 100-row page took 3-7 s from Pearl on 2026-11-10; 5 s failed every read.
         let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let cached: Cache = Arc::new(Mutex::new(None));
