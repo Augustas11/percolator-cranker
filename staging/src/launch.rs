@@ -665,7 +665,9 @@ fn run_step(st: &mut Staging, state: &mut State, run: &Path, cluster: &str, name
         // Allow websocket subscriptions (or the FLOP reader's first fetch) to
         // produce the first price; never
         // substitute the mock price when the live source is unavailable.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        // FLOP's first read pages through hours of settlements at 3-7 s a page.
+        let wait = if st.flop.is_some() { 120 } else { 15 };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
         loop {
             match st.source_price(0) {
                 Ok((price, _)) => { st.mark = price; break; },
