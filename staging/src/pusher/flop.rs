@@ -16,10 +16,13 @@ use std::sync::{Arc, Mutex};
 
 /// A reader thread refetches every `flop_refresh_s`; `latest()` only reads its
 /// cache, so the pusher never waits on FLOP while holding the trade lock.
+/// The reader thread's latest result: `None` until its first fetch.
+type Cache = Arc<Mutex<Option<Result<Vec<Print>, String>>>>;
+
 #[derive(Clone)]
 pub struct FlopIndex {
     cfg: launch::OracleCfg,
-    cached: Arc<Mutex<Option<Result<Vec<Print>, String>>>>,
+    cached: Cache,
 }
 
 /// One settlement as the index uses it.
@@ -123,7 +126,7 @@ impl FlopIndex {
             .timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        let cached = Arc::new(Mutex::new(None));
+        let cached: Cache = Arc::new(Mutex::new(None));
         let (writer, o) = (Arc::clone(&cached), cfg.clone());
         std::thread::spawn(move || loop {
             let fetched = fetch(&client, &o).map_err(|e| format!("{e:#}"));
