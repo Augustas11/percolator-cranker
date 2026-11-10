@@ -175,6 +175,7 @@ struct Staging {
     /// Live source configuration; neither set means the seeded local mock.
     pyth_feed: Option<[u8; 32]>,
     exchanges: Option<pusher::Exchanges>,
+    flop: Option<pusher::FlopIndex>,
     /// Bots mode: also print drip-format crank lines and `mark_lag` events,
     /// which the monitor reads from this log.
     keeper_log: bool,
@@ -361,6 +362,7 @@ impl Staging {
             admin,
             pyth_feed: None,
             exchanges: None,
+            flop: None,
             keeper_log: false,
             mint,
             own_mint,
@@ -513,6 +515,7 @@ impl Staging {
     /// +-5% of the configured initial price, timestamped when generated.
     fn source_price(&mut self, max_bps: u64) -> Result<(u64, u64)> {
         if let Some(source) = &mut self.exchanges { return source.latest().map(|r| (r.price, r.publish_time_ms)); }
+        if let Some(source) = &mut self.flop { return source.latest(); }
         let mut source = match self.pyth_feed {
             Some(feed) => pusher::PriceSource::Pyth {
                 rpc: RpcClient::new_with_commitment(launch::pyth_rpc_url(&self.cfg.oracle, &self.rpc.url()), CommitmentConfig::confirmed()),
