@@ -238,7 +238,18 @@ impl Staging {
     }
 
     fn send_sig(&self, ixs: &[Instruction], signers: &[&Keypair]) -> Result<Signature> {
-        let sig = self.rpc.send_and_confirm_transaction(&self.tx(ixs, signers)?).inspect_err(|e| {
+        let tx = self.tx(ixs, signers)?;
+        // Preflight through confirmation under the gate: a crank in this tx
+        // that went stale fails preflight (no fee) instead of on chain.
+        let mut gate = submit::hold_send_gate(&self.rpc);
+        let sent = self.rpc.send_and_confirm_transaction_with_spinner_and_config(
+            &tx, self.rpc.commitment(),
+            RpcSendTransactionConfig { preflight_commitment: Some(CommitmentConfig::processed().commitment), ..Default::default() },
+        );
+        gate.last_send = Some(Instant::now());
+        if sent.as_ref().is_err_and(submit::send_outcome_uncertain) { gate.set_pending(&tx); }
+        drop(gate);
+        let sig = sent.inspect_err(|e| {
             if e.to_string().contains("Blockhash not found") { self.blockhash.invalidate(); }
         })?;
         self.last_sig.set(Some(sig));
