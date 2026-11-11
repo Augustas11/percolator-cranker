@@ -21,7 +21,7 @@
 //! gateway prices.
 
 use super::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -37,6 +37,8 @@ pub struct FlopIndex {
     cfg: launch::OracleCfg,
     cached: Cache,
     or: OrCache,
+    /// What the last `latest()` mark was made from, for the signed push log.
+    last_inputs: Option<serde_json::Value>,
 }
 
 /// One settlement as the index uses it.
@@ -200,7 +202,10 @@ pub fn flop_side(prints: &[Print], now_ms: u64, o: &launch::OracleCfg) -> Result
 
 /// The `flop_standin` mark at `now_ms`: (mark_e6, newest print time).
 pub fn index(prints: &[Print], now_ms: u64, o: &launch::OracleCfg) -> Result<(u64, u64)> {
-    let side = flop_side(prints, now_ms, o)?;
+    index_from(&flop_side(prints, now_ms, o)?, o)
+}
+
+fn index_from(side: &FlopSide, o: &launch::OracleCfg) -> Result<(u64, u64)> {
     // USD e6 per 1M tokens = planck/G_n / 1e18 x G_n per 1M tokens x FLOP/USD x 1e6.
     let mark = (side.planck_per_gn as f64 / 1e12 * o.flop_gn_per_mtok as f64 * o.flop_usd_standin()).round();
     if !(mark >= 1.0 && mark < u64::MAX as f64) {
@@ -210,7 +215,7 @@ pub fn index(prints: &[Print], now_ms: u64, o: &launch::OracleCfg) -> Result<(u6
 }
 
 /// One OpenRouter endpoint for the benchmark model, prices in USD per token.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrEndpoint {
     pub provider: String,
     pub quantization: String,
@@ -227,21 +232,27 @@ pub struct OrQuote {
     pub used: Vec<(String, String, f64)>,
     /// Which set was used: a quantization tier, "preferred" (all tiers) or "all".
     pub set: String,
+    /// Every priced endpoint fetched, so the push log can be recomputed.
+    pub endpoints: Vec<OrEndpoint>,
 }
 
 /// Pick endpoints: the first quantization tier with at least `or_min_endpoints`;
 /// else all listed tiers together if that reaches it; else every endpoint.
 /// Each endpoint's price is its input:output blend; the quote is the median.
 pub fn or_quote(endpoints: &[OrEndpoint], at_ms: u64, o: &launch::OracleCfg) -> Result<OrQuote> {
+    or_quote_with(endpoints, at_ms, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints)
+}
+
+fn or_quote_with(endpoints: &[OrEndpoint], at_ms: u64, blend: f64, quantizations: &[String], min_endpoints: usize) -> Result<OrQuote> {
     let valid: Vec<&OrEndpoint> = endpoints
         .iter()
         .filter(|e| e.prompt.is_finite() && e.completion.is_finite() && e.prompt >= 0.0 && e.completion >= 0.0 && e.prompt + e.completion > 0.0)
         .collect();
     let tier = |qs: &[String]| valid.iter().copied().filter(|e| qs.iter().any(|q| q == &e.quantization)).collect::<Vec<_>>();
     let mut chosen = None;
-    for q in &o.or_quantizations {
+    for q in quantizations {
         let m = tier(std::slice::from_ref(q));
-        if m.len() >= o.or_min_endpoints {
+        if m.len() >= min_endpoints {
             chosen = Some((m, q.clone()));
             break;
         }
@@ -249,14 +260,14 @@ pub fn or_quote(endpoints: &[OrEndpoint], at_ms: u64, o: &launch::OracleCfg) -> 
     let (set, name) = match chosen {
         Some(c) => c,
         None => {
-            let m = tier(&o.or_quantizations);
-            if m.len() >= o.or_min_endpoints { (m, "preferred".to_owned()) } else { (valid.clone(), "all".to_owned()) }
+            let m = tier(quantizations);
+            if m.len() >= min_endpoints { (m, "preferred".to_owned()) } else { (valid.clone(), "all".to_owned()) }
         }
     };
     if set.is_empty() {
         bail!("openrouter: no priced endpoints");
     }
-    let b = o.flop_blend_in_out;
+    let b = blend;
     let mut used: Vec<(String, String, f64)> = set
         .iter()
         .map(|e| (e.provider.clone(), e.quantization.clone(), (b * e.prompt + e.completion) / (b + 1.0) * 1e6))
@@ -268,7 +279,8 @@ pub fn or_quote(endpoints: &[OrEndpoint], at_ms: u64, o: &launch::OracleCfg) -> 
     if !(usd_e6 >= 1.0 && usd_e6 < u64::MAX as f64) {
         bail!("openrouter: median {median} USD per 1M tokens out of range");
     }
-    Ok(OrQuote { usd_e6: usd_e6 as u64, at_ms, used, set: name })
+    let endpoints = valid.into_iter().cloned().collect();
+    Ok(OrQuote { usd_e6: usd_e6 as u64, at_ms, used, set: name, endpoints })
 }
 
 #[derive(Deserialize)]
@@ -455,19 +467,49 @@ impl FlopIndex {
             drop(cache);
             std::thread::sleep(Duration::from_secs(o.flop_refresh_s));
         });
-        Ok(Self { cfg: cfg.clone(), cached, or })
+        Ok(Self { cfg: cfg.clone(), cached, or, last_inputs: None })
     }
 
     pub fn latest(&mut self) -> Result<(u64, u64)> {
-        if self.cfg.flop_mark_source == "openrouter" {
+        self.last_inputs = None;
+        let now = launch::now_ms();
+        let side = match &*self.cached.lock().unwrap_or_else(|p| p.into_inner()) {
+            None => Err(anyhow!("flop index: no read yet")),
+            Some(Ok(prints)) => flop_side(prints, now, &self.cfg),
+            Some(Err(e)) => Err(anyhow!("flop read failed: {e}")),
+        };
+        let side_json = match &side {
+            Ok(s) => serde_json::json!({
+                "flop_per_gn": s.flop_per_gn(), "prints": s.prints, "buyers": s.agents, "miners": s.miners,
+                "newest_ms": s.newest_ms, "capped_buyers": s.capped_agents, "capped_miners": s.capped_miners,
+            }),
+            Err(e) => serde_json::json!({ "stale": e.to_string() }),
+        };
+        let o = &self.cfg;
+        let (mark, inputs) = if o.flop_mark_source == "openrouter" {
             let q = self.or.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            return or_mark(q.as_ref(), launch::now_ms(), &self.cfg);
-        }
-        match &*self.cached.lock().unwrap_or_else(|p| p.into_inner()) {
-            None => bail!("flop index: no read yet"),
-            Some(Ok(prints)) => index(prints, launch::now_ms(), &self.cfg),
-            Some(Err(e)) => bail!("flop read failed: {e}"),
-        }
+            let mark = or_mark(q.as_ref(), now, o)?;
+            let q = q.expect("or_mark checked");
+            (mark, serde_json::json!({
+                "source": "openrouter", "url": o.or_url, "fetched_ms": q.at_ms, "set": q.set,
+                "blend_in_out": o.flop_blend_in_out, "quantizations": o.or_quantizations,
+                "min_endpoints": o.or_min_endpoints, "endpoints": q.endpoints, "flop_side": side_json,
+            }))
+        } else {
+            let side = side?;
+            let mark = index_from(&side, o)?;
+            (mark, serde_json::json!({
+                "source": "flop_standin", "gn_per_mtok": o.flop_gn_per_mtok,
+                "flop_usd_standin": o.flop_usd_standin(), "flop_side": side_json,
+            }))
+        };
+        self.last_inputs = Some(inputs);
+        Ok(mark)
+    }
+
+    /// What the last `latest()` mark was made from (None after an error).
+    pub fn last_inputs(&self) -> Option<&serde_json::Value> {
+        self.last_inputs.as_ref()
     }
 }
 
@@ -590,6 +632,78 @@ fn tool_text(text: &str) -> Result<String> {
         bail!("flop: {inner}");
     }
     Ok(inner.to_owned())
+}
+
+const SIG_KEY: &str = ",\"signature\":\"";
+
+/// One signed push-log line: what was pushed, from what, signed by the oracle
+/// authority. The signature covers the exact bytes of the line before
+/// `,"signature":"..."` plus the closing `}` (re-serializing parsed JSON need
+/// not reproduce float text, so the bytes are what is signed).
+pub fn signed_push(oracle: &Keypair, fields: serde_json::Value) -> Result<String> {
+    let mut rec = fields;
+    let obj = rec.as_object_mut().context("push record must be an object")?;
+    obj.insert("event".into(), "flop_push".into());
+    obj.insert("oracle".into(), oracle.pubkey().to_string().into());
+    obj.remove("signature");
+    let payload = serde_json::to_string(&rec)?;
+    let sig = oracle.sign_message(payload.as_bytes());
+    Ok(format!("{}{SIG_KEY}{sig}\"}}", &payload[..payload.len() - 1]))
+}
+
+/// Check one push-log line: the signature, the signer (when `oracle` is
+/// given), and for an OpenRouter mark that the logged endpoints give it.
+pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
+    let line = line.trim_end();
+    let at = line.rfind(SIG_KEY).context("no signature")?;
+    let sig: Signature = line[at + SIG_KEY.len()..].strip_suffix("\"}").context("signature must end the line")?.parse()?;
+    let payload = format!("{}}}", &line[..at]);
+    let rec: serde_json::Value = serde_json::from_str(&payload).context("not JSON")?;
+    let signer: Pubkey = rec["oracle"].as_str().context("no oracle")?.parse()?;
+    if oracle.is_some_and(|o| *o != signer) {
+        bail!("signed by {signer}, not the expected oracle");
+    }
+    if !sig.verify(signer.as_ref(), payload.as_bytes()) {
+        bail!("bad signature");
+    }
+    let mark = rec["mark_e6"].as_u64().context("no mark_e6")?;
+    let inputs = &rec["inputs"];
+    if inputs["source"] == "openrouter" {
+        let blend = inputs["blend_in_out"].as_f64().context("blend_in_out")?;
+        let quants: Vec<String> = serde_json::from_value(inputs["quantizations"].clone())?;
+        let min: usize = serde_json::from_value(inputs["min_endpoints"].clone())?;
+        let eps: Vec<OrEndpoint> = serde_json::from_value(inputs["endpoints"].clone())?;
+        let q = or_quote_with(&eps, 0, blend, &quants, min)?;
+        if q.usd_e6 != mark {
+            bail!("logged endpoints give {} but {mark} was pushed", q.usd_e6);
+        }
+    }
+    Ok(mark)
+}
+
+/// `staging verify-push-log <bots.log> [oracle pubkey]`
+pub fn verify_log(args: &[String]) -> Result<()> {
+    let path = args.first().context("usage: staging verify-push-log <bots.log> [oracle pubkey]")?;
+    let oracle = args.get(1).map(|s| s.parse::<Pubkey>()).transpose()?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+    let (mut ok, mut bad) = (0, 0);
+    for (n, line) in text.lines().enumerate() {
+        if !line.starts_with("{\"event\":\"flop_push\"") && !line.contains("\"event\":\"flop_push\"") {
+            continue;
+        }
+        match verify_push(line, oracle.as_ref()) {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                bad += 1;
+                println!("line {}: {e:#}", n + 1);
+            }
+        }
+    }
+    println!("{ok} pushes verified, {bad} failed");
+    if bad > 0 || ok == 0 {
+        bail!("push log did not verify");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -841,7 +955,7 @@ mod tests {
     fn openrouter_goes_stale_without_a_good_fetch() {
         let o = cfg();
         assert!(or_mark(None, NOW, &o).is_err());
-        let q = OrQuote { usd_e6: 439_844, at_ms: NOW - o.or_max_age_s * 1000, used: vec![], set: "bf16".into() };
+        let q = OrQuote { usd_e6: 439_844, at_ms: NOW - o.or_max_age_s * 1000, used: vec![], set: "bf16".into(), endpoints: vec![] };
         assert_eq!(or_mark(Some(&q), NOW, &o).unwrap(), (439_844, q.at_ms));
         let e = or_mark(Some(&q), NOW + 1000, &o).unwrap_err();
         assert!(e.to_string().contains("stale"), "{e}");
@@ -862,11 +976,34 @@ mod tests {
     #[test]
     fn status_logs_the_flop_implied_rate() {
         let o = cfg();
-        let q = OrQuote { usd_e6: 257_813, at_ms: NOW, used: vec![("DeepInfra".into(), "bf16".into(), 0.2578)], set: "bf16".into() };
+        let q = OrQuote { usd_e6: 257_813, at_ms: NOW, used: vec![("DeepInfra".into(), "bf16".into(), 0.2578)], set: "bf16".into(), endpoints: vec![] };
         let side = flop_side(&many(o.flop_min_prints, P3), NOW, &o);
         let s = status(Some(&q), &side, &o);
         // At the anchor price the implied rate equals the stand-in.
         assert!(s.contains("FLOP-implied FLOP/USD 0.000001652"), "{s}");
         assert!(s.contains("5 buyers, 7 miners"), "{s}");
+    }
+
+    #[test]
+    fn signed_push_log_verifies_and_catches_tampering() {
+        let o = cfg();
+        let eps = vec![ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.40, 3.95), ep("Cerebras", "fp16", 0.85, 3.6)];
+        let q = or_quote(&eps, NOW, &o).unwrap();
+        let oracle = Keypair::new();
+        let inputs = serde_json::json!({
+            "source": "openrouter", "set": q.set, "blend_in_out": o.flop_blend_in_out,
+            "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "endpoints": q.endpoints,
+        });
+        let line = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "slot": 7, "inputs": inputs})).unwrap();
+        assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), q.usd_e6);
+        // Wrong expected signer.
+        assert!(verify_push(&line, Some(&Keypair::new().pubkey())).is_err());
+        // An edited mark breaks the signature.
+        let forged = line.replace(&format!("\"mark_e6\":{}", q.usd_e6), "\"mark_e6\":500000");
+        assert_ne!(forged, line);
+        assert!(verify_push(&forged, None).unwrap_err().to_string().contains("bad signature"));
+        // A correctly signed mark that its own inputs don't give is caught too.
+        let wrong = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6 + 5000, "inputs": serde_json::from_str::<serde_json::Value>(&line).unwrap()["inputs"].clone()})).unwrap();
+        assert!(verify_push(&wrong, None).unwrap_err().to_string().contains("was pushed"));
     }
 }

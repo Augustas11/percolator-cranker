@@ -148,7 +148,7 @@ max_fill_notional_usd = 100000
 # $1M daily volume. No on-chain OI cap at this pin: this IS the OI cap.
 # Keep the engine refusal when AuthMark target != effective mark.
 max_lp_inventory_usd = 100000
-size_q = 1000000000               # 1,000 x 1M tokens (~258 test dollars)
+size_q = 1000000000               # 1,000 x 1M tokens (~440 test dollars)
 spread_bps = 10
 fee_bps = 15                     # >= trade_fee_base_bps (the wrapper refuses less)
 
