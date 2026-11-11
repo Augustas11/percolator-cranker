@@ -32,11 +32,13 @@ down, because miners reprice to stay competitive in dollars.
 
 - `openrouter`, the live USD leg. Every 5 minutes the bots read OpenRouter's
   public endpoints list for qwen/qwen3.8-27b. Each endpoint's price is its
-  15:1 input:output blend (`flop_blend_in_out`); the mark is the median across
-  endpoints. Endpoints are picked by quantization: bf16 if at least 2 serve it,
-  else fp16, else bf16 and fp16 together, else every endpoint. No successful
-  fetch for 30 minutes is stale: no pushes, the on-chain mark ages. On
-  2026-11-11 the bf16 pair (DeepInfra $0.2578, GMICloud $0.6219) gave $0.44.
+  15:1 input:output blend (`flop_blend_in_out`); the mark is their average
+  weighted by 1/price², as OpenRouter's default routing spreads load
+  (SPEC.md says why). Only up endpoints count. Endpoints are picked by
+  quantization: bf16 if at least 2 serve it, else fp16, else bf16 and fp16
+  together, else every endpoint. No successful fetch for 30 minutes is stale:
+  no pushes, the on-chain mark ages. On 2026-11-11 the bf16 pair (DeepInfra
+  $0.2578, GMICloud $0.6219) gives $0.311.
 - `flop_standin`: `(FLOP per G_n) x 52e6 G_n per 1M tokens (52 GF/token) x
   FLOP/USD`, with FLOP/USD a configured stand-in (below). Kept for when a live
   FLOP/USD feed exists.
@@ -148,7 +150,7 @@ Two more caveats come from FLOP's own repos:
   mark is OpenRouter's live USD price; the FLOP side runs as a check.
 - 2x leverage (50% initial, 25% maintenance), because the index is thin and
   gappy. The mark may move 20 bps per slot, so a 40% jump (a provider leaving
-  the median) is followed in about 200 slots (~90 s).
+  the set) is followed in about 200 slots (~90 s).
 - The permissionless asset-init fee stays 0, as on SOL-PERP.
 - Trades: the bots' off-chain matcher co-signs bilateral trades between the
   run's LP and test-trader wallets, as a small market maker (SPEC.md). There

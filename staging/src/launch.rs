@@ -184,6 +184,10 @@ pub struct OracleCfg {
     /// No successful OpenRouter fetch for this long is stale.
     #[serde(default = "default_or_max_age_s")]
     pub or_max_age_s: u64,
+    /// How endpoints combine: "inverse_square" (1/price^2 weights, as
+    /// OpenRouter's default routing) or "median".
+    #[serde(default = "default_or_weighting")]
+    pub or_weighting: String,
 }
 
 impl OracleCfg {
@@ -230,6 +234,7 @@ fn default_or_quantizations() -> Vec<String> { vec!["bf16".into(), "fp16".into()
 fn default_or_min_endpoints() -> usize { 2 }
 fn default_or_refresh_s() -> u64 { 300 }
 fn default_or_max_age_s() -> u64 { 1800 }
+fn default_or_weighting() -> String { "inverse_square".into() }
 
 /// InitMarket, field for field (`initial_price` is the mock start). TOML
 /// integers are i64, so u128 fields are read as u64.

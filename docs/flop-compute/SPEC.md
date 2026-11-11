@@ -19,14 +19,21 @@ contract (`size_q` = 1e6) is 1M benchmark tokens.
 
 | Leg | Source | Refresh | Stale when |
 |---|---|---|---|
-| Mark (`openrouter`) | OpenRouter endpoints list for qwen/qwen3.8-27b: median of each endpoint's 15:1 blend | 5 min | no successful fetch for 30 min |
+| Mark (`openrouter`) | OpenRouter endpoints list for qwen/qwen3.8-27b: each up endpoint's 15:1 blend, weighted 1/price² | 5 min | no successful fetch for 30 min |
 | FLOP side (check; mark under `flop_standin`) | FLOP Network spot settlements, all models, 6 h window, GN-weighted median of escrow / aggregateGn | 60 s | < 20 prints, < 3 miners, < 3 buyers, or newest print > 30 min old |
 
-**Two-endpoint caveat.** On 2026-11-11 only two endpoints serve bf16
-(DeepInfra $0.2578, GMICloud $0.6219), so the median is their average, $0.44
-(owner decision: keep it). Either provider repricing moves the mark, by half
-its own change; one of them leaving drops the mark to the fp16 tier or to all
-endpoints.
+**How endpoints combine** (`or_weighting = inverse_square`, owner decision
+2026-11-11). Each up endpoint (OpenRouter status 0) has a blended price
+`b = (15 x prompt + completion) / 16` per 1M tokens and weight `w = 1 / b²`;
+the mark is `sum(w x b) / sum(w)`. That mirrors OpenRouter's default routing,
+which spreads requests over stable providers by inverse square price. List
+prices carry no volume, so a plain median gives a little-used expensive
+provider the same say as the cheap one buyers actually route to; the weighting
+puts the mark where buyers' money goes, like an oil benchmark priced where the
+marginal barrel trades rather than the average of advertised offers. On
+2026-11-11 the bf16 pair (DeepInfra $0.2578, GMICloud $0.6219) gives $0.311.
+One endpoint alone is its own price; a new expensive endpoint barely moves the
+mark (a $5 one would add ~3%). `or_weighting = median` keeps the old method.
 
 **Fallbacks, in order, for the OpenRouter leg:** bf16 endpoints if at least
 2; else fp16 if at least 2; else bf16 and fp16 together if at least 2; else
@@ -77,7 +84,7 @@ oracle authority on chain, and a line's `sig` with the transaction on chain.
 |---|---|---|
 | Initial margin | 50% (2x) | Thin, gappy index; wider than the 20% floor asked for |
 | Maintenance margin | 25% | |
-| `max_price_move_bps_per_slot` | 20 | The mark walks to a new value; a 40% jump (a provider leaving the median) takes ~200 slots, ~90 s |
+| `max_price_move_bps_per_slot` | 20 | The mark walks to a new value; a 40% jump (a provider leaving the set) takes ~200 slots, ~90 s |
 | `max_accrual_dt_slots` | 64 | Loss budget 20 x 64 = 12.8% plus funding < 25% maintenance, as the engine's solvency check wants |
 | `max_abs_funding_e9_per_slot` | 10,000 | Engine maximum |
 
@@ -105,7 +112,7 @@ constants. The bots' own LP inventory limit (`max_lp_inventory_usd`) is the cap.
 The bots' LP trades against a test trader every few minutes, as a minimal
 market maker:
 
-- Small: 100 x 1M tokens a fill (~$44), at most $100 a fill and $500 of LP
+- Small: 100 x 1M tokens a fill (~$31), at most $100 a fill and $500 of LP
   inventory.
 - Pulls quotes when stale: no opens or closes while the mark is older than
   30 minutes.
@@ -126,10 +133,16 @@ old market is resolved and a new market lists in the new unit, with the
 conversion `new mark = old mark x gflopsPerToken_new / 52` published at the
 switch.
 
+## Long-term direction (nothing built yet)
+
+Move weight to FLOP's own settled prices as independent buyers appear there.
+Once the perp has its own order flow, the index anchors funding and the
+perp's bids and asks set the price.
+
 ## What this is not
 
 - Not a product. Devnet only; no real money; no mainnet market.
 - Not audited, and not an offer to trade anything.
 - Not FLOP Network's or OpenRouter's product; neither endorses it. They are
   price sources read through their public endpoints.
-- Not a price for any one provider: the mark is a median across endpoints.
+- Not a price for any one provider: the mark is a weighted average across endpoints.

@@ -221,9 +221,12 @@ pub struct OrEndpoint {
     pub quantization: String,
     pub prompt: f64,
     pub completion: f64,
+    /// OpenRouter's endpoint status: 0 is up. Only up endpoints count.
+    #[serde(default)]
+    pub status: i64,
 }
 
-/// The live USD leg: median blended price and the endpoints behind it.
+/// The live USD leg: the combined blended price and the endpoints behind it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OrQuote {
     pub usd_e6: u64,
@@ -240,14 +243,37 @@ pub struct OrQuote {
 /// else all listed tiers together if that reaches it; else every endpoint.
 /// Each endpoint's price is its input:output blend; the quote is the median.
 pub fn or_quote(endpoints: &[OrEndpoint], at_ms: u64, o: &launch::OracleCfg) -> Result<OrQuote> {
-    or_quote_with(endpoints, at_ms, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints)
+    or_quote_with(endpoints, at_ms, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints, &o.or_weighting)
 }
 
-fn or_quote_with(endpoints: &[OrEndpoint], at_ms: u64, blend: f64, quantizations: &[String], min_endpoints: usize) -> Result<OrQuote> {
-    let valid: Vec<&OrEndpoint> = endpoints
-        .iter()
-        .filter(|e| e.prompt.is_finite() && e.completion.is_finite() && e.prompt >= 0.0 && e.completion >= 0.0 && e.prompt + e.completion > 0.0)
-        .collect();
+/// Combine blended prices (USD per 1M tokens, each > 0).
+/// `inverse_square`: weights 1/b^2, as OpenRouter's default routing spreads
+/// load, so the mark sits where buyers' money goes: sum(1/b) / sum(1/b^2).
+/// `median`: the plain median (mean of the middle two for an even count).
+pub fn combine(prices: &[f64], weighting: &str) -> Result<f64> {
+    if prices.is_empty() || prices.iter().any(|b| !(b.is_finite() && *b > 0.0)) {
+        bail!("openrouter: no positive prices to combine");
+    }
+    match weighting {
+        "inverse_square" => {
+            let (num, den) = prices.iter().fold((0.0, 0.0), |(n, d), b| (n + 1.0 / b, d + 1.0 / (b * b)));
+            Ok(num / den)
+        }
+        "median" => {
+            let mut v = prices.to_vec();
+            v.sort_by(f64::total_cmp);
+            let n = v.len();
+            Ok(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
+        }
+        other => bail!("or_weighting must be inverse_square or median, not {other:?}"),
+    }
+}
+
+fn or_quote_with(
+    endpoints: &[OrEndpoint], at_ms: u64, blend: f64, quantizations: &[String], min_endpoints: usize, weighting: &str,
+) -> Result<OrQuote> {
+    let priced = |e: &&OrEndpoint| e.prompt.is_finite() && e.completion.is_finite() && e.prompt >= 0.0 && e.completion >= 0.0 && e.prompt + e.completion > 0.0;
+    let valid: Vec<&OrEndpoint> = endpoints.iter().filter(priced).filter(|e| e.status == 0).collect();
     let tier = |qs: &[String]| valid.iter().copied().filter(|e| qs.iter().any(|q| q == &e.quantization)).collect::<Vec<_>>();
     let mut chosen = None;
     for q in quantizations {
@@ -273,13 +299,14 @@ fn or_quote_with(endpoints: &[OrEndpoint], at_ms: u64, blend: f64, quantizations
         .map(|e| (e.provider.clone(), e.quantization.clone(), (b * e.prompt + e.completion) / (b + 1.0) * 1e6))
         .collect();
     used.sort_by(|x, y| x.2.total_cmp(&y.2));
-    let n = used.len();
-    let median = if n % 2 == 1 { used[n / 2].2 } else { (used[n / 2 - 1].2 + used[n / 2].2) / 2.0 };
-    let usd_e6 = (median * 1e6).round();
+    let prices: Vec<f64> = used.iter().map(|u| u.2).collect();
+    let price = combine(&prices, weighting)?;
+    let usd_e6 = (price * 1e6).round();
     if !(usd_e6 >= 1.0 && usd_e6 < u64::MAX as f64) {
-        bail!("openrouter: median {median} USD per 1M tokens out of range");
+        bail!("openrouter: {weighting} {price} USD per 1M tokens out of range");
     }
-    let endpoints = valid.into_iter().cloned().collect();
+    // Every priced endpoint, down ones included, so the log can be recomputed.
+    let endpoints = endpoints.iter().filter(priced).cloned().collect();
     Ok(OrQuote { usd_e6: usd_e6 as u64, at_ms, used, set: name, endpoints })
 }
 
@@ -297,6 +324,9 @@ struct OrRow {
     #[serde(default)]
     quantization: Option<String>,
     pricing: OrPricing,
+    /// 0 is up; missing counts as up.
+    #[serde(default)]
+    status: Option<i64>,
 }
 #[derive(Deserialize)]
 struct OrPricing {
@@ -316,6 +346,7 @@ fn parse_or(text: &str) -> Result<Vec<OrEndpoint>> {
                 quantization: r.quantization.unwrap_or_else(|| "unknown".into()),
                 prompt: r.pricing.prompt.parse().ok()?,
                 completion: r.pricing.completion.parse().ok()?,
+                status: r.status.unwrap_or(0),
             })
         })
         .collect())
@@ -342,7 +373,7 @@ pub fn status(or: Option<&OrQuote>, side: &Result<FlopSide>, o: &launch::OracleC
     match or {
         Some(q) => {
             let legs: Vec<String> = q.used.iter().map(|(p, qn, usd)| format!("{p} {qn} ${usd:.4}")).collect();
-            t.push_str(&format!("; openrouter ${:.4} ({} set: {})", q.usd_e6 as f64 / 1e6, q.set, legs.join(", ")));
+            t.push_str(&format!("; openrouter ${:.4} ({} {} set: {})", q.usd_e6 as f64 / 1e6, o.or_weighting, q.set, legs.join(", ")));
         }
         None => t.push_str("; openrouter none"),
     }
@@ -390,6 +421,7 @@ impl FlopIndex {
         }
         match cfg.flop_mark_source.as_str() {
             "openrouter" => {
+                combine(&[1.0], &cfg.or_weighting)?;
                 if !cfg.or_url.starts_with("https://") || cfg.or_min_endpoints == 0 || cfg.or_refresh_s < 60
                     || cfg.or_max_age_s < cfg.or_refresh_s
                 {
@@ -495,7 +527,8 @@ impl FlopIndex {
             (mark, serde_json::json!({
                 "source": "openrouter", "url": o.or_url, "fetched_ms": q.at_ms, "set": q.set,
                 "blend_in_out": o.flop_blend_in_out, "quantizations": o.or_quantizations,
-                "min_endpoints": o.or_min_endpoints, "endpoints": q.endpoints, "flop_side": side_json,
+                "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
+                "endpoints": q.endpoints, "flop_side": side_json,
             }))
         } else {
             let side = side?;
@@ -675,7 +708,9 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
         let quants: Vec<String> = serde_json::from_value(inputs["quantizations"].clone())?;
         let min: usize = serde_json::from_value(inputs["min_endpoints"].clone())?;
         let eps: Vec<OrEndpoint> = serde_json::from_value(inputs["endpoints"].clone())?;
-        let q = or_quote_with(&eps, 0, blend, &quants, min)?;
+        // Lines from before weighting was logged were medians.
+        let weighting = inputs["weighting"].as_str().unwrap_or("median");
+        let q = or_quote_with(&eps, 0, blend, &quants, min, weighting)?;
         if q.usd_e6 != mark {
             bail!("logged endpoints give {} but {mark} was pushed", q.usd_e6);
         }
@@ -932,13 +967,15 @@ mod tests {
     }
 
     fn ep(provider: &str, q: &str, prompt: f64, completion: f64) -> OrEndpoint {
-        OrEndpoint { provider: provider.into(), quantization: q.into(), prompt: prompt * 1e-6, completion: completion * 1e-6 }
+        OrEndpoint { provider: provider.into(), quantization: q.into(), prompt: prompt * 1e-6, completion: completion * 1e-6, status: 0 }
     }
 
     #[test]
     fn openrouter_picks_the_preferred_tier_and_takes_the_median() {
-        let o = cfg();
+        let mut o = cfg();
         assert_eq!(o.flop_mark_source, "openrouter");
+        // Tier selection, checked with the median weighting.
+        o.or_weighting = "median".into();
         // 2026-11-11 list: blended DeepInfra bf16 $0.2578, GMICloud bf16 $0.6219, Cerebras fp16 $1.021.
         let eps = [
             ep("DeepInfra", "bf16", 0.15, 1.875),
@@ -1002,7 +1039,8 @@ mod tests {
         let oracle = Keypair::new();
         let inputs = serde_json::json!({
             "source": "openrouter", "set": q.set, "blend_in_out": o.flop_blend_in_out,
-            "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "endpoints": q.endpoints,
+            "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
+            "endpoints": q.endpoints,
         });
         let line = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "slot": 7, "inputs": inputs})).unwrap();
         assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), q.usd_e6);
@@ -1026,5 +1064,51 @@ mod tests {
         assert!(m.max_lp_inventory_usd <= 1000 && m.max_fill_notional_usd <= m.max_lp_inventory_usd);
         // One fill at ~$0.44 stays under the fill cap.
         assert!(m.size_q as u128 * 439_844 <= m.max_fill_notional_usd as u128 * 1_000_000_000_000);
+    }
+
+    #[test]
+    fn inverse_square_weights_toward_the_cheap_endpoint() {
+        let o = cfg();
+        assert_eq!(o.or_weighting, "inverse_square");
+        let (a, b) = (0.2578125, 0.621875);
+        // Weights 1/b^2: sum(1/b) / sum(1/b^2).
+        let want = (1.0 / a + 1.0 / b) / (1.0 / (a * a) + 1.0 / (b * b));
+        assert!((combine(&[a, b], "inverse_square").unwrap() - want).abs() < 1e-12);
+        // Today's bf16 pair: DeepInfra $0.2578, GMICloud $0.6219 -> ~$0.311.
+        let eps = [ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2), ep("Cerebras", "fp16", 0.99, 1.49)];
+        let q = or_quote(&eps, NOW, &o).unwrap();
+        assert_eq!((q.set.as_str(), q.usd_e6), ("bf16", 311_207));
+        // The cheap one dominates but doesn't own it: well under the midpoint, above the cheap price.
+        let m = q.usd_e6 as f64 / 1e6;
+        assert!(m > a && m - a < (b - m) / 2.0, "{m}");
+    }
+
+    #[test]
+    fn one_endpoint_is_its_own_price_and_an_expensive_newcomer_barely_moves_it() {
+        assert!((combine(&[0.4], "inverse_square").unwrap() - 0.4).abs() < 1e-12);
+        assert_eq!(combine(&[0.4], "median").unwrap(), 0.4);
+        let (a, b) = (0.2578125, 0.621875);
+        let before = combine(&[a, b], "inverse_square").unwrap();
+        let after = combine(&[a, b, 5.0], "inverse_square").unwrap();
+        // A $5 endpoint moves the weighted mark ~3%; the median would jump to $0.62.
+        assert!(after > before && (after - before) / before < 0.05, "{before} -> {after}");
+        assert_eq!(combine(&[a, b, 5.0], "median").unwrap(), b);
+        assert!(combine(&[], "inverse_square").is_err());
+        assert!(combine(&[0.0], "inverse_square").is_err());
+        assert!(combine(&[0.3], "mean").is_err());
+    }
+
+    #[test]
+    fn down_endpoints_do_not_count() {
+        let o = cfg();
+        let mut eps = vec![ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2), ep("X", "bf16", 0.45, 3.2)];
+        eps[0].status = -1;
+        let q = or_quote(&eps, NOW, &o).unwrap();
+        // DeepInfra is down: the two remaining bf16 endpoints, both $0.6219.
+        assert_eq!(q.used.len(), 2);
+        assert!(q.used.iter().all(|u| u.0 != "DeepInfra"));
+        assert!(q.usd_e6.abs_diff(621_875) <= 1, "{}", q.usd_e6);
+        // The down endpoint is still logged, so the log recomputes the same mark.
+        assert_eq!(q.endpoints.len(), 3);
     }
 }
