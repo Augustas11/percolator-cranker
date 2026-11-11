@@ -42,13 +42,20 @@ weighting, any endpoint priced under half the set's median
 (`or_min_frac_of_median` = 0.5) counts as half the median. Nothing is dropped
 for being cheap. An earlier rule dropped such endpoints; with two bf16
 endpoints that made the mark jump ~3x ($0.24 to $0.73) when DeepInfra's cut
-went from 21% to 22%. With the clamp the mark moves smoothly with every price,
-and one $0.01 promo can't pull it below about half the median (against today's
-pair it moves $0.311 to $0.170). Limit: when cheap listings are half the set,
-the median itself is cheap, so the floor sinks with them. Two $0.01 promos next
-to today's pair take the mark to about $0.076. The drop rule held $0.311 there.
-The clamp keeps the pricing smooth and still follows the approved rule, so this
-is documented for now rather than fixed.
+went from 21% to 22%. With the clamp the mark moves smoothly with every price.
+
+Known limit (owner decision 2026-11-11: keep this rule for now). Promos still
+move the mark. One $0.01 promo next to today's bf16 pair makes the median
+$0.2578 and the floor $0.1289, which 1/price² gives about 77% of the weight:
+the mark goes $0.311 to about $0.170. Two promos take it to about $0.076 (the
+median itself is then cheap). A floor anchored to the last mark doesn't help:
+a clamped promo still carries 1/floor² weight and the floor follows the mark
+down, so the mark reaches the promo price within a few pushes. Planned fix if
+promos appear: a time filter, under which a listing priced under 0.5x the last
+mark counts only after it has stayed there for 24 h. Until then, every change
+in which endpoints are clamped logs a `flop alert: clamped ...` line (and
+`flop alert: no endpoint clamped` when it clears), so the first promo is
+noticed.
 
 Inverse-square weighting has one known exception to "a cheaper provider never
 raises the mark": a cut by an endpoint priced over 2x the mark raises it a

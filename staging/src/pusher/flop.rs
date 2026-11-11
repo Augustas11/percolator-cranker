@@ -445,6 +445,26 @@ fn fetch_or(client: &reqwest::blocking::Client, o: &launch::OracleCfg) -> Result
     or_quote(&parse_or(&text)?, launch::now_ms(), o)
 }
 
+/// An alert line when the set of clamped endpoints changes (the first promo,
+/// or the last one ending); None otherwise. `prev` is updated.
+pub fn clamp_alert(prev: &mut Vec<String>, q: &OrQuote) -> Option<String> {
+    let now: Vec<String> = q.used.iter().filter(|u| u.priced != u.listed).map(|u| format!("{} {}", u.provider, u.quantization)).collect();
+    if now == *prev {
+        return None;
+    }
+    *prev = now;
+    if prev.is_empty() {
+        return Some(format!("flop alert: no endpoint clamped (set {}, mark ${:.4})", q.set, q.usd_e6 as f64 / 1e6));
+    }
+    let legs: Vec<String> = q
+        .used
+        .iter()
+        .filter(|u| u.priced != u.listed)
+        .map(|u| format!("{} {} ${:.4} to ${:.4}", u.provider, u.quantization, u.listed, u.priced))
+        .collect();
+    Some(format!("flop alert: clamped {} (set {}, mark ${:.4})", legs.join(", "), q.set, q.usd_e6 as f64 / 1e6))
+}
+
 /// The mark under `openrouter`: the last good quote while it is fresh.
 pub fn or_mark(q: Option<&OrQuote>, now_ms: u64, o: &launch::OracleCfg) -> Result<(u64, u64)> {
     let q = q.context("openrouter: no successful fetch yet")?;
@@ -554,6 +574,7 @@ impl FlopIndex {
         let mut models: Vec<Model> = Vec::new();
         let (mut models_at, mut or_at) = (None::<Instant>, None::<Instant>);
         let (mut last_table, mut last_status) = (String::new(), String::new());
+        let mut clamped: Vec<String> = Vec::new();
         std::thread::spawn(move || loop {
             // Model registry for the status table: hourly, and kept on a failed read.
             if models_at.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(3600)) {
@@ -567,7 +588,12 @@ impl FlopIndex {
             if o.flop_mark_source == "openrouter" && or_at.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(o.or_refresh_s)) {
                 or_at = Some(Instant::now());
                 match fetch_or(&client, &o) {
-                    Ok(q) => *or_writer.lock().unwrap_or_else(|p| p.into_inner()) = Some(q),
+                    Ok(q) => {
+                        if let Some(line) = clamp_alert(&mut clamped, &q) {
+                            eprintln!("{line}");
+                        }
+                        *or_writer.lock().unwrap_or_else(|p| p.into_inner()) = Some(q);
+                    }
                     Err(e) => eprintln!("openrouter read failed: {e:#}"),
                 }
             }
@@ -1389,6 +1415,24 @@ mod tests {
         loose.or_min_frac_of_median = 0.0;
         let raw = |usd: f64| or_quote(&[pair[0].clone(), pair[1].clone(), third(usd)], NOW, &loose).unwrap().usd_e6;
         assert_eq!((raw(3.0), raw(0.8)), (328_046, 350_999));
+    }
+
+    #[test]
+    fn a_clamp_raises_one_alert_and_one_all_clear() {
+        let o = cfg();
+        let pair = [ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2)];
+        let promo = ep("Promo", "bf16", 0.005, 0.08);
+        let mut prev = Vec::new();
+        let clean = or_quote(&pair, NOW, &o).unwrap();
+        assert_eq!(clamp_alert(&mut prev, &clean), None);
+        let hit = or_quote(&[pair[0].clone(), pair[1].clone(), promo], NOW, &o).unwrap();
+        let line = clamp_alert(&mut prev, &hit).unwrap();
+        assert!(line.starts_with("flop alert: clamped Promo bf16 $0.0097 to $0.1289"), "{line}");
+        // One promo: about $0.170, as SPEC says.
+        assert!(hit.usd_e6.abs_diff(170_000) < 1_000, "{}", hit.usd_e6);
+        // Same clamp on the next fetch: no repeat.
+        assert_eq!(clamp_alert(&mut prev, &hit), None);
+        assert!(clamp_alert(&mut prev, &clean).unwrap().starts_with("flop alert: no endpoint clamped"));
     }
 
     #[test]
