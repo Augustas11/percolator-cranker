@@ -1,6 +1,6 @@
 //! The mark-rule scorer (docs/flop-compute/SCORER.md).
 //!
-//! Replays a rule over pinned snapshots and charges it, per day, three
+//! Replays a rule over pinned snapshots and charges it, per day, four
 //! losses in log units (|ln(a/b)|, so 0.01 is about 1%):
 //!
 //! - jump: each move of the mark not explained by the move of the median
@@ -9,7 +9,7 @@
 //!   injected scenario runs (24 h) and for 24 h after, one anchor a day:
 //!   a spoofed cheap listing (~1% of the median), a promo (~0.1x), half the
 //!   providers down, a provider relisting (~10x);
-//! - follow: lag behind a genuine move (every provider 1.25x to 2x, up or
+//! - follow: lag behind a genuine move (every provider 1.25x to 3x, up or
 //!   down, from the anchor on), over the same 48 h. Added after a near-frozen
 //!   mark passed the gate by ignoring everything, attacks included;
 //! - reference: distance from the leave-one-provider-out median.
@@ -32,8 +32,13 @@ pub const SCENARIOS: [&str; 4] = ["spoof", "promo", "down", "relist"];
 pub const ATTACK_MS: u64 = DAY_MS;
 /// ...and is measured this long past its end, for lingering effects.
 pub const AFTER_MS: u64 = DAY_MS;
-/// A genuine move's size range (log-uniform, up or down).
-pub const FOLLOW: (f64, f64) = (1.25, 2.0);
+/// A genuine move's size range (log-uniform, up or down). Real cuts reach
+/// past 2x (DeepInfra's qwen3.8-27b listing went $0.56 to $0.26 blended)...
+pub const FOLLOW: (f64, f64) = (1.25, 3.0);
+/// ...each provider within +-10% (log) of it...
+pub const FOLLOW_JITTER: f64 = 0.1;
+/// ...moving at its own time within the first 6 h.
+pub const FOLLOW_STAGGER_MS: u64 = 6 * 3_600_000;
 /// Loss charged for a term where the rule has no mark (never priced yet).
 pub const PENALTY: f64 = 1.0;
 /// The last 30% of days are held out: never used for tuning.
@@ -278,14 +283,24 @@ fn run_series(proto: &dyn Rule, s: &Series, seed: u64, pool: &[String], out: &mu
             }
             add(&mut out.entry(day).or_default().attack[k], avg(d));
         }
-        // A genuine move: every endpoint moves by m (1.25x to 2x, up or down,
-        // from the seed) and stays. The rule should follow: loss is the
-        // distance from m x the clean mark over the window. A rule that
-        // ignores attacks by not moving at all pays here.
+        // A genuine move: every provider moves by about m (1.25x to 3x, up or
+        // down, from the seed; each provider its own +-10% around it) at its
+        // own time in the first FOLLOW_STAGGER_MS, and stays. The rule should
+        // follow: loss is the distance from m x the clean mark, charged once
+        // every provider has moved, to the end of the window. Jitter and
+        // stagger keep the move from being recognisable as synthetic.
         let r0 = splitmix(attack_rng(seed, &s.group, day, 4));
         let u = (r0 >> 11) as f64 / (1u64 << 53) as f64;
         let lm = (FOLLOW.0.ln() + u * (FOLLOW.1.ln() - FOLLOW.0.ln())) * if r0 & 1 == 0 { 1.0 } else { -1.0 };
         let m = lm.exp();
+        // Per provider (by name, so it holds across snapshots): its factor
+        // and when it moves.
+        let per = |p: &str| {
+            let h = splitmix(r0 ^ fnv(p));
+            let u = (h >> 11) as f64 / (1u64 << 53) as f64;
+            let at = start + splitmix(h) % (FOLLOW_STAGGER_MS + 1);
+            (m * (FOLLOW_JITTER * (2.0 * u - 1.0)).exp(), at)
+        };
         let (st, l) = &saved[&a];
         let (mut r, mut last) = (st.clone_box(), *l);
         let mut d = (0.0, 0);
@@ -293,11 +308,21 @@ fn run_series(proto: &dyn Rule, s: &Series, seed: u64, pool: &[String], out: &mu
             if sn.at_ms >= start + ATTACK_MS + AFTER_MS {
                 break;
             }
-            let eps: Vec<crate::OrEndpoint> = sn.endpoints.iter().map(|e| crate::OrEndpoint { prompt: e.prompt * m, completion: e.completion * m, ..e.clone() }).collect();
+            let eps: Vec<crate::OrEndpoint> = sn
+                .endpoints
+                .iter()
+                .map(|e| {
+                    let (f, at) = per(&e.provider);
+                    let f = if sn.at_ms >= at { f } else { 1.0 };
+                    crate::OrEndpoint { prompt: e.prompt * f, completion: e.completion * f, ..e.clone() }
+                })
+                .collect();
             if let Some(x) = r.step(sn.at_ms, &eps).filter(|x| x.is_finite() && *x > 0.0) {
                 last = Some(x);
             }
-            add(&mut d, dist(last, marks[i].map(|c| c * m)));
+            if sn.at_ms >= start + FOLLOW_STAGGER_MS {
+                add(&mut d, dist(last, marks[i].map(|c| c * m)));
+            }
         }
         add(&mut out.entry(day).or_default().follow, avg(d));
     }

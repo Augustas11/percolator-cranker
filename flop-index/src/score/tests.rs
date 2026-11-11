@@ -245,8 +245,8 @@ impl Rule for Frozen {
 fn a_frozen_mark_pays_for_not_following_real_moves() {
     let s = panel(8, 60);
     let r = score(&Frozen::default(), &Spec, &s, 1, Split::Heldout).unwrap();
-    // The baseline follows a move exactly (it is scale-free).
-    assert!(r.base.follow < 1e-5, "{}", r.base.follow);
+    // The baseline follows a move up to the per-provider jitter (<= 0.1).
+    assert!(r.base.follow < 0.1, "{}", r.base.follow);
     // A frozen mark pays the whole move, |ln m| >= ln 1.25.
     assert!(r.cand.follow > 1.25f64.ln(), "{}", r.cand.follow);
     assert!(r.total.gain < -2.0 * r.total.se, "{:?}", r.total);
