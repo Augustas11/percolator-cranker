@@ -225,3 +225,29 @@ fn the_standard_error_counts_correlated_days() {
     assert!(paired(&d).se > plain, "{} vs {plain}", paired(&d).se);
     assert_eq!(paired(&[0.5; 10]).se, 0.0);
 }
+
+/// Holds its first mark forever.
+#[derive(Clone, Default)]
+struct Frozen(Option<f64>);
+impl Rule for Frozen {
+    fn step(&mut self, at_ms: u64, eps: &[OrEndpoint]) -> Option<f64> {
+        if self.0.is_none() {
+            self.0 = Spec.step(at_ms, eps);
+        }
+        self.0
+    }
+    fn clone_box(&self) -> Box<dyn Rule> {
+        Box::new(self.clone())
+    }
+}
+
+#[test]
+fn a_frozen_mark_pays_for_not_following_real_moves() {
+    let s = panel(8, 60);
+    let r = score(&Frozen::default(), &Spec, &s, 1, Split::Heldout).unwrap();
+    // The baseline follows a move exactly (it is scale-free).
+    assert!(r.base.follow < 1e-5, "{}", r.base.follow);
+    // A frozen mark pays the whole move, |ln m| >= ln 1.25.
+    assert!(r.cand.follow > 1.25f64.ln(), "{}", r.cand.follow);
+    assert!(r.total.gain < -2.0 * r.total.se, "{:?}", r.total);
+}

@@ -31,9 +31,14 @@ Each day, in log units (0.01 is about 1%):
   provider's promo at ~0.1x (0.05-0.2x), half the providers down, one
   provider relisting at ~10x (5-20x). Loss is the mean |ln(attacked mark /
   clean mark)|. Victims and strengths are drawn from the seed.
+- **follow**: a genuine move, every provider 1.25-2x up or down (from the
+  seed) from the anchor on; loss is the mean distance from where the mark
+  should be (the clean mark times the move) over 48 h. Added 2026-11-11
+  after swarm round 1: a mark capped near 2.4%/day passed the gate (+0.213)
+  by ignoring everything; with follow it scores -0.206.
 - **reference**: distance from the leave-one-provider-out median.
 
-Day loss = jump + mean of the four attacks + reference, each averaged over
+Day loss = jump + mean of the four attacks + follow + reference, each averaged over
 the models scored that day. Standard error is over days, Newey-West
 corrected (attack windows span two days and rules carry state). A snapshot
 is scored when it has 2+ up providers. A rule that
