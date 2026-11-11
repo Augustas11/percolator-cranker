@@ -878,7 +878,9 @@ fn real_main() -> Result<()> {
         Some("lifecycle") => launch::lifecycle_main(&args[1..]),
         Some("prices") => pusher::prices(&args[1..]),
         Some("verify-push-log") => pusher::verify_push_log(&args[1..]),
-        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles | prices | lifecycle] <config> <cluster> <run dir> | verify-push-log <bots.log> <oracle pubkey>"),
+        Some("record-or") => pusher::or_record(&args[1..]),
+        Some("record-or-status") => pusher::or_record_status(&args[1..]),
+        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles | prices | lifecycle] <config> <cluster> <run dir> | verify-push-log <bots.log> <oracle pubkey> | record-or <config> <out dir> | record-or-status <out dir>"),
     }
 }
 
