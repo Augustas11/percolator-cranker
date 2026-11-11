@@ -144,6 +144,31 @@ fn cap_groups(w: &mut [f64], key: impl Fn(usize) -> String, cap: f64, capped: &m
     moved
 }
 
+/// Who the window's G_n came from. Logged even when the side is stale, so the
+/// gateway's share is visible: buyers are counted per on-chain agent, and the
+/// gateway agent stands for every off-chain gateway customer.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct WindowMix {
+    pub prints: usize,
+    pub buyers: usize,
+    pub gateway_agent: String,
+    /// Share of the window's G_n settled under the gateway agent (0 when empty).
+    pub gateway_gn_share: f64,
+}
+
+pub fn window_mix(prints: &[Print], now_ms: u64, o: &launch::OracleCfg) -> WindowMix {
+    let from = now_ms.saturating_sub(o.flop_window_s * 1000);
+    let window: Vec<&Print> = prints.iter().filter(|p| p.at_ms >= from && p.at_ms <= now_ms).collect();
+    let total: f64 = window.iter().map(|p| p.gn as f64).sum();
+    let gateway: f64 = window.iter().filter(|p| p.agent == o.flop_gateway_agent).map(|p| p.gn as f64).sum();
+    WindowMix {
+        prints: window.len(),
+        buyers: window.iter().map(|p| p.agent.as_str()).collect::<HashSet<_>>().len(),
+        gateway_agent: o.flop_gateway_agent.clone(),
+        gateway_gn_share: if total > 0.0 { gateway / total } else { 0.0 },
+    }
+}
+
 /// The FLOP side at `now_ms`. Errors say why it is stale.
 pub fn flop_side(prints: &[Print], now_ms: u64, o: &launch::OracleCfg) -> Result<FlopSide> {
     let from = now_ms.saturating_sub(o.flop_window_s * 1000);
@@ -431,7 +456,7 @@ pub fn or_mark(q: Option<&OrQuote>, now_ms: u64, o: &launch::OracleCfg) -> Resul
 }
 
 /// One status line: the mark's legs, the FLOP-implied FLOP/USD, caps applied.
-pub fn status(or: Option<&OrQuote>, side: &Result<FlopSide>, o: &launch::OracleCfg) -> String {
+pub fn status(or: Option<&OrQuote>, side: &Result<FlopSide>, mix: Option<&WindowMix>, o: &launch::OracleCfg) -> String {
     let mut t = format!("flop status: mark_source={}", o.flop_mark_source);
     match or {
         Some(q) => {
@@ -465,6 +490,12 @@ pub fn status(or: Option<&OrQuote>, side: &Result<FlopSide>, o: &launch::OracleC
             }
         }
         Err(e) => t.push_str(&format!("; {e}")),
+    }
+    if let Some(m) = mix {
+        t.push_str(&format!(
+            "; window {} prints, {} on-chain buyers, gateway agent {:.1}% of G_n",
+            m.prints, m.buyers, m.gateway_gn_share * 100.0
+        ));
     }
     t
 }
@@ -547,7 +578,8 @@ impl FlopIndex {
                 Ok(prints) => flop_side(prints, now, &o),
                 Err(e) => Err(anyhow!("flop read failed: {e}")),
             };
-            let st = status(or_now.as_ref(), &side, &o);
+            let mix = fetched.as_ref().ok().map(|p| window_mix(p, now, &o));
+            let st = status(or_now.as_ref(), &side, mix.as_ref(), &o);
             if st != last_status {
                 eprintln!("{st}");
                 last_status = st;
@@ -583,17 +615,18 @@ impl FlopIndex {
     pub fn latest(&mut self) -> Result<(u64, u64)> {
         self.last_inputs = None;
         let now = launch::now_ms();
-        let side = match &*self.cached.lock().unwrap_or_else(|p| p.into_inner()) {
-            None => Err(anyhow!("flop index: no read yet")),
-            Some(Ok(prints)) => flop_side(prints, now, &self.cfg),
-            Some(Err(e)) => Err(anyhow!("flop read failed: {e}")),
+        let (side, mix) = match &*self.cached.lock().unwrap_or_else(|p| p.into_inner()) {
+            None => (Err(anyhow!("flop index: no read yet")), None),
+            Some(Ok(prints)) => (flop_side(prints, now, &self.cfg), Some(window_mix(prints, now, &self.cfg))),
+            Some(Err(e)) => (Err(anyhow!("flop read failed: {e}")), None),
         };
         let side_json = match &side {
             Ok(s) => serde_json::json!({
                 "flop_per_gn": s.flop_per_gn(), "prints": s.prints, "buyers": s.agents, "miners": s.miners,
                 "newest_ms": s.newest_ms, "capped_buyers": s.capped_agents, "capped_miners": s.capped_miners,
+                "window": mix,
             }),
-            Err(e) => serde_json::json!({ "stale": e.to_string() }),
+            Err(e) => serde_json::json!({ "stale": e.to_string(), "window": mix }),
         };
         let o = &self.cfg;
         let (mark, inputs) = if o.flop_mark_source == "openrouter" {
@@ -1121,11 +1154,33 @@ mod tests {
     }
 
     #[test]
+    fn the_gateway_share_is_logged_even_when_stale() {
+        let o = cfg();
+        let gw = o.flop_gateway_agent.clone();
+        assert_eq!(gw, "5GsXb3TmNGixuEsbtixqHnqWr9UQJ2M8bkqBQWteNekgF98S");
+        // Every print from the gateway and one other buyer: 2 buyers, stale.
+        let mut prints = many(o.flop_min_prints, P3);
+        for (i, x) in prints.iter_mut().enumerate() {
+            x.agent = if i == 0 { "solo".into() } else { gw.clone() };
+        }
+        let side = flop_side(&prints, NOW, &o);
+        assert!(side.is_err());
+        let m = window_mix(&prints, NOW, &o);
+        assert_eq!((m.prints, m.buyers), (prints.len(), 2));
+        let want = 1.0 - prints[0].gn as f64 / prints.iter().map(|p| p.gn as f64).sum::<f64>();
+        assert!((m.gateway_gn_share - want).abs() < 1e-12, "{m:?}");
+        let s = status(None, &side, Some(&m), &o);
+        assert!(s.contains("distinct buyers") && s.contains("2 on-chain buyers, gateway agent"), "{s}");
+        // Nothing in the window: share 0, not NaN.
+        assert_eq!(window_mix(&[], NOW, &o).gateway_gn_share, 0.0);
+    }
+
+    #[test]
     fn status_logs_the_flop_implied_rate() {
         let o = cfg();
         let q = OrQuote { usd_e6: 257_813, at_ms: NOW, used: vec![Used { provider: "DeepInfra".into(), quantization: "bf16".into(), listed: 0.2578, priced: 0.2578 }], set: "bf16".into(), endpoints: vec![] };
         let side = flop_side(&many(o.flop_min_prints, P3), NOW, &o);
-        let s = status(Some(&q), &side, &o);
+        let s = status(Some(&q), &side, None, &o);
         // At the anchor price the implied rate equals the stand-in.
         assert!(s.contains("FLOP-implied FLOP/USD 0.000001652"), "{s}");
         assert!(s.contains("5 buyers, 7 miners"), "{s}");

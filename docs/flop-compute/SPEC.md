@@ -80,6 +80,17 @@ on-chain mark ages.
 FLOP/USD feed exists. The bots log the FLOP-implied FLOP/USD
 (`OpenRouter $ / (FLOP per G_n x 52e6)`) on every change either way.
 
+Open question, G_n per token. Our own paid gateway job (2026-11-11, block
+3,450,756: Qwen2.5-0.5B, 75 tokens) settled 74 G_n, about 1 per token, though
+the registry lists 2 GF/token and the gateway reserved at 2. That is one
+sample, so no constant changes. If it holds, settled G_n per token runs about
+half the registry figure, and the FLOP-implied FLOP/USD above (which assumes
+52e6 G_n per 1M Qwen3.8-27B tokens) may be off by about 2x.
+
+FLOP receipts on devnet carry `flopUsd: "1"`, `flopUsdSource:
+"devnet-nominal"`. That is FLOP's devnet placeholder, not a price, and is
+never used as an FX source.
+
 ## Manipulation limits (FLOP side)
 
 - No buyer and no miner carries more than 45% of the window's weight
@@ -89,6 +100,14 @@ FLOP/USD feed exists. The bots log the FLOP-implied FLOP/USD
   low-priced flood would tie everyone else and the lower median would take
   its price.
 - At least 3 distinct buyers and 3 distinct miners, or stale.
+- Buyers are counted per on-chain agent. Gateway API keys are off-chain
+  allowances, so every gateway customer settles under one agent
+  (`flop_gateway_agent`, 5GsXb3TmNGixuEsbtixqHnqWr9UQJ2M8bkqBQWteNekgF98S).
+  The buyer count and the 45% cap see it as one buyer however many customers
+  sit behind it. That is a main reason this leg is stale. The logic is
+  unchanged; each status line and each signed push line (`flop_side.window`)
+  logs the window's prints, on-chain buyers and the gateway agent's share of
+  G_n, even when the leg is stale.
 - The caps are per address. One party running several buyer or miner
   addresses is not caught.
 - Self-trades, forwards and unsettled rows are excluded.
