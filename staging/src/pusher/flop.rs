@@ -147,8 +147,26 @@ impl FlopIndex {
             .build()?;
         let cached: Cache = Arc::new(Mutex::new(None));
         let (writer, o) = (Arc::clone(&cached), cfg.clone());
+        let mut models: Vec<Model> = Vec::new();
+        let (mut models_at, mut last_table) = (None::<Instant>, String::new());
         std::thread::spawn(move || loop {
+            // Model registry for the status table: hourly, and kept on a failed read.
+            if models_at.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(3600)) {
+                match fetch_models(&client, &o) {
+                    Ok(m) => (models, models_at) = (m, Some(Instant::now())),
+                    Err(e) => eprintln!("flop model registry read failed: {e:#}"),
+                }
+            }
             let fetched = fetch(&client, &o).map_err(|e| format!("{e:#}"));
+            if let Ok(prints) = &fetched {
+                if let Ok((mark, _)) = index(prints, launch::now_ms(), &o) {
+                    let t = table(mark, &models, &o);
+                    if t != last_table {
+                        eprintln!("{t}");
+                        last_table = t;
+                    }
+                }
+            }
             let mut cache = writer.lock().unwrap_or_else(|p| p.into_inner());
             match fetched {
                 // One failed read keeps the last good prints; `index` still
@@ -187,14 +205,7 @@ fn fetch(client: &reqwest::blocking::Client, o: &launch::OracleCfg) -> Result<Ve
             "params": {"name": "flop_list_settlements",
                        "arguments": {"limit": PAGE, "offset": page * PAGE}},
         });
-        let text = client
-            .post(&o.flop_mcp_url)
-            .header("accept", "application/json, text/event-stream")
-            .json(&body)
-            .send()?
-            .error_for_status()?
-            .text()?;
-        let page = parse_page(&text)?;
+        let page = parse_page(&post(client, o, &body)?)?;
         let oldest = page.data.iter().map(|r| r.settled_at).min();
         for row in &page.data {
             if seen.insert((row.extrinsic_hash.clone(), row.event_index)) {
@@ -208,9 +219,76 @@ fn fetch(client: &reqwest::blocking::Client, o: &launch::OracleCfg) -> Result<Ve
     bail!("more than {} settlements in the window; raise MAX_PAGES", PAGE * MAX_PAGES)
 }
 
+fn post(client: &reqwest::blocking::Client, o: &launch::OracleCfg, body: &serde_json::Value) -> Result<String> {
+    Ok(client
+        .post(&o.flop_mcp_url)
+        .header("accept", "application/json, text/event-stream")
+        .json(body)
+        .send()?
+        .error_for_status()?
+        .text()?)
+}
+
+fn call(client: &reqwest::blocking::Client, o: &launch::OracleCfg, tool: &str, args: serde_json::Value) -> Result<serde_json::Value> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": tool, "arguments": args},
+    });
+    let inner = tool_text(&post(client, o, &body)?)?;
+    serde_json::from_str(&inner).with_context(|| format!("flop: {tool} result is not JSON"))
+}
+
+/// One registry model's compute per token, for the conversion table.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Model {
+    pub name: String,
+    pub gflops_per_token: f64,
+}
+
+/// Every model in FLOP's registry with its `gflopsPerToken`.
+fn fetch_models(client: &reqwest::blocking::Client, o: &launch::OracleCfg) -> Result<Vec<Model>> {
+    let found = call(client, o, "flop_discover_models", serde_json::json!({}))?;
+    let names: Vec<String> = found["models"]
+        .as_array()
+        .context("flop: no models list")?
+        .iter()
+        .filter_map(|m| m["modelName"].as_str().map(str::to_owned))
+        .collect();
+    let mut out = Vec::new();
+    for name in names {
+        let p = call(client, o, "flop_get_model_pricing", serde_json::json!({"model_id": name}))?;
+        if let Some(g) = p["gflopsPerToken"].as_f64().filter(|g| *g > 0.0) {
+            out.push(Model { name, gflops_per_token: g });
+        }
+    }
+    out.sort_by(|a, b| b.gflops_per_token.total_cmp(&a.gflops_per_token));
+    Ok(out)
+}
+
+/// The benchmark mark converted per model and to pure compute. A model with g
+/// GF/token costs mark x g x 1e6 / flop_gn_per_mtok per 1M tokens; an exaFLOP
+/// (1e9 G_n) costs mark x 1e9 / flop_gn_per_mtok.
+pub fn table(mark_e6: u64, models: &[Model], o: &launch::OracleCfg) -> String {
+    let usd = mark_e6 as f64 / 1e6;
+    let per_gn = usd / o.flop_gn_per_mtok as f64;
+    let mut t = format!(
+        "flop table: mark ${usd:.4} per 1M tokens (benchmark: {} GF/token); ${:.4} per exaFLOP",
+        o.flop_gn_per_mtok / 1_000_000,
+        per_gn * 1e9
+    );
+    for m in models {
+        t.push_str(&format!("; {} ({} GF/token) ${:.4}", m.name, m.gflops_per_token, per_gn * m.gflops_per_token * 1e6));
+    }
+    t
+}
+
 /// The MCP reply is JSON or server-sent events; the first event carrying a
 /// `result` or `error` is the reply. The tool result is JSON text.
 fn parse_page(text: &str) -> Result<Page> {
+    serde_json::from_str(&tool_text(text)?).context("flop: tool result is not a settlement page")
+}
+
+fn tool_text(text: &str) -> Result<String> {
     let normalized = text.replace("\r\n", "\n");
     let mut events = normalized.split("\n\n").filter_map(|event| {
         let data: Vec<&str> = event
@@ -233,7 +311,7 @@ fn parse_page(text: &str) -> Result<Page> {
     if reply["result"]["isError"].as_bool() == Some(true) {
         bail!("flop: {inner}");
     }
-    serde_json::from_str(inner).context("flop: tool result is not a settlement page")
+    Ok(inner.to_owned())
 }
 
 #[cfg(test)]
@@ -279,6 +357,23 @@ mod tests {
         let (mark, newest) = index(&many(o.flop_min_prints, P3), NOW, &o).unwrap();
         assert!(mark.abs_diff(257_813) <= 1, "{mark}");
         assert_eq!(newest, NOW - 60_000);
+    }
+
+    #[test]
+    fn table_converts_per_model_and_per_exaflop() {
+        let o = cfg();
+        let models = [
+            Model { name: "Qwen/Qwen3.8-27B".into(), gflops_per_token: 52.0 },
+            Model { name: "Qwen/Qwen3-8B".into(), gflops_per_token: 17.0 },
+            Model { name: "Qwen/Qwen2.5-0.5B-Instruct".into(), gflops_per_token: 2.0 },
+        ];
+        let t = table(257_813, &models, &o);
+        // $0.257813 / 0.052 per exaFLOP; 17/52 and 2/52 of the mark per model.
+        assert!(t.contains("mark $0.2578 per 1M tokens (benchmark: 52 GF/token)"), "{t}");
+        assert!(t.contains("$4.9579 per exaFLOP"), "{t}");
+        assert!(t.contains("Qwen/Qwen3.8-27B (52 GF/token) $0.2578"), "{t}");
+        assert!(t.contains("Qwen/Qwen3-8B (17 GF/token) $0.0843"), "{t}");
+        assert!(t.contains("Qwen/Qwen2.5-0.5B-Instruct (2 GF/token) $0.0099"), "{t}");
     }
 
     #[test]

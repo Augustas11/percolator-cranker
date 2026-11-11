@@ -40,6 +40,25 @@ $1.875) / 16 = $0.2578 per 1M, so FLOP/USD = 0.0000016527 and the opening
 mark is about $0.26 (owner decisions, 2026-11-11). Change the blend or the
 reference prices in config and the stand-in follows. At mainnet the stand-in is replaced by a live FLOP/USD feed.
 
+**All models.** The index uses every model's settlements, priced per G_n;
+there is no model filter. Qwen3.8-27B is only the benchmark unit (like quoting
+oil in Brent): it has had 15 settlements ever, so a feed filtered to it would
+be permanently stale.
+
+**Conversion table.** The bots log a table (`flop table: ...` in `bots.log`)
+whenever the mark changes, computed from the live mark and FLOP's model
+registry (`gflopsPerToken` from `flop_get_model_pricing`, refreshed hourly):
+
+| Quote | Formula | At a $0.2578 mark |
+|---|---|---|
+| Model M, $ per 1M tokens | mark x gflopsPerToken_M / 52 | |
+| Qwen3.8-27B (52 GF/token) | mark | $0.2578 |
+| Qwen3-8B (17 GF/token) | mark x 17 / 52 | $0.0843 |
+| Qwen2.5-0.5B (2 GF/token) | mark x 2 / 52 | $0.0099 |
+| Pure compute, $ per exaFLOP (1e9 G_n) | mark / 0.052 | $4.96 |
+
+The last column is an example; the log line always uses the live mark.
+
 **Refresh.** The pusher refetches every 60 s and pushes on a move or a
 heartbeat, like the SOL-PERP pusher.
 
