@@ -788,7 +788,11 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
         // Lines from before weighting was logged were medians.
         let weighting = inputs["weighting"].as_str().unwrap_or("median");
         let frac = inputs["min_frac_of_median"].as_f64().unwrap_or(0.0);
-        let guard = if inputs["guard"] == "clamp" { Guard::Clamp } else { Guard::LegacyDrop };
+        let guard = match inputs["guard"].as_str() {
+            Some("clamp") => Guard::Clamp,
+            None => Guard::LegacyDrop,
+            Some(g) => bail!("unknown guard {g}"),
+        };
         let q = or_quote_with(&eps, 0, blend, &quants, min, weighting, frac, guard)?;
         if q.usd_e6 != mark {
             bail!("logged endpoints give {} but {mark} was pushed", q.usd_e6);
@@ -1315,6 +1319,22 @@ mod tests {
     }
 
     #[test]
+    fn half_the_set_cheap_drags_the_floor_down_too() {
+        // Known limit (SPEC): the floor is half the median, so when cheap
+        // listings are half the set the median itself is cheap. Two promos next
+        // to today's pair take the mark from $0.311 to ~$0.076.
+        let b = (0.45, 3.2);
+        let eps = [
+            ep("DeepInfra", "bf16", 0.15, 1.875),
+            ep("GMICloud", "bf16", b.0, b.1),
+            ep("PromoA", "bf16", 0.005, 0.08),
+            ep("PromoB", "bf16", 0.005, 0.08),
+        ];
+        let m = mark(&eps);
+        assert!((0.07..0.08).contains(&m), "{m}");
+    }
+
+    #[test]
     fn down_endpoints_fall_through_to_the_next_set() {
         let o = cfg();
         // bf16 has one up endpoint: fp16 alone has one too, so bf16+fp16.
@@ -1397,5 +1417,10 @@ mod tests {
         });
         let line = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "inputs": inputs})).unwrap();
         assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), 311_207);
+        // A guard the verifier doesn't know is refused, not read as the old rule.
+        let mut odd = inputs.clone();
+        odd["guard"] = "winsorize".into();
+        let line = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "inputs": odd})).unwrap();
+        assert!(verify_push(&line, Some(&oracle.pubkey())).unwrap_err().to_string().contains("unknown guard"));
     }
 }

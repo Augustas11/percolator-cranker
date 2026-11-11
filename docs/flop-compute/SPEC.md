@@ -43,7 +43,12 @@ weighting, any endpoint priced under half the set's median
 for being cheap. An earlier rule dropped such endpoints; with two bf16
 endpoints that made the mark jump ~3x ($0.24 to $0.73) when DeepInfra's cut
 went from 21% to 22%. With the clamp the mark moves smoothly with every price,
-and a $0.01 promo can't pull it below about half the median.
+and one $0.01 promo can't pull it below about half the median (against today's
+pair it moves $0.311 to $0.170). Limit: when cheap listings are half the set,
+the median itself is cheap, so the floor sinks with them. Two $0.01 promos next
+to today's pair take the mark to about $0.076. The drop rule held $0.311 there.
+The clamp keeps the pricing smooth and still follows the approved rule, so this
+is documented for now rather than fixed.
 
 Inverse-square weighting has one known exception to "a cheaper provider never
 raises the mark": a cut by an endpoint priced over 2x the mark raises it a
