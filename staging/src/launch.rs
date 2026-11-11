@@ -223,7 +223,7 @@ fn default_flop_refresh_s() -> u64 { 60 }
 fn default_flop_min_miners() -> usize { 3 }
 fn default_flop_gn_per_mtok() -> u64 { 52_000_000 }
 fn default_flop_mark_source() -> String { "openrouter".into() }
-fn default_flop_max_share() -> f64 { 0.5 }
+fn default_flop_max_share() -> f64 { 0.45 }
 fn default_flop_min_agents() -> usize { 3 }
 fn default_or_url() -> String { "https://openrouter.ai/api/v1/models/qwen/qwen3.8-27b/endpoints".into() }
 fn default_or_quantizations() -> Vec<String> { vec!["bf16".into(), "fp16".into()] }

@@ -41,9 +41,12 @@ FLOP/USD feed exists. The bots log the FLOP-implied FLOP/USD
 
 ## Manipulation limits (FLOP side)
 
-- No buyer and no miner carries more than 50% of the window's weight
+- No buyer and no miner carries more than 45% of the window's weight
   (`flop_max_agent_share`, `flop_max_miner_share`). A larger one is scaled down
-  to the cap, not dropped, so a flood can at most tie everyone else.
+  to the cap, not dropped, so a flood stays a minority and can't set the
+  median, priced high or low. The cap must be under 50%: at exactly half a
+  low-priced flood would tie everyone else and the lower median would take
+  its price.
 - At least 3 distinct buyers and 3 distinct miners, or stale.
 - Self-trades, forwards and unsettled rows are excluded.
 
@@ -59,7 +62,11 @@ from. To check a log:
     staging verify-push-log bots.log <oracle authority pubkey>
 
 It checks each signature and signer, and recomputes each OpenRouter mark from
-its logged endpoints. Any mismatch fails. Compare the pubkey with the asset's
+its logged endpoints. Any mismatch fails. The oracle pubkey is required:
+each line names its signer, so without it a self-signed forgery would pass.
+What it proves: each logged mark matches the endpoints logged with it, signed
+by that key. It does not detect dropped or reordered lines, and does not
+check the mark against the transaction on chain. Compare the pubkey with the asset's
 oracle authority on chain, and a line's `sig` with the transaction on chain.
 
 ## Risk settings (engine master)
@@ -84,7 +91,7 @@ feed to peg to at this pin.
 risk, closes still work. It is **one-way**: there is no path from drain-only
 back to active. So the bots do not flip it automatically on staleness. Stale
 for any time: no pushes, the mark ages, opens are refused once the mark is
-older than ~32 minutes. Stale for 2 hours: the operator decides whether to
+older than 30 minutes. Stale for 2 hours: the operator decides whether to
 drain. Stale for ~24 hours: anyone can resolve the market (permissionless
 stale resolve).
 
@@ -99,7 +106,7 @@ market maker:
 - Small: 100 x 1M tokens a fill (~$44), at most $100 a fill and $500 of LP
   inventory.
 - Pulls quotes when stale: no opens or closes while the mark is older than
-  ~32 minutes.
+  30 minutes.
 - Kill switch: while `/run-dir/KILL` exists, no trades at all.
 - Logs one `"event":"mm_fill"` JSON line per fill (size, mark, quote, LP
   inventory).

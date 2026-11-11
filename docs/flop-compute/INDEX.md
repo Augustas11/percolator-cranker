@@ -54,11 +54,11 @@ $1.875) / 16 = $0.2578 per 1M, so FLOP/USD = 0.0000016527 (owner decisions,
 2026-11-11).
 
 **Manipulation limits** on the FLOP side. No single buyer (`agent`) or miner
-may carry more than half the window's weight (`flop_max_agent_share`,
-`flop_max_miner_share` = 0.5): a bigger one has its weight scaled down to the
-cap, and its prints stay in. A buyer flooding the window at a high price can
-at most tie everyone else, so it can't move the median past the honest
-prices. Fewer than 3 distinct buyers (`flop_min_agents`) is stale.
+may carry more than 45% of the window's weight (`flop_max_agent_share`,
+`flop_max_miner_share` = 0.45): a bigger one has its weight scaled down to the
+cap, and its prints stay in. A buyer flooding the window stays a minority, so
+it can't set the median, priced high or low. (At exactly half, a low-priced
+flood would tie everyone else and the lower median would take its price.) Fewer than 3 distinct buyers (`flop_min_agents`) is stale.
 
 **All models.** The index uses every model's settlements, priced per G_n;
 there is no model filter. Qwen3.8-27B is only the benchmark unit (like quoting
@@ -94,9 +94,9 @@ The index is **stale**, and the pusher sends nothing, when:
 When the index is stale, the on-chain mark just ages. There is no fallback:
 we never substitute FLOP's nominal gateway prices (`api.flop.network/v1/models`,
 tagged `devnet-nominal`), a last-good value, or a guess. Opening a trade
-requires a mark whose newest print is under ~32 minutes old. That check uses
-the print's time, not when FLOP was last read, so if FLOP's endpoint breaks,
-opens can continue at the last mark for up to ~32 minutes. If the index stays
+requires a mark whose source time is under 30 minutes old (the OpenRouter
+fetch time; under `flop_standin`, the newest print's time), so if the source
+breaks, trades can continue at the last mark for up to 30 minutes. If the index stays
 stale for about 24 hours (216,000 slots), anyone can resolve the market under
 the wrapper's permissionless stale-resolve rule.
 

@@ -69,9 +69,10 @@ or_min_endpoints = 2
 or_refresh_s = 300
 or_max_age_s = 1800                # no good fetch in 30 min: stale, hold
 # Manipulation limits on the FLOP side: one buyer or miner is scaled down to
-# half the window's weight; fewer than 3 distinct buyers is stale.
-flop_max_agent_share = 0.5
-flop_max_miner_share = 0.5
+# 45% of the window's weight (strictly under half, so it can't tie everyone
+# else and set a low median); fewer than 3 distinct buyers is stale.
+flop_max_agent_share = 0.45
+flop_max_miner_share = 0.45
 flop_min_agents = 3
 # Status polling interval for mark pushes and accrual transactions.
 confirm_poll_ms = 500
@@ -94,7 +95,7 @@ priority_fee_micro_lamports = 10000
 push_cu_limit = 14000
 # Source publish age, not landing age. Slow sources (e.g. devnet Pyth
 # fallback, ~13 s) refuse opens unless this is raised for that run.
-open_max_mark_age_ms = 1900000
+open_max_mark_age_ms = 1800000   # = or_max_age_s: the MM stops when the source does
 
 # InitMarket. Values and reasoning: docs/OPERATOR_PLAYBOOK.md section 2.
 [market]

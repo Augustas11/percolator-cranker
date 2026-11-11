@@ -382,9 +382,11 @@ impl FlopIndex {
         {
             bail!("flop_ref_usd_in/out, flop_blend_in_out, flop_anchor_flop_per_gn and flop_gn_per_mtok must be > 0");
         }
-        let share = |x: f64| x > 0.0 && x <= 1.0;
-        if !(share(cfg.flop_max_agent_share) && share(cfg.flop_max_miner_share)) || cfg.flop_min_agents == 0 {
-            bail!("flop_max_agent_share / flop_max_miner_share must be in (0, 1], flop_min_agents > 0");
+        // Strictly under half: a group capped at exactly half ties everyone
+        // else, and the lower-median would then take its price when it is low.
+        let share = |x: f64, n: usize| x > 0.0 && x < 0.5 && x * n as f64 >= 1.0;
+        if !(share(cfg.flop_max_agent_share, cfg.flop_min_agents) && share(cfg.flop_max_miner_share, cfg.flop_min_miners)) {
+            bail!("flop_max_agent_share / flop_max_miner_share must be under 0.5, and share x flop_min_agents / flop_min_miners >= 1 so the caps can hold");
         }
         match cfg.flop_mark_source.as_str() {
             "openrouter" => {
@@ -681,10 +683,13 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
     Ok(mark)
 }
 
-/// `staging verify-push-log <bots.log> [oracle pubkey]`
+/// `staging verify-push-log <bots.log> <oracle pubkey>`
 pub fn verify_log(args: &[String]) -> Result<()> {
-    let path = args.first().context("usage: staging verify-push-log <bots.log> [oracle pubkey]")?;
-    let oracle = args.get(1).map(|s| s.parse::<Pubkey>()).transpose()?;
+    let path = args.first().context("usage: staging verify-push-log <bots.log> <oracle pubkey>")?;
+    // Required: the signer is named inside each line, so without the expected
+    // key any self-signed line would verify.
+    let oracle: Pubkey = args.get(1).context("usage: staging verify-push-log <bots.log> <oracle pubkey>")?.parse()?;
+    let oracle = Some(oracle);
     let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
     let (mut ok, mut bad) = (0, 0);
     for (n, line) in text.lines().enumerate() {
@@ -879,13 +884,18 @@ mod tests {
         }
         let side = flop_side(&prints, NOW, &o).unwrap();
         assert_eq!(side.capped_agents, vec!["whale".to_string()]);
-        // Capped at half the weight, the whale ties the honest half: the median is
-        // the lowest price covering half, still the honest price.
+        // Capped under half the weight, the whale is a minority: the median is
+        // still the honest price.
         assert_eq!(side.planck_per_gn, P3);
-        // Uncapped, it would set the price.
+        // Uncapped (all weight allowed), it would set the price.
         let mut loose = o.clone();
         loose.flop_max_agent_share = 1.0;
         assert_eq!(flop_side(&prints, NOW, &loose).unwrap().planck_per_gn, 10 * P3);
+        // A whale pricing LOW can't drag it down either.
+        for x in prints.iter_mut().filter(|x| x.agent == "whale") {
+            x.planck_per_gn = P3 / 10;
+        }
+        assert_eq!(flop_side(&prints, NOW, &o).unwrap().planck_per_gn, P3);
         // A smaller cap leaves the whale a minority, kept in the window.
         let mut tight = o.clone();
         tight.flop_max_agent_share = 0.3;
