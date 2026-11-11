@@ -1319,6 +1319,24 @@ mod tests {
     }
 
     #[test]
+    fn the_spec_example_cut_raises_the_mark_a_little() {
+        // SPEC "Cheap-outlier clamp": an endpoint over 2x the mark cutting its price.
+        let o = cfg();
+        let third = |usd: f64| ep("Third", "bf16", usd, usd);
+        let pair = [ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2)];
+        let with = |usd: f64| or_quote(&[pair[0].clone(), pair[1].clone(), third(usd)], NOW, &o).unwrap();
+        let (hi, lo) = (with(3.0), with(0.8));
+        assert_eq!((hi.set.as_str(), hi.usd_e6, lo.usd_e6), ("bf16-clamped", 395_508, 419_152));
+        // Clamped to half the $0.621875 median.
+        assert!((hi.used[0].priced - 0.3109375).abs() < 1e-9, "{:?}", hi.used[0]);
+        // Unclamped, as hand-computed: $0.328 -> $0.351.
+        let mut loose = o.clone();
+        loose.or_min_frac_of_median = 0.0;
+        let raw = |usd: f64| or_quote(&[pair[0].clone(), pair[1].clone(), third(usd)], NOW, &loose).unwrap().usd_e6;
+        assert_eq!((raw(3.0), raw(0.8)), (328_046, 350_999));
+    }
+
+    #[test]
     fn half_the_set_cheap_drags_the_floor_down_too() {
         // Known limit (SPEC): the floor is half the median, so when cheap
         // listings are half the set the median itself is cheap. Two promos next

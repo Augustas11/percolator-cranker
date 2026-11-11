@@ -52,10 +52,13 @@ is documented for now rather than fixed.
 
 Inverse-square weighting has one known exception to "a cheaper provider never
 raises the mark": a cut by an endpoint priced over 2x the mark raises it a
-little, because the cheaper expensive endpoint wins weight (e.g. bf16 at
-$0.26, $0.62 and $3.00: cutting the $3.00 one to $0.80 moves the mark $0.396
-to $0.419). Cuts by endpoints under 2x the mark, which today is both bf16
-endpoints, never raise it.
+little, because the cheaper expensive endpoint wins weight. Example, bf16 at
+$0.2578, $0.6219 and $3.00: the set's median is $0.6219, so the $0.2578 one is
+clamped to $0.3109, and cutting the $3.00 one to $0.80 moves the mark $0.3955
+to $0.4192 (+6%). Without the clamp the same cut is $0.328 to $0.351 (+7%). The
+test `the_spec_example_cut_raises_the_mark_a_little` pins these numbers. Cuts
+by endpoints under 2x the mark, which today is both bf16 endpoints, never
+raise it.
 
 **Sets, in order** (owner decision 2026-11-11: fall through, don't hold).
 The bots try bf16 endpoints alone, then fp16 alone, then bf16 and fp16
