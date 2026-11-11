@@ -105,9 +105,10 @@ never used as an FX source.
   (`flop_gateway_agent`, 5GsXb3TmNGixuEsbtixqHnqWr9UQJ2M8bkqBQWteNekgF98S).
   The buyer count and the 45% cap see it as one buyer however many customers
   sit behind it. That is a main reason this leg is stale. The logic is
-  unchanged; each status line and each signed push line (`flop_side.window`)
-  logs the window's prints, on-chain buyers and the gateway agent's share of
-  G_n, even when the leg is stale.
+  unchanged. The status line and each signed push line (`flop_side.window`;
+  pushes happen in openrouter mode even when this leg is stale) log the
+  window's prints, on-chain buyers and the gateway agent's share of G_n.
+  `window` is null before the first good FLOP read.
 - The caps are per address. One party running several buyer or miner
   addresses is not caught.
 - Self-trades, forwards and unsettled rows are excluded.
