@@ -1,0 +1,5 @@
+# file url (raw file at a fixed upstream commit; fetch.sh downloads these)
+# MIT (data under LICENSE-DATA.md)
+romanshumy-price-history.csv https://raw.githubusercontent.com/romanshumy/llm-prices-data/3517cbdc5e647ba4c447c86a69fe808e040b4a1e/price-history.csv
+# Licence unclear: analysed, never committed here
+sophie-history.csv https://raw.githubusercontent.com/sophie-nguyenthuthuy/llm-pricing-history/9711a88cb239ac92efd687951690de5c112ae50c/data/history.csv
