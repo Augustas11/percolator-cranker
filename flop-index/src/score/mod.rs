@@ -1,6 +1,6 @@
 //! The mark-rule scorer (docs/flop-compute/SCORER.md).
 //!
-//! Replays a rule over pinned snapshots and charges it, per day, three
+//! Replays a rule over pinned snapshots and charges it, per day, four
 //! losses in log units (|ln(a/b)|, so 0.01 is about 1%):
 //!
 //! - jump: each move of the mark not explained by the move of the median
@@ -9,9 +9,13 @@
 //!   injected scenario runs (24 h) and for 24 h after, one anchor a day:
 //!   a spoofed cheap listing (~1% of the median), a promo (~0.1x), half the
 //!   providers down, a provider relisting (~10x);
+//! - follow: lag behind a genuine move (every provider about 1.25x to 3x,
+//!   up or down, each within +-10% and at its own time in the first 6 h),
+//!   charged from 6 h to 48 h beyond the +-10% band. Added after a near-frozen
+//!   mark passed the gate by ignoring everything, attacks included;
 //! - reference: distance from the leave-one-provider-out median.
 //!
-//! A day's loss is jump + mean(attack) + reference. The score of a candidate
+//! A day's loss is jump + mean(attack) + follow + reference. The score of a candidate
 //! is the paired gain, baseline loss minus candidate loss on the same days
 //! (positive: the candidate is better), with its standard error over days.
 
@@ -29,6 +33,13 @@ pub const SCENARIOS: [&str; 4] = ["spoof", "promo", "down", "relist"];
 pub const ATTACK_MS: u64 = DAY_MS;
 /// ...and is measured this long past its end, for lingering effects.
 pub const AFTER_MS: u64 = DAY_MS;
+/// A genuine move's size range (log-uniform, up or down). Real cuts reach
+/// past 2x (DeepInfra's qwen3.8-27b listing went $0.56 to $0.26 blended)...
+pub const FOLLOW: (f64, f64) = (1.25, 3.0);
+/// ...each provider within +-10% (log) of it...
+pub const FOLLOW_JITTER: f64 = 0.1;
+/// ...moving at its own time within the first 6 h.
+pub const FOLLOW_STAGGER_MS: u64 = 6 * 3_600_000;
 /// Loss charged for a term where the rule has no mark (never priced yet).
 pub const PENALTY: f64 = 1.0;
 /// The last 30% of days are held out: never used for tuning.
@@ -63,6 +74,9 @@ impl std::str::FromStr for Split {
 pub struct DayLoss {
     pub jump: f64,
     pub attack: [f64; 4],
+    /// Lag behind a genuine market move (all providers move, each by its
+    /// own amount and at its own time).
+    pub follow: f64,
     pub reference: f64,
 }
 
@@ -71,7 +85,7 @@ impl DayLoss {
         self.attack.iter().sum::<f64>() / 4.0
     }
     pub fn total(&self) -> f64 {
-        self.jump + self.attack_mean() + self.reference
+        self.jump + self.attack_mean() + self.follow + self.reference
     }
 }
 
@@ -80,6 +94,7 @@ struct Acc {
     jump: (f64, usize),
     reference: (f64, usize),
     attack: [(f64, usize); 4],
+    follow: (f64, usize),
 }
 
 fn add(a: &mut (f64, usize), x: f64) {
@@ -270,6 +285,50 @@ fn run_series(proto: &dyn Rule, s: &Series, seed: u64, pool: &[String], out: &mu
             }
             add(&mut out.entry(day).or_default().attack[k], avg(d));
         }
+        // A genuine move: every provider moves by about m (1.25x to 3x, up or
+        // down, from the seed; each provider its own +-10% around it) at its
+        // own time in the first FOLLOW_STAGGER_MS, and stays. The rule should
+        // follow: loss is the distance from m x the clean mark, charged once
+        // every provider has moved, to the end of the window. Jitter and
+        // stagger keep the move from being recognisable as synthetic.
+        let r0 = splitmix(attack_rng(seed, &s.group, day, 4));
+        let u = (r0 >> 11) as f64 / (1u64 << 53) as f64;
+        let lm = (FOLLOW.0.ln() + u * (FOLLOW.1.ln() - FOLLOW.0.ln())) * if r0 & 1 == 0 { 1.0 } else { -1.0 };
+        let m = lm.exp();
+        // Per provider (by name, so it holds across snapshots): its factor
+        // and when it moves.
+        let per = |p: &str| {
+            let h = splitmix(r0 ^ fnv(p));
+            let u = (h >> 11) as f64 / (1u64 << 53) as f64;
+            let at = start + splitmix(h) % (FOLLOW_STAGGER_MS + 1);
+            (m * (FOLLOW_JITTER * (2.0 * u - 1.0)).exp(), at)
+        };
+        let (st, l) = &saved[&a];
+        let (mut r, mut last) = (st.clone_box(), *l);
+        let mut d = (0.0, 0);
+        for (i, sn) in snaps.iter().enumerate().skip(a) {
+            if sn.at_ms >= start + ATTACK_MS + AFTER_MS {
+                break;
+            }
+            let eps: Vec<crate::OrEndpoint> = sn
+                .endpoints
+                .iter()
+                .map(|e| {
+                    let (f, at) = per(&e.provider);
+                    let f = if sn.at_ms >= at { f } else { 1.0 };
+                    crate::OrEndpoint { prompt: e.prompt * f, completion: e.completion * f, ..e.clone() }
+                })
+                .collect();
+            if let Some(x) = r.step(sn.at_ms, &eps).filter(|x| x.is_finite() && *x > 0.0) {
+                last = Some(x);
+            }
+            if sn.at_ms >= start + FOLLOW_STAGGER_MS {
+                // The jitter band is free: following is charged, the mix of
+                // providers' slightly different moves is not.
+                add(&mut d, (dist(last, marks[i].map(|c| c * m)) - FOLLOW_JITTER).max(0.0));
+            }
+        }
+        add(&mut out.entry(day).or_default().follow, avg(d));
     }
 }
 
@@ -281,7 +340,7 @@ pub fn day_losses(rule: &dyn Rule, series: &[Series], seed: u64) -> BTreeMap<u64
         run_series(rule, s, seed, &pool, &mut acc);
     }
     acc.into_iter()
-        .map(|(d, a)| (d, DayLoss { jump: avg(a.jump), reference: avg(a.reference), attack: [avg(a.attack[0]), avg(a.attack[1]), avg(a.attack[2]), avg(a.attack[3])] }))
+        .map(|(d, a)| (d, DayLoss { jump: avg(a.jump), follow: avg(a.follow), reference: avg(a.reference), attack: [avg(a.attack[0]), avg(a.attack[1]), avg(a.attack[2]), avg(a.attack[3])] }))
         .collect()
 }
 
@@ -313,6 +372,7 @@ pub struct Report {
     pub jump: Stat,
     pub attack: Stat,
     pub scenario: [Stat; 4],
+    pub follow: Stat,
     pub reference: Stat,
     /// Mean daily loss of the baseline and the candidate on the split.
     pub base: DayLoss,
@@ -360,6 +420,7 @@ pub fn score(cand: &dyn Rule, base: &dyn Rule, series: &[Series], seed: u64, spl
             let l = &m[d];
             x.jump += l.jump / n;
             x.reference += l.reference / n;
+            x.follow += l.follow / n;
             for k in 0..4 {
                 x.attack[k] += l.attack[k] / n;
             }
@@ -371,6 +432,7 @@ pub fn score(cand: &dyn Rule, base: &dyn Rule, series: &[Series], seed: u64, spl
         jump: pick(&|l| l.jump),
         attack: pick(&|l| l.attack_mean()),
         scenario: [pick(&|l| l.attack[0]), pick(&|l| l.attack[1]), pick(&|l| l.attack[2]), pick(&|l| l.attack[3])],
+        follow: pick(&|l| l.follow),
         reference: pick(&|l| l.reference),
         base: mean(&b),
         cand: mean(&c),

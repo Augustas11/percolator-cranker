@@ -70,6 +70,7 @@ fn run(args: &[String]) -> Result<()> {
     for k in 0..4 {
         part(&format!("  {}", SCENARIOS[k]), r.scenario[k], r.base.attack[k], r.cand.attack[k]);
     }
+    part("follow", r.follow, r.base.follow, r.cand.follow);
     part("reference", r.reference, r.base.reference, r.cand.reference);
     println!("days {}..{}  series {}  snapshots {snaps}  data {} (MANIFEST sha256 {manifest})", day(r.first_day), day(r.last_day), series.len(), data_dir.display());
     let gate = if r.passes() { "above" } else { "not above" };
