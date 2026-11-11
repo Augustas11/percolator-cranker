@@ -2,15 +2,17 @@
 //! every 5 minutes, so mark-price rules can later be scored on real history.
 //!
 //! One file per UTC day, `<out dir>/YYYY-MM-DD.jsonl`, append-only. Each line is
-//! one snapshot: `at_ms`, the parsed `rows` (null if the reply did not parse,
-//! with `error`), and the `raw` reply. Uses the pusher's client and parser.
+//! one snapshot: `at_ms` (when the reply arrived, as the pusher stamps it),
+//! the parsed `rows` (null if the reply did not parse, with `error`), and the
+//! `raw` reply text, byte for byte. Uses the pusher's client and parser.
+//! Failed fetches write nothing; `record-or-status` shows them as gaps.
 //!
 //! `staging record-or <config> <out dir>` runs it; `staging record-or-status
 //! <out dir>` prints snapshots and rows per day and any gap over 15 minutes.
 
 use super::flop::{fetch_or_text, http_client, record_rows};
 use super::*;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const EVERY_MS: u64 = 300_000;
@@ -23,8 +25,7 @@ fn day(at_ms: u64) -> String {
 
 /// One snapshot line.
 fn line(at_ms: u64, url: &str, text: &str) -> String {
-    let raw = serde_json::from_str::<serde_json::Value>(text).unwrap_or_else(|_| serde_json::Value::String(text.into()));
-    let mut v = serde_json::json!({ "at_ms": at_ms, "url": url, "rows": null, "raw": raw });
+    let mut v = serde_json::json!({ "at_ms": at_ms, "url": url, "rows": null, "raw": text });
     match record_rows(text) {
         Ok(rows) => v["rows"] = serde_json::to_value(rows).unwrap_or_default(),
         Err(e) => v["error"] = format!("{e:#}").into(),
@@ -52,10 +53,10 @@ fn read_dir(dir: &Path) -> Result<(Vec<Day>, Vec<u64>)> {
     let (mut days, mut ats) = (Vec::new(), Vec::new());
     for f in files {
         let mut d = Day { name: f.file_stem().unwrap_or_default().to_string_lossy().into(), snapshots: 0, rows: 0, unparsed: 0 };
-        for l in std::io::BufReader::new(std::fs::File::open(&f)?).lines() {
+        for l in std::io::BufReader::new(std::fs::File::open(&f)?).split(b'\n') {
             let l = l?;
-            // A torn last line (crash mid-write) is skipped, not fatal.
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&l) else { continue };
+            // A torn line (crash or full disk mid-write) is skipped, not fatal.
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&l) else { continue };
             let Some(at) = v["at_ms"].as_u64() else { continue };
             d.snapshots += 1;
             match v["rows"].as_array() {
@@ -75,6 +76,34 @@ pub(super) fn gaps(ats: &[u64]) -> Vec<(u64, u64)> {
     ats.windows(2).filter(|w| w[1] - w[0] > GAP_MS).map(|w| (w[0], w[1])).collect()
 }
 
+/// The newest snapshot time: last parseable line of the newest file only.
+fn last_at(dir: &Path) -> Result<Option<u64>> {
+    let newest = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .max();
+    let Some(f) = newest else { return Ok(None) };
+    Ok(std::io::BufReader::new(std::fs::File::open(f)?)
+        .split(b'\n')
+        .filter_map(|l| serde_json::from_slice::<serde_json::Value>(&l.ok()?).ok()?["at_ms"].as_u64())
+        .last())
+}
+
+/// Append one line; first end a torn line left by a crash, so the new one parses.
+fn append(path: &Path, line: &str) -> Result<()> {
+    let mut f = std::fs::OpenOptions::new().create(true).read(true).append(true).open(path)?;
+    if f.metadata()?.len() > 0 {
+        let mut last = [0u8];
+        f.seek(SeekFrom::End(-1))?;
+        f.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            f.write_all(b"\n")?;
+        }
+    }
+    f.write_all(line.as_bytes())?;
+    Ok(())
+}
+
 fn fmt_ms(at_ms: u64) -> String {
     chrono::DateTime::from_timestamp_millis(at_ms as i64).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default()
 }
@@ -91,25 +120,32 @@ pub fn or_record(args: &[String]) -> Result<()> {
     let dir = Path::new(&args[1]);
     std::fs::create_dir_all(dir)?;
     let client = http_client()?;
-    let mut last_ok = read_dir(dir)?.1.last().copied();
+    let mut last_ok = last_at(dir).unwrap_or_else(|e| {
+        eprintln!("or-record: could not read the last snapshot time: {e:#}");
+        None
+    });
     let mut alerted = false;
     eprintln!("or-record: {url} every {} s into {}", EVERY_MS / 1000, dir.display());
     loop {
+        let saved = fetch_or_text(&client, &url).and_then(|text| {
+            let now = launch::now_ms();
+            append(&dir.join(format!("{}.jsonl", day(now))), &line(now, &url, &text)).context("write failed")?;
+            Ok(now)
+        });
         let now = launch::now_ms();
-        match fetch_or_text(&client, &url) {
-            Ok(text) => {
-                let path = dir.join(format!("{}.jsonl", day(now)));
-                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
-                f.write_all(line(now, &url, &text).as_bytes())?;
-                if let Some(prev) = last_ok.filter(|p| now - p > GAP_MS) {
-                    eprintln!("or-record alert: gap of {} min ended (last snapshot {})", (now - prev) / 60_000, fmt_ms(prev));
+        match saved {
+            Ok(at) => {
+                if let Some(prev) = last_ok.filter(|p| at.saturating_sub(*p) > GAP_MS) {
+                    eprintln!("or-record alert: gap of {} min ended (last snapshot {})", at.saturating_sub(prev) / 60_000, fmt_ms(prev));
                 }
-                (last_ok, alerted) = (Some(now), false);
+                (last_ok, alerted) = (Some(at), false);
             }
             Err(e) => {
-                eprintln!("or-record: fetch failed: {e:#}");
-                if let Some(prev) = last_ok.filter(|p| !alerted && now - p > GAP_MS) {
-                    eprintln!("or-record alert: no snapshot for {} min (last {})", (now - prev) / 60_000, fmt_ms(prev));
+                eprintln!("or-record: {e:#}");
+                // No snapshot yet this run and none on disk: count from now.
+                let prev = *last_ok.get_or_insert(now);
+                if !alerted && now.saturating_sub(prev) > GAP_MS {
+                    eprintln!("or-record alert: no snapshot for {} min (last {}): {e:#}", now.saturating_sub(prev) / 60_000, fmt_ms(prev));
                     alerted = true;
                 }
             }
@@ -154,7 +190,7 @@ mod tests {
     #[test]
     fn a_snapshot_keeps_raw_and_every_row() {
         let v: serde_json::Value = serde_json::from_str(&line(1_762_000_000_000, "u", REPLY)).unwrap();
-        assert_eq!(v["raw"]["data"]["endpoints"].as_array().unwrap().len(), 2);
+        assert_eq!(v["raw"], REPLY);
         let rows = v["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["endpoint"], "deepinfra/bf16");
@@ -182,13 +218,20 @@ mod tests {
     fn status_counts_days_and_skips_a_torn_line() {
         let dir = std::env::temp_dir().join(format!("or-rec-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut body = line(1_762_000_000_000, "u", REPLY) + &line(1_762_000_300_000, "u", "busy");
-        body.push_str("{\"at_ms\":17620");
-        std::fs::write(dir.join("2025-11-01.jsonl"), body).unwrap();
+        let f = dir.join("2025-11-01.jsonl");
+        let mut body = line(1_762_000_000_000, "u", REPLY).into_bytes();
+        body.extend(line(1_762_000_300_000, "u", "busy").into_bytes());
+        // Torn mid-way through a multibyte character, as a full disk leaves it.
+        body.extend_from_slice(b"{\"at_ms\":17620,\"raw\":\"\xc3");
+        std::fs::write(&f, body).unwrap();
+        // The next append ends the torn line first, so it still parses.
+        append(&f, &line(1_762_000_600_000, "u", REPLY)).unwrap();
         let (days, ats) = read_dir(&dir).unwrap();
+        let last = last_at(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!((days.len(), days[0].snapshots, days[0].rows, days[0].unparsed), (1, 2, 2, 1));
-        assert_eq!(ats, vec![1_762_000_000_000, 1_762_000_300_000]);
+        assert_eq!((days.len(), days[0].snapshots, days[0].rows, days[0].unparsed), (1, 3, 4, 1));
+        assert_eq!(ats, vec![1_762_000_000_000, 1_762_000_300_000, 1_762_000_600_000]);
+        assert_eq!(last, Some(1_762_000_600_000));
         assert_eq!(day(1_762_000_000_000), "2025-11-01");
     }
 }

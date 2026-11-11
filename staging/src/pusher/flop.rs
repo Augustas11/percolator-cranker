@@ -415,10 +415,11 @@ struct OrRow {
     /// 0 is up; missing counts as up.
     #[serde(default)]
     status: Option<i64>,
+    /// Recorder only; any JSON type, so an odd value never breaks the pusher.
     #[serde(default)]
-    tag: Option<String>,
+    tag: Option<serde_json::Value>,
     #[serde(default)]
-    model_id: Option<String>,
+    model_id: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct OrPricing {
@@ -485,8 +486,8 @@ pub(super) fn record_rows(text: &str) -> Result<Vec<RecRow>> {
         .endpoints
         .into_iter()
         .map(|r| RecRow {
-            model: r.model_id,
-            endpoint: r.tag,
+            model: r.model_id.and_then(|v| v.as_str().map(String::from)),
+            endpoint: r.tag.and_then(|v| v.as_str().map(String::from)),
             provider: r.provider_name,
             quantization: r.quantization,
             prompt: r.pricing.prompt.parse().ok(),
