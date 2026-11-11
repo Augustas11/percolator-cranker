@@ -48,11 +48,17 @@ flop_refresh_s = 60
 flop_min_miners = 3
 # Qwen3.8-27B: 52 GF/token = 52e6 G_n per 1M tokens.
 flop_gn_per_mtok = 52000000
-# STAND-IN FLOP/USD, devnet only: makes 0.003 FLOP/G_n equal OpenRouter's
-# qwen/qwen3.8-27b (DeepInfra BF16, matching FLOP's weights) at a 3:1
-# input:output mix ($0.15 in, $1.875 out -> $0.58125 per 1M; owner decision
-# 2026-11-11). Replace with a live FLOP/USD feed at mainnet.
-flop_usd_standin = 0.000003726
+# FLOP/USD STAND-IN, devnet only (no FLOP/USD market until mainnet; then a
+# live feed replaces it). Derived, not typed: the rate at which the anchor
+# FLOP per G_n prices 1M tokens at OpenRouter's qwen/qwen3.8-27b (DeepInfra
+# BF16, matching FLOP's weights) blended input:output price. Blend 15:1 is
+# OpenRouter's measured mix (State of AI, arXiv 2601.10088: ~6,000 in / 400
+# out). (15 x 0.15 + 1.875) / 16 = $0.2578125 per 1M -> FLOP/USD 0.0000016527.
+# Owner decisions 2026-11-11; the blend is a convention and may change.
+flop_ref_usd_in = 0.15
+flop_ref_usd_out = 1.875
+flop_blend_in_out = 15
+flop_anchor_flop_per_gn = 0.003
 # Status polling interval for mark pushes and accrual transactions.
 confirm_poll_ms = 500
 # Unused by price_source = "flop"; the config loader requires them.
@@ -79,7 +85,7 @@ open_max_mark_age_ms = 1900000
 # InitMarket. Values and reasoning: docs/OPERATOR_PLAYBOOK.md section 2.
 [market]
 max_portfolio_assets = 1
-initial_price = 581256           # $0.58 per 1M tokens; the live index sets it
+initial_price = 257813           # $0.26 per 1M tokens; the live index sets it
 h_min = 0
 h_max = 150
 min_nonzero_mm_req = 1000
@@ -128,7 +134,7 @@ max_fill_notional_usd = 100000
 # $1M daily volume. No on-chain OI cap at this pin: this IS the OI cap.
 # Keep the engine refusal when AuthMark target != effective mark.
 max_lp_inventory_usd = 100000
-size_q = 1000000000               # 1,000 x 1M tokens (~581 test dollars)
+size_q = 1000000000               # 1,000 x 1M tokens (~258 test dollars)
 spread_bps = 10
 fee_bps = 15                     # >= trade_fee_base_bps (the wrapper refuses less)
 

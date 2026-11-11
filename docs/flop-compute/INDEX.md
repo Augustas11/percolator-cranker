@@ -31,10 +31,14 @@ down, because miners reprice to stay competitive in dollars.
 `mark = (FLOP per G_n) x 52e6 G_n per 1M tokens (52 GF/token) x FLOP/USD`.
 
 There is no FLOP/USD market until mainnet, so FLOP/USD is a configured
-**stand-in**, `flop_usd_standin = 0.000003726`. It makes today's 0.003 FLOP
-per G_n equal OpenRouter's qwen/qwen3.8-27b price (DeepInfra BF16, matching
-FLOP's weights) at a 3:1 input:output mix ($0.15 in, $1.875 out, so $0.58125
-per 1M; owner decision 2026-11-11). The opening mark is therefore about $0.58. At mainnet the stand-in is replaced by a live FLOP/USD feed.
+**stand-in**, derived from config rather than typed: the rate at which the
+anchor 0.003 FLOP per G_n prices 1M tokens at OpenRouter's qwen/qwen3.8-27b
+price (DeepInfra BF16, matching FLOP's weights) blended at
+`flop_blend_in_out` = 15 input tokens per output token. That is OpenRouter's
+measured mix (State of AI, arXiv 2601.10088). The blend is (15 x $0.15 +
+$1.875) / 16 = $0.2578 per 1M, so FLOP/USD = 0.0000016527 and the opening
+mark is about $0.26 (owner decisions, 2026-11-11). Change the blend or the
+reference prices in config and the stand-in follows. At mainnet the stand-in is replaced by a live FLOP/USD feed.
 
 **Refresh.** The pusher refetches every 60 s and pushes on a move or a
 heartbeat, like the SOL-PERP pusher.

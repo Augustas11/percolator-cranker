@@ -8,9 +8,9 @@
 //! There is no fallback to FLOP's nominal gateway prices.
 //!
 //! Units: the mark is USD per 1M tokens of the reference model, e6:
-//! (FLOP per G_n) x flop_gn_per_mtok x FLOP/USD. FLOP/USD is a configured
-//! STAND-IN on devnet (`flop_usd_standin`, calibrated to OpenRouter's price for
-//! the same model) until a live FLOP/USD feed exists.
+//! (FLOP per G_n) x flop_gn_per_mtok x FLOP/USD. FLOP/USD is a STAND-IN on
+//! devnet (`OracleCfg::flop_usd_standin`, derived from OpenRouter's price for the
+//! same model at a configured input:output blend) until a live feed exists.
 
 use super::*;
 use serde::Deserialize;
@@ -111,7 +111,7 @@ pub fn index(prints: &[Print], now_ms: u64, o: &launch::OracleCfg) -> Result<(u6
         }
     }
     // USD e6 per 1M tokens = planck/G_n / 1e18 x G_n per 1M tokens x FLOP/USD x 1e6.
-    let mark = (median as f64 / 1e12 * o.flop_gn_per_mtok as f64 * o.flop_usd_standin).round();
+    let mark = (median as f64 / 1e12 * o.flop_gn_per_mtok as f64 * o.flop_usd_standin()).round();
     if !(mark >= 1.0 && mark < u64::MAX as f64) {
         bail!("flop index: price {median} planck/G_n gives mark {mark}, out of range");
     }
@@ -129,9 +129,16 @@ impl FlopIndex {
         if cfg.flop_max_age_s >= cfg.flop_window_s || cfg.flop_refresh_s < 5 {
             bail!("flop_max_age_s must be under flop_window_s, and flop_refresh_s at least 5");
         }
-        if !(cfg.flop_usd_standin > 0.0 && cfg.flop_usd_standin.is_finite()) || cfg.flop_gn_per_mtok == 0 {
-            bail!("flop_usd_standin must be > 0 and flop_gn_per_mtok > 0");
+        let positive = |x: f64| x > 0.0 && x.is_finite();
+        if !(positive(cfg.flop_ref_usd_in) && positive(cfg.flop_ref_usd_out) && positive(cfg.flop_blend_in_out)
+            && positive(cfg.flop_anchor_flop_per_gn) && cfg.flop_gn_per_mtok > 0)
+        {
+            bail!("flop_ref_usd_in/out, flop_blend_in_out, flop_anchor_flop_per_gn and flop_gn_per_mtok must be > 0");
         }
+        eprintln!(
+            "flop index: USD per 1M tokens; reference ${:.6}/1M at {}:1 in:out; FLOP/USD STAND-IN {:.10}",
+            cfg.flop_ref_usd_per_mtok(), cfg.flop_blend_in_out, cfg.flop_usd_standin()
+        );
         // A 100-row page took 3-7 s from Pearl on 2026-11-10; 5 s failed every read.
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -259,15 +266,18 @@ mod tests {
         assert!(o.flop_max_age_s < o.flop_window_s);
         assert!(o.flop_min_miners >= 3);
         assert_eq!(o.flop_gn_per_mtok, 52_000_000);
-        assert!(o.flop_usd_standin > 0.0);
+        // 15:1 at $0.15 in / $1.875 out = $0.2578125 per 1M; at 0.003 FLOP/G_n and
+        // 52e6 G_n per 1M tokens that is FLOP/USD 0.0000016527.
+        assert!((o.flop_ref_usd_per_mtok() - 0.2578125).abs() < 1e-12);
+        assert!((o.flop_usd_standin() - 1.6526442e-6).abs() < 1e-12);
     }
 
     #[test]
     fn mark_is_usd_per_mtok_e6() {
         let o = cfg();
-        // 0.003 FLOP/G_n x 52e6 G_n = 156,000 FLOP per 1M tokens; x $0.000003726 = $0.581256.
+        // 0.003 FLOP/G_n, the anchor, prices 1M tokens at the blended reference: $0.2578125.
         let (mark, newest) = index(&many(o.flop_min_prints, P3), NOW, &o).unwrap();
-        assert_eq!(mark, 581_256);
+        assert!(mark.abs_diff(257_813) <= 1, "{mark}");
         assert_eq!(newest, NOW - 60_000);
     }
 
@@ -289,10 +299,10 @@ mod tests {
         o.flop_min_miners = 1;
         // One big print at the high price outweighs two small cheap ones.
         let prints = [p(60, 1, 1_000_000_000_000_000), p(60, 1, 1_000_000_000_000_000), p(60, 10, P3)];
-        assert_eq!(index(&prints, NOW, &o).unwrap().0, 581_256);
-        // Equal weights: the lower middle (0.002 FLOP/G_n = $0.387504).
+        assert!(index(&prints, NOW, &o).unwrap().0.abs_diff(257_813) <= 1);
+        // Equal weights: the lower middle (0.002 FLOP/G_n = 2/3 of that, $0.171875).
         let prints = [p(60, 1, 1_000_000_000_000_000), p(60, 1, 2_000_000_000_000_000), p(60, 1, P3)];
-        assert_eq!(index(&prints, NOW, &o).unwrap().0, 387_504);
+        assert!(index(&prints, NOW, &o).unwrap().0.abs_diff(171_875) <= 1);
     }
 
     #[test]

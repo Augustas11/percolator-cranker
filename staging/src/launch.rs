@@ -147,10 +147,31 @@ pub struct OracleCfg {
     /// Reference model compute per 1M tokens, in G_n (Qwen3.8-27B: 52 GF/token).
     #[serde(default = "default_flop_gn_per_mtok")]
     pub flop_gn_per_mtok: u64,
-    /// FLOP/USD. Devnet has no FLOP/USD market: a configured STAND-IN until a
-    /// live feed exists at mainnet. 0 = unset (the FLOP index refuses to start).
+    /// FLOP/USD STAND-IN inputs (devnet has no FLOP/USD market until mainnet):
+    /// the reference model's USD price per 1M input and output tokens, the
+    /// input:output token blend, and the FLOP per G_n anchor they are matched
+    /// to. See `OracleCfg::flop_usd_standin`. 0 = unset (the index refuses).
     #[serde(default)]
-    pub flop_usd_standin: f64,
+    pub flop_ref_usd_in: f64,
+    #[serde(default)]
+    pub flop_ref_usd_out: f64,
+    #[serde(default)]
+    pub flop_blend_in_out: f64,
+    #[serde(default)]
+    pub flop_anchor_flop_per_gn: f64,
+}
+
+impl OracleCfg {
+    /// Blended reference USD per 1M tokens: (blend x in + out) / (blend + 1).
+    pub fn flop_ref_usd_per_mtok(&self) -> f64 {
+        (self.flop_blend_in_out * self.flop_ref_usd_in + self.flop_ref_usd_out) / (self.flop_blend_in_out + 1.0)
+    }
+
+    /// STAND-IN FLOP/USD: the rate at which the anchor FLOP per G_n prices 1M
+    /// tokens at the blended reference USD price.
+    pub fn flop_usd_standin(&self) -> f64 {
+        self.flop_ref_usd_per_mtok() / (self.flop_anchor_flop_per_gn * self.flop_gn_per_mtok as f64)
+    }
 }
 
 fn default_exchange_binance_url() -> String { "wss://stream.binance.com:9443/ws/solusdt@ticker".into() }
