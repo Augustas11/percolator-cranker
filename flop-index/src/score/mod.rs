@@ -141,14 +141,15 @@ struct Attack {
     victims: Vec<String>,
     quant: String,
     /// The spoof lists under a real provider name from elsewhere in the
-    /// data, so a rule can't spot it by name.
+    /// data, priced in the median endpoint's input:output shape, so a rule
+    /// can't spot it by name or shape.
     spoof_name: String,
     /// Spoof: fraction of the median. Promo / relist: price multiplier.
     /// Drawn log-uniformly from the seed so a rule can't key on one value.
     mult: f64,
 }
 
-fn plan(eps: &[crate::OrEndpoint], rng: u64, k: usize, pool: &[String]) -> Attack {
+fn plan(eps: &[crate::OrEndpoint], rng: u64, k: usize, pool: &[String], listed: &BTreeSet<&str>) -> Attack {
     let mut provs: Vec<String> = up(eps).map(|e| e.provider.clone()).collect::<BTreeSet<_>>().into_iter().collect();
     let mut r = rng;
     for i in (1..provs.len()).rev() {
@@ -158,7 +159,7 @@ fn plan(eps: &[crate::OrEndpoint], rng: u64, k: usize, pool: &[String]) -> Attac
     let take = if SCENARIOS[k] == "down" { provs.len() / 2 } else { 1 };
     provs.truncate(take);
     let quant = up(eps).find(|e| provs.first() == Some(&e.provider)).map(|e| e.quantization.clone()).unwrap_or_default();
-    let free: Vec<&String> = pool.iter().filter(|p| !eps.iter().any(|e| e.provider == **p)).collect();
+    let free: Vec<&String> = pool.iter().filter(|p| !listed.contains(p.as_str()) && !eps.iter().any(|e| e.provider == **p)).collect();
     r = splitmix(r);
     let spoof_name = if free.is_empty() { "spoof".to_owned() } else { free[(r % free.len() as u64) as usize].clone() };
     r = splitmix(r);
@@ -174,9 +175,13 @@ fn attacked(at: &Attack, eps: &[crate::OrEndpoint]) -> Vec<crate::OrEndpoint> {
     let hit = |e: &crate::OrEndpoint| at.victims.iter().any(|p| *p == e.provider);
     match SCENARIOS[at.k] {
         "spoof" => {
-            if let Some(med) = median(up(eps).map(blend).collect()) {
-                let p = at.mult * med * 1e-6;
-                v.push(crate::OrEndpoint { provider: at.spoof_name.clone(), quantization: at.quant.clone(), prompt: p, completion: p, status: 0 });
+            // Priced like the median endpoint (same input:output shape),
+            // scaled so its blend is `mult` x the median.
+            let mut by: Vec<&crate::OrEndpoint> = up(eps).collect();
+            by.sort_by(|a, b| blend(a).total_cmp(&blend(b)));
+            if let (Some(med), Some(shape)) = (median(up(eps).map(blend).collect()), by.get(by.len() / 2)) {
+                let f = at.mult * med / blend(shape);
+                v.push(crate::OrEndpoint { provider: at.spoof_name.clone(), quantization: at.quant.clone(), prompt: shape.prompt * f, completion: shape.completion * f, status: 0 });
             }
         }
         "promo" | "relist" => {
@@ -210,6 +215,8 @@ fn run_series(proto: &dyn Rule, s: &Series, seed: u64, pool: &[String], out: &mu
         }
     }
     let anchor_at: BTreeSet<usize> = anchors.values().copied().collect();
+    // Every provider this series ever lists: a spoof never borrows one.
+    let listed: BTreeSet<&str> = snaps.iter().flat_map(|sn| sn.endpoints.iter().map(|e| e.provider.as_str())).collect();
     // Clean pass: effective marks (a hold keeps the last one), and the rule's
     // state just before each anchor.
     let mut rule = proto.clone_box();
@@ -247,7 +254,7 @@ fn run_series(proto: &dyn Rule, s: &Series, seed: u64, pool: &[String], out: &mu
     for (day, a) in anchors {
         let start = snaps[a].at_ms;
         for k in 0..4 {
-            let at = plan(&snaps[a].endpoints, attack_rng(seed, &s.group, day, k), k, pool);
+            let at = plan(&snaps[a].endpoints, attack_rng(seed, &s.group, day, k), k, pool, &listed);
             let (st, l) = &saved[&a];
             let (mut r, mut last) = (st.clone_box(), *l);
             let mut d = (0.0, 0);

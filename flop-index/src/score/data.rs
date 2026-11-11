@@ -254,9 +254,10 @@ fn recorder_jsonl(text: &str, groups: &mut BTreeMap<String, BTreeMap<u64, Vec<Or
         let Some(rows) = v["rows"].as_array() else { continue };
         // A row's model may be null: then the model in the fetched URL
         // (.../models/<org>/<model>/endpoints).
-        let url_model = v["url"].as_str().and_then(|u| u.split("/models/").nth(1)).and_then(|m| m.strip_suffix("/endpoints")).unwrap_or("unknown");
+        let url_model = v["url"].as_str().and_then(|u| u.split("/models/").nth(1)).and_then(|m| m.strip_suffix("/endpoints"));
         for r in rows {
-            let model = r["model"].as_str().unwrap_or(url_model);
+            // Neither names the model: skip rather than mix models.
+            let Some(model) = r["model"].as_str().or(url_model) else { continue };
             let (Some(provider), Some(p), Some(c)) = (r["provider"].as_str(), num(&r["prompt"]), num(&r["completion"])) else {
                 continue;
             };

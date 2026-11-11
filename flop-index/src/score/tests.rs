@@ -103,7 +103,7 @@ fn too_little_data_does_not_score() {
 fn attack_case(k: usize) -> (f64, f64) {
     let s = flat(3);
     let clean = spec_mark(&s.snaps[0].endpoints);
-    let at = plan(&s.snaps[0].endpoints, attack_rng(1, &s.group, DAY0, k), k, &[]);
+    let at = plan(&s.snaps[0].endpoints, attack_rng(1, &s.group, DAY0, k), k, &[], &BTreeSet::new());
     let hit = attacked(&at, &s.snaps[0].endpoints);
     let want = match spec_quote(&hit, 0) {
         Ok(q) => (q.usd_e6 as f64 / 1e6 / clean).ln().abs() / 2.0,
@@ -195,12 +195,22 @@ fn the_live_bf16_pair_relisting_at_10x_lifts_the_mark_6x() {
 fn the_spoof_wears_a_real_name_and_strengths_vary_with_the_seed() {
     let eps = flat(1).snaps[0].endpoints.clone();
     let pool = vec!["DeepInfra".to_string(), "Nebius".into()];
-    let a = plan(&eps, attack_rng(1, "g", DAY0, 0), 0, &pool);
+    let none = BTreeSet::new();
+    let a = plan(&eps, attack_rng(1, "g", DAY0, 0), 0, &pool, &none);
     assert_eq!(a.spoof_name, "Nebius", "never a provider already listed");
-    let m: BTreeSet<u64> = (0..20).map(|s| plan(&eps, attack_rng(s, "g", DAY0, 3), 3, &pool).mult.to_bits()).collect();
+    let later: BTreeSet<&str> = ["Nebius"].into();
+    assert_eq!(plan(&eps, attack_rng(1, "g", DAY0, 0), 0, &pool, &later).spoof_name, "spoof", "nor one the series lists later");
+    // Its input:output shape is a real listing's, not 1:1.
+    let mut real = eps.clone();
+    for e in &mut real {
+        e.completion *= 6.0;
+    }
+    let sp = attacked(&a, &real).pop().unwrap();
+    assert!((sp.completion / sp.prompt - 6.0).abs() < 1e-9, "{sp:?}");
+    let m: BTreeSet<u64> = (0..20).map(|s| plan(&eps, attack_rng(s, "g", DAY0, 3), 3, &pool, &none).mult.to_bits()).collect();
     assert!(m.len() > 10);
     for s in 0..50 {
-        let x = plan(&eps, attack_rng(s, "g", DAY0, 1), 1, &pool).mult;
+        let x = plan(&eps, attack_rng(s, "g", DAY0, 1), 1, &pool, &none).mult;
         assert!((0.05..=0.2).contains(&x), "{x}");
     }
 }
