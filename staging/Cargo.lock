@@ -1512,6 +1512,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "flop-index"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5565,6 +5575,7 @@ dependencies = [
  "bincode",
  "chrono",
  "drip",
+ "flop-index",
  "percolator",
  "percolator-prog",
  "reqwest",

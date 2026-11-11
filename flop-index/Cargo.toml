@@ -1,0 +1,23 @@
+[package]
+name = "flop-index"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The FLOP perp's OpenRouter mark rule (lib, used by staging's pusher) and
+# its scorer (bin flop-score, docs/flop-compute/SCORER.md). Kept out of
+# staging so the scorer builds in seconds, without the Solana graph.
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[[bin]]
+name = "flop-score"
+path = "src/bin/flop-score.rs"
+
+[dev-dependencies]
+# Only to check SPEC against launch/flop-compute.toml in CI (staging's own
+# test does the same but staging is not built in CI).
+toml = "0.5"
