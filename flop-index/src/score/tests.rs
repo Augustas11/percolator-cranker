@@ -52,6 +52,7 @@ fn the_baseline_scores_zero_against_itself() {
     for split in [Split::Tune, Split::Heldout, Split::All] {
         let r = score(&Spec, &Spec, &s, 1, split).unwrap();
         assert_eq!((r.total.gain, r.total.se), (0.0, 0.0), "{split:?}");
+        assert_eq!((r.ex_reference.gain, r.ex_reference.se), (0.0, 0.0));
         assert_eq!(r.base, r.cand);
         assert!(r.base.total() > 0.0, "the baseline has a loss of its own");
     }

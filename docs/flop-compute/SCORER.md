@@ -43,6 +43,11 @@ Each day, in log units (0.01 is about 1%):
   filter lagging a 2.5x cut by a day).
 - **reference**: distance from the leave-one-provider-out median.
 
+The report also prints `ex-ref`: the total without the reference part,
+with its own standard error. The reference is a median, so it favours
+median-like rules by construction (the judge's reason for vetoing median
+weighting, swarm round 1); a gain that lives only there is suspect.
+
 Day loss = jump + mean of the four attacks + follow + reference, each averaged over
 the models scored that day. Standard error is over days, Newey-West
 corrected (attack windows span two days and rules carry state). A snapshot
