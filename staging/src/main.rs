@@ -963,9 +963,11 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         let trade_now = Instant::now();
         let t = if live && trade_due(last_trade, trade_now, trade_every_secs, st.rolling && st.open.is_some()) {
             let r = trade.record(st.match_trade(&push_lifecycle));
-            // A refusal or skip sends nothing: retry next tick instead of waiting
-            // out the cadence (the first tick often runs before the first mark push).
-            if r != "-" && !r.starts_with("refused(") {
+            // A pre-send refusal or skip sends nothing: retry next tick instead of
+            // waiting out the cadence (the first tick often runs before the first
+            // mark push). target_effective_lag is refused on chain, so it waits.
+            let unsent = r == "-" || (r.starts_with("refused(") && r != "refused(target_effective_lag)");
+            if !unsent {
                 last_trade = Some(trade_now);
             }
             r
