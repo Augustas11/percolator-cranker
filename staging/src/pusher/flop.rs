@@ -265,9 +265,9 @@ mod tests {
     #[test]
     fn mark_is_usd_per_mtok_e6() {
         let o = cfg();
-        // 0.003 FLOP/G_n x 52e6 G_n = 156,000 FLOP per 1M tokens; x $0.0000065 = $1.014.
+        // 0.003 FLOP/G_n x 52e6 G_n = 156,000 FLOP per 1M tokens; x $0.000003726 = $0.581256.
         let (mark, newest) = index(&many(o.flop_min_prints, P3), NOW, &o).unwrap();
-        assert_eq!(mark, 1_014_000);
+        assert_eq!(mark, 581_256);
         assert_eq!(newest, NOW - 60_000);
     }
 
@@ -289,10 +289,10 @@ mod tests {
         o.flop_min_miners = 1;
         // One big print at the high price outweighs two small cheap ones.
         let prints = [p(60, 1, 1_000_000_000_000_000), p(60, 1, 1_000_000_000_000_000), p(60, 10, P3)];
-        assert_eq!(index(&prints, NOW, &o).unwrap().0, 1_014_000);
-        // Equal weights: the lower middle (0.002 FLOP/G_n = $0.676).
+        assert_eq!(index(&prints, NOW, &o).unwrap().0, 581_256);
+        // Equal weights: the lower middle (0.002 FLOP/G_n = $0.387504).
         let prints = [p(60, 1, 1_000_000_000_000_000), p(60, 1, 2_000_000_000_000_000), p(60, 1, P3)];
-        assert_eq!(index(&prints, NOW, &o).unwrap().0, 676_000);
+        assert_eq!(index(&prints, NOW, &o).unwrap().0, 387_504);
     }
 
     #[test]
