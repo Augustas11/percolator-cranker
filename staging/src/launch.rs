@@ -277,6 +277,16 @@ pub struct MatcherCfg {
     pub max_lp_inventory_usd: u64,
     pub spread_bps: u64,
     pub fee_bps: u64,
+    /// Market maker: also refuse closes (not just opens) on a stale mark.
+    #[serde(default)]
+    pub pull_when_stale: bool,
+    /// Market maker kill switch: while this file exists, no trades at all.
+    /// Empty = none.
+    #[serde(default)]
+    pub kill_file: String,
+    /// Print a JSON line per fill (`"event":"mm_fill"`).
+    #[serde(default)]
+    pub log_fills: bool,
 }
 
 #[derive(Deserialize, Clone)]

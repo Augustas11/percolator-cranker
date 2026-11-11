@@ -85,6 +85,24 @@ stale resolve).
 **Open-interest caps.** None configurable on engine master beyond the engine
 constants. The bots' own LP inventory limit (`max_lp_inventory_usd`) is the cap.
 
+## Market maker (devnet demo)
+
+The bots' LP trades against a test trader every few minutes, as a minimal
+market maker:
+
+- Small: 100 x 1M tokens a fill (~$44), at most $100 a fill and $500 of LP
+  inventory.
+- Pulls quotes when stale: no opens or closes while the mark is older than
+  ~32 minutes.
+- Kill switch: while `/run-dir/KILL` exists, no trades at all.
+- Logs one `"event":"mm_fill"` JSON line per fill (size, mark, quote, LP
+  inventory).
+
+Gap: at this engine pin a co-signed fill books at the oracle mark, and the
+quote price only sizes the fee. A real +-1% two-sided quote that outside
+takers can hit needs a matcher that prices off the mark, which engine master
+and our matcher do not have. The quote stays at mark +-10 bps.
+
 ## Rollover
 
 If the benchmark changes (a new model or a new FLOP registry value), the unit

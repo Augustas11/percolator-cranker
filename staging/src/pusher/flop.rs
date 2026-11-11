@@ -1006,4 +1006,15 @@ mod tests {
         let wrong = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6 + 5000, "inputs": serde_json::from_str::<serde_json::Value>(&line).unwrap()["inputs"].clone()})).unwrap();
         assert!(verify_push(&wrong, None).unwrap_err().to_string().contains("was pushed"));
     }
+
+    #[test]
+    fn shipped_market_maker_is_small_and_pulls_when_stale() {
+        let c = launch::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../launch/flop-compute.toml")).unwrap();
+        let m = c.matcher;
+        assert!(m.pull_when_stale && m.log_fills);
+        assert_eq!(m.kill_file, "/run-dir/KILL");
+        assert!(m.max_lp_inventory_usd <= 1000 && m.max_fill_notional_usd <= m.max_lp_inventory_usd);
+        // One fill at ~$0.44 stays under the fill cap.
+        assert!(m.size_q as u128 * 439_844 <= m.max_fill_notional_usd as u128 * 1_000_000_000_000);
+    }
 }

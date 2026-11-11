@@ -142,14 +142,18 @@ force_close_delay_slots = 20
 # Pushes also refresh any configured on-chain TradeCpi matcher contexts.
 [matcher]
 program_id = "8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE"
-# REPORT.md: tickets above $100k carry 2.7–4.8 bps adverse selection.
-max_fill_notional_usd = 100000
-# REPORT.md inventory limit (~line 260), ops/CAPITAL_PLAN.md: 10% of
-# $1M daily volume. No on-chain OI cap at this pin: this IS the OI cap.
-# Keep the engine refusal when AuthMark target != effective mark.
-max_lp_inventory_usd = 100000
-size_q = 1000000000               # 1,000 x 1M tokens (~440 test dollars)
+# Market maker (devnet demo): small size, small inventory, quotes pulled
+# (no opens or closes) when the mark is stale, a kill-switch file, a JSON line
+# per fill. At this engine pin a co-signed fill books at the oracle mark; the
+# quote price only sizes the fee, so a +-1% quote can't be expressed: spread_bps
+# stays at the 10 bps the wrapper has accepted on devnet.
+max_fill_notional_usd = 100
+max_lp_inventory_usd = 500
+size_q = 100000000                # 100 x 1M tokens (~44 test dollars)
 spread_bps = 10
+pull_when_stale = true
+kill_file = "/run-dir/KILL"       # touch it to stop all trades; rm to resume
+log_fills = true
 fee_bps = 15                     # >= trade_fee_base_bps (the wrapper refuses less)
 
 [amounts]

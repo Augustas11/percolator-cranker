@@ -548,6 +548,10 @@ impl Staging {
         if self.trader_pf == Pubkey::default() {
             return Ok(None); // no test trader (mainnet)
         }
+        let m = &self.cfg.matcher;
+        if !m.kill_file.is_empty() && std::path::Path::new(&m.kill_file).exists() {
+            return Ok(Some("refused(kill_switch)".into()));
+        }
         // Match the pusher's processed confirmation, including the preceding
         // push, and keep market/LP in one snapshot through trade confirmation.
         let _in_flight = lifecycle.lock().unwrap();
@@ -575,7 +579,7 @@ impl Staging {
             None if coin => self.cfg.matcher.size_q as i128,
             None => -(self.cfg.matcher.size_q as i128),
         };
-        if self.open.is_none() {
+        if self.open.is_none() || self.cfg.matcher.pull_when_stale {
             let fresh = self.pushed.as_ref().is_some_and(|p| {
                 let p = p.lock().unwrap();
                 p.market == self.market && p.published_ms.is_some_and(|at| launch::now_ms().saturating_sub(at) <= self.cfg.oracle.open_max_mark_age_ms)
@@ -624,6 +628,12 @@ impl Staging {
             return Err(error);
         }
         self.open = if self.open.is_some() { None } else { Some(q) };
+        if self.cfg.matcher.log_fills {
+            println!(
+                "{{\"event\":\"mm_fill\",\"size_q\":{q},\"mark_e6\":{mark},\"quote_e6\":{price},\"lp_inventory_q\":{},\"at_ms\":{}}}",
+                lp_position - q, launch::now_ms()
+            );
+        }
         Ok(Some(format!("{}{}", if q > 0 { "+" } else { "-" }, q.unsigned_abs())))
     }
 
@@ -1163,7 +1173,7 @@ mod fill_tests {
     }
 
     fn cfg() -> launch::MatcherCfg {
-        launch::MatcherCfg { program_id: Pubkey::new_unique().to_string(), size_q: 1, spread_bps: 10, fee_bps: 12, max_fill_notional_usd: 100_000, max_lp_inventory_usd: 100_000 }
+        launch::MatcherCfg { program_id: Pubkey::new_unique().to_string(), size_q: 1, spread_bps: 10, fee_bps: 12, max_fill_notional_usd: 100_000, max_lp_inventory_usd: 100_000, pull_when_stale: false, kill_file: String::new(), log_fills: false }
     }
     #[test]
     fn cap_uses_higher_price() {
