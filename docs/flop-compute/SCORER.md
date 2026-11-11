@@ -49,6 +49,11 @@ corrected (attack windows span two days and rules carry state). A snapshot
 is scored when it has 2+ up providers. A rule that
 holds (returns no price) keeps its last mark; no mark at all costs 1.0.
 
+The report also prints `ex-ref`: jump + mean attack + follow, paired per
+day with its own standard error. It is advisory; the gate still uses the
+total. The reference part is a median, so it favours median-like rules by
+construction; a gain that lives only there is suspect.
+
 **Held out:** the last 30% of scored days (`--split heldout`). Tune on
 `--split tune` only. Rules replay the whole history, so the last tune day's
 attack window and the first held-out jump read one day across the line.

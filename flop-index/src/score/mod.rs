@@ -84,6 +84,9 @@ impl DayLoss {
     pub fn attack_mean(&self) -> f64 {
         self.attack.iter().sum::<f64>() / 4.0
     }
+    pub fn ex_reference(&self) -> f64 {
+        self.total() - self.reference
+    }
     pub fn total(&self) -> f64 {
         self.jump + self.attack_mean() + self.follow + self.reference
     }
@@ -374,6 +377,10 @@ pub struct Report {
     pub scenario: [Stat; 4],
     pub follow: Stat,
     pub reference: Stat,
+    /// The total without the reference part. The reference is a median,
+    /// so it favours median-like rules by construction; a candidate whose
+    /// gain lives only there is suspect.
+    pub ex_reference: Stat,
     /// Mean daily loss of the baseline and the candidate on the split.
     pub base: DayLoss,
     pub cand: DayLoss,
@@ -433,6 +440,7 @@ pub fn score(cand: &dyn Rule, base: &dyn Rule, series: &[Series], seed: u64, spl
         attack: pick(&|l| l.attack_mean()),
         scenario: [pick(&|l| l.attack[0]), pick(&|l| l.attack[1]), pick(&|l| l.attack[2]), pick(&|l| l.attack[3])],
         follow: pick(&|l| l.follow),
+        ex_reference: pick(&|l| l.ex_reference()),
         reference: pick(&|l| l.reference),
         base: mean(&b),
         cand: mean(&c),

@@ -72,6 +72,7 @@ fn run(args: &[String]) -> Result<()> {
     }
     part("follow", r.follow, r.base.follow, r.cand.follow);
     part("reference", r.reference, r.base.reference, r.cand.reference);
+    part("ex-ref", r.ex_reference, r.base.ex_reference(), r.cand.ex_reference());
     println!("days {}..{}  series {}  snapshots {snaps}  data {} (MANIFEST sha256 {manifest})", day(r.first_day), day(r.last_day), series.len(), data_dir.display());
     let gate = if r.passes() { "above" } else { "not above" };
     let note = if split == Split::Heldout { "" } else { " (the gate counts only --split heldout)" };

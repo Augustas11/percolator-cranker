@@ -52,6 +52,7 @@ fn the_baseline_scores_zero_against_itself() {
     for split in [Split::Tune, Split::Heldout, Split::All] {
         let r = score(&Spec, &Spec, &s, 1, split).unwrap();
         assert_eq!((r.total.gain, r.total.se), (0.0, 0.0), "{split:?}");
+        assert_eq!((r.ex_reference.gain, r.ex_reference.se), (0.0, 0.0), "{split:?}");
         assert_eq!(r.base, r.cand);
         assert!(r.base.total() > 0.0, "the baseline has a loss of its own");
     }
@@ -250,6 +251,9 @@ fn a_frozen_mark_pays_for_not_following_real_moves() {
     // A frozen mark pays the whole move less the band, >= ln 1.25 - 0.1.
     assert!(r.cand.follow > 1.25f64.ln() - FOLLOW_JITTER, "{}", r.cand.follow);
     assert!(r.total.gain < -2.0 * r.total.se, "{:?}", r.total);
+    // ex-ref is the total less the reference part, day by day.
+    assert!((r.ex_reference.gain - (r.total.gain - r.reference.gain)).abs() < 1e-12);
+    assert!((r.ex_reference.gain - (r.jump.gain + r.attack.gain + r.follow.gain)).abs() < 1e-12);
 }
 
 #[test]
