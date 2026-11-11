@@ -415,6 +415,10 @@ struct OrRow {
     /// 0 is up; missing counts as up.
     #[serde(default)]
     status: Option<i64>,
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default)]
+    model_id: Option<String>,
 }
 #[derive(Deserialize)]
 struct OrPricing {
@@ -440,9 +444,56 @@ fn parse_or(text: &str) -> Result<Vec<OrEndpoint>> {
         .collect())
 }
 
+/// The client for FLOP and OpenRouter reads; the price recorder uses it too.
+/// A 100-row page took 3-7 s from Pearl on 2026-11-10; 5 s failed every read.
+pub(super) fn http_client() -> Result<reqwest::blocking::Client> {
+    Ok(reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?)
+}
+
+/// OpenRouter's endpoints listing, as text.
+pub(super) fn fetch_or_text(client: &reqwest::blocking::Client, url: &str) -> Result<String> {
+    Ok(client.get(url).send()?.error_for_status()?.text()?)
+}
+
 fn fetch_or(client: &reqwest::blocking::Client, o: &launch::OracleCfg) -> Result<OrQuote> {
-    let text = client.get(&o.or_url).send()?.error_for_status()?.text()?;
-    or_quote(&parse_or(&text)?, launch::now_ms(), o)
+    or_quote(&parse_or(&fetch_or_text(client, &o.or_url)?)?, launch::now_ms(), o)
+}
+
+/// One endpoint as the price recorder saves it: every row, priced or not.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub(super) struct RecRow {
+    pub model: Option<String>,
+    /// OpenRouter's endpoint tag, e.g. "deepinfra/bf16".
+    pub endpoint: Option<String>,
+    pub provider: String,
+    pub quantization: Option<String>,
+    /// USD per token, as listed (strings parsed; None if unparseable).
+    pub prompt: Option<f64>,
+    pub completion: Option<f64>,
+    pub status: Option<i64>,
+}
+
+/// The recorder's parsed rows, from the same reply the pusher parses.
+pub(super) fn record_rows(text: &str) -> Result<Vec<RecRow>> {
+    let reply: OrReply = serde_json::from_str(text).context("openrouter: unexpected endpoints reply")?;
+    Ok(reply
+        .data
+        .endpoints
+        .into_iter()
+        .map(|r| RecRow {
+            model: r.model_id,
+            endpoint: r.tag,
+            provider: r.provider_name,
+            quantization: r.quantization,
+            prompt: r.pricing.prompt.parse().ok(),
+            completion: r.pricing.completion.parse().ok(),
+            status: r.status,
+        })
+        .collect())
 }
 
 /// An alert line when the set of clamped endpoints changes (the first promo,
@@ -562,12 +613,7 @@ impl FlopIndex {
             "flop index: USD per 1M tokens of the benchmark ({} GF/token); mark_source={}; {}:1 in:out; FLOP/USD STAND-IN {:.10}",
             cfg.flop_gn_per_mtok / 1_000_000, cfg.flop_mark_source, cfg.flop_blend_in_out, cfg.flop_usd_standin()
         );
-        // A 100-row page took 3-7 s from Pearl on 2026-11-10; 5 s failed every read.
-        let client = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+        let client = http_client()?;
         let cached: Cache = Arc::new(Mutex::new(None));
         let or: OrCache = Arc::new(Mutex::new(None));
         let (writer, or_writer, o) = (Arc::clone(&cached), Arc::clone(&or), cfg.clone());

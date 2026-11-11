@@ -4,6 +4,8 @@ use std::collections::VecDeque;
 
 mod exchanges;
 mod flop;
+mod or_record;
+pub use or_record::{or_record, or_record_status};
 pub use exchanges::Exchanges;
 pub use flop::FlopIndex;
 pub use flop::verify_log as verify_push_log;
