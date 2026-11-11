@@ -15,8 +15,9 @@ baseline's loss minus the candidate's on the same days, so positive means the
 candidate is better. Then each part alone. Exit 0 means it ran; any other
 exit prints `DID NOT RUN` and why. `flop-score list` names the rules.
 
-**Gate** (proposed, needs the owner's OK before it goes into SPEC.md): a
-candidate is recommended only if, on `--split heldout`, gain > 2 x se.
+**Gate** ([SPEC.md](SPEC.md), "Changing the mark rule"): a candidate is
+recommended only if, on `--split heldout`, gain > 2 x se, and a reviewer on
+a different model does not veto it.
 
 ## What it charges
 

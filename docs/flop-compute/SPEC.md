@@ -98,6 +98,15 @@ FLOP receipts on devnet carry `flopUsd: "1"`, `flopUsdSource:
 "devnet-nominal"`. That is FLOP's devnet placeholder, not a price, and is
 never used as an FX source.
 
+## Changing the mark rule
+
+The rule above is scored by `flop-score` ([SCORER.md](SCORER.md)). A
+candidate rule is recommended to the operator only if, on the held-out days
+(`--split heldout`, the last 30% of scored days, never used for tuning), its
+paired gain over the current rule is above twice its standard error, and a
+reviewer on a different model has not vetoed it. A recommendation comes with
+the numbers. It does not change the live rule; the owner decides that.
+
 ## Manipulation limits (FLOP side)
 
 - No buyer and no miner carries more than 45% of the window's weight
