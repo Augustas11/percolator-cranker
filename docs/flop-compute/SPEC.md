@@ -48,6 +48,8 @@ FLOP/USD feed exists. The bots log the FLOP-implied FLOP/USD
   low-priced flood would tie everyone else and the lower median would take
   its price.
 - At least 3 distinct buyers and 3 distinct miners, or stale.
+- The caps are per address. One party running several buyer or miner
+  addresses is not caught.
 - Self-trades, forwards and unsettled rows are excluded.
 
 ## Checking the pusher
