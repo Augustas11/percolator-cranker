@@ -1,31 +1,42 @@
-//! FLOP compute index (devnet demo, docs/flop-compute/INDEX.md).
+//! FLOP compute perp price (devnet demo, docs/flop-compute/INDEX.md, SPEC.md).
 //!
-//! Reads realized compute-channel settlements from FLOP's read-only MCP server
-//! and turns them into one mark. FLOP side: the G_n-weighted median of the
-//! buyer's price, escrow / aggregateGn, over spot, non-self-trade settlements in
-//! a rolling window. Too few prints, too few distinct miners, or none recent
-//! enough, is an error: the pusher then sends nothing and the on-chain mark ages.
-//! There is no fallback to FLOP's nominal gateway prices.
+//! The mark is USD per 1M tokens of the benchmark model (Qwen3.8-27B), e6.
+//! `flop_mark_source` picks how it is made:
 //!
-//! Units: the mark is USD per 1M tokens of the reference model, e6:
-//! (FLOP per G_n) x flop_gn_per_mtok x FLOP/USD. FLOP/USD is a STAND-IN on
-//! devnet (`OracleCfg::flop_usd_standin`, derived from OpenRouter's price for the
-//! same model at a configured input:output blend) until a live feed exists.
+//! - `openrouter` (devnet default): the live USD leg. OpenRouter's public
+//!   endpoints list for the benchmark model, each endpoint's input:output blend
+//!   (`flop_blend_in_out`), median across endpoints of the preferred
+//!   quantization. No successful fetch in `or_max_age_s` is stale (hold).
+//! - `flop_standin`: FLOP side x `flop_gn_per_mtok` x a FLOP/USD stand-in
+//!   (`OracleCfg::flop_usd_standin`). Kept for mainnet, where a live FLOP/USD
+//!   replaces the stand-in.
+//!
+//! FLOP side, always computed (as the mark under `flop_standin`, as a check
+//! under `openrouter`): G_n-weighted median of the buyer's price,
+//! escrow / aggregateGn, over spot, non-self-trade settlements of every model in
+//! a rolling window. No single buyer (agent) or miner may carry more than
+//! `flop_max_agent_share` / `flop_max_miner_share` of the window's weight: its
+//! weight is scaled down to the cap, not dropped. Too few prints, buyers or
+//! miners, or no recent print, is stale. There is no fallback to FLOP's nominal
+//! gateway prices.
 
 use super::*;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// A reader thread refetches every `flop_refresh_s`; `latest()` only reads its
 /// cache, so the pusher never waits on FLOP while holding the trade lock.
 /// The reader thread's latest result: `None` until its first fetch.
 type Cache = Arc<Mutex<Option<Result<Vec<Print>, String>>>>;
+/// The last good OpenRouter quote; `None` until the first successful fetch.
+type OrCache = Arc<Mutex<Option<OrQuote>>>;
 
 #[derive(Clone)]
 pub struct FlopIndex {
     cfg: launch::OracleCfg,
     cached: Cache,
+    or: OrCache,
 }
 
 /// One settlement as the index uses it.
@@ -36,6 +47,8 @@ pub struct Print {
     /// Buyer's price: escrow / aggregateGn, planck (1e-18 FLOP) per G_n.
     pub planck_per_gn: u128,
     pub miner: String,
+    /// The buyer.
+    pub agent: String,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +58,7 @@ struct Row {
     aggregate_gn: String,
     escrow: String,
     miner: String,
+    agent: String,
     market_kind: String,
     settlement_kind: String,
     self_trade: bool,
@@ -74,16 +88,62 @@ impl Row {
         if self.market_kind != "spot" || self.settlement_kind != "settled" || self.self_trade {
             return None;
         }
-        // Bounded so the GN sums in `index` can't overflow.
+        // Bounded so the GN sums can't overflow.
         let gn = self.aggregate_gn.parse().ok().filter(|&g: &u128| g > 0 && g <= u64::MAX as u128)?;
         let escrow: u128 = self.escrow.parse().ok()?;
         let price = Some(escrow / gn).filter(|&p| p > 0)?;
-        Some(Print { at_ms: self.settled_at, gn, planck_per_gn: price, miner: self.miner.clone() })
+        Some(Print { at_ms: self.settled_at, gn, planck_per_gn: price, miner: self.miner.clone(), agent: self.agent.clone() })
     }
 }
 
-/// The index at `now_ms`: (mark_e6, newest print time). Errors say why it is stale.
-pub fn index(prints: &[Print], now_ms: u64, o: &launch::OracleCfg) -> Result<(u64, u64)> {
+/// The FLOP side at one instant, with what went into it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlopSide {
+    pub planck_per_gn: u128,
+    pub newest_ms: u64,
+    pub prints: usize,
+    pub agents: usize,
+    pub miners: usize,
+    /// Buyers / miners whose weight was scaled down to the share cap.
+    pub capped_agents: Vec<String>,
+    pub capped_miners: Vec<String>,
+}
+
+impl FlopSide {
+    pub fn flop_per_gn(&self) -> f64 {
+        self.planck_per_gn as f64 / 1e18
+    }
+}
+
+/// Scale down any group carrying more than `cap` of the total weight to exactly
+/// the cap (given the others), and name it. Returns whether anything moved.
+fn cap_groups(w: &mut [f64], key: impl Fn(usize) -> String, cap: f64, capped: &mut BTreeSet<String>) -> bool {
+    if !(cap > 0.0 && cap < 1.0) {
+        return false;
+    }
+    let total: f64 = w.iter().sum();
+    let mut by: HashMap<String, f64> = HashMap::new();
+    for (i, x) in w.iter().enumerate() {
+        *by.entry(key(i)).or_default() += x;
+    }
+    let mut moved = false;
+    for (g, wg) in by {
+        if wg > cap * total * (1.0 + 1e-9) {
+            let factor = cap / (1.0 - cap) * (total - wg) / wg;
+            for (i, x) in w.iter_mut().enumerate() {
+                if key(i) == g {
+                    *x *= factor;
+                }
+            }
+            capped.insert(g);
+            moved = true;
+        }
+    }
+    moved
+}
+
+/// The FLOP side at `now_ms`. Errors say why it is stale.
+pub fn flop_side(prints: &[Print], now_ms: u64, o: &launch::OracleCfg) -> Result<FlopSide> {
     let from = now_ms.saturating_sub(o.flop_window_s * 1000);
     let mut window: Vec<&Print> = prints.iter().filter(|p| p.at_ms >= from && p.at_ms <= now_ms).collect();
     if window.len() < o.flop_min_prints {
@@ -93,29 +153,204 @@ pub fn index(prints: &[Print], now_ms: u64, o: &launch::OracleCfg) -> Result<(u6
     if miners < o.flop_min_miners {
         bail!("flop index stale: {miners} distinct miners in the last {} s, need {}", o.flop_window_s, o.flop_min_miners);
     }
+    let agents = window.iter().map(|p| p.agent.as_str()).collect::<HashSet<_>>().len();
+    if agents < o.flop_min_agents {
+        bail!("flop index stale: {agents} distinct buyers in the last {} s, need {}", o.flop_window_s, o.flop_min_agents);
+    }
     let newest = window.iter().map(|p| p.at_ms).max().unwrap_or(0);
     let age_s = now_ms.saturating_sub(newest) / 1000;
     if age_s > o.flop_max_age_s {
         bail!("flop index stale: newest print {age_s} s old, max {}", o.flop_max_age_s);
     }
-    // GN-weighted median: the lowest price at which half the GN is covered.
+    // Weights: G_n, then buyer and miner shares capped (alternating until stable).
     window.sort_by_key(|p| p.planck_per_gn);
-    let total: u128 = window.iter().map(|p| p.gn).sum();
-    let mut covered = 0u128;
-    let mut median = 0u128;
-    for p in &window {
-        covered += p.gn;
-        if covered * 2 >= total {
+    let mut w: Vec<f64> = window.iter().map(|p| p.gn as f64).collect();
+    let (mut capped_agents, mut capped_miners) = (BTreeSet::new(), BTreeSet::new());
+    for _ in 0..64 {
+        let a = cap_groups(&mut w, |i| window[i].agent.clone(), o.flop_max_agent_share, &mut capped_agents);
+        let m = cap_groups(&mut w, |i| window[i].miner.clone(), o.flop_max_miner_share, &mut capped_miners);
+        if !a && !m {
+            break;
+        }
+    }
+    // Weighted median: the lowest price at which half the weight is covered.
+    let total: f64 = w.iter().sum();
+    if !(total > 0.0) {
+        bail!("flop index: no weight left after caps");
+    }
+    let mut covered = 0.0;
+    let mut median = window[window.len() - 1].planck_per_gn;
+    for (p, x) in window.iter().zip(&w) {
+        covered += x;
+        if covered * 2.0 >= total * (1.0 - 1e-12) {
             median = p.planck_per_gn;
             break;
         }
     }
+    Ok(FlopSide {
+        planck_per_gn: median,
+        newest_ms: newest,
+        prints: window.len(),
+        agents,
+        miners,
+        capped_agents: capped_agents.into_iter().collect(),
+        capped_miners: capped_miners.into_iter().collect(),
+    })
+}
+
+/// The `flop_standin` mark at `now_ms`: (mark_e6, newest print time).
+pub fn index(prints: &[Print], now_ms: u64, o: &launch::OracleCfg) -> Result<(u64, u64)> {
+    let side = flop_side(prints, now_ms, o)?;
     // USD e6 per 1M tokens = planck/G_n / 1e18 x G_n per 1M tokens x FLOP/USD x 1e6.
-    let mark = (median as f64 / 1e12 * o.flop_gn_per_mtok as f64 * o.flop_usd_standin()).round();
+    let mark = (side.planck_per_gn as f64 / 1e12 * o.flop_gn_per_mtok as f64 * o.flop_usd_standin()).round();
     if !(mark >= 1.0 && mark < u64::MAX as f64) {
-        bail!("flop index: price {median} planck/G_n gives mark {mark}, out of range");
+        bail!("flop index: price {} planck/G_n gives mark {mark}, out of range", side.planck_per_gn);
     }
-    Ok((mark as u64, newest))
+    Ok((mark as u64, side.newest_ms))
+}
+
+/// One OpenRouter endpoint for the benchmark model, prices in USD per token.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrEndpoint {
+    pub provider: String,
+    pub quantization: String,
+    pub prompt: f64,
+    pub completion: f64,
+}
+
+/// The live USD leg: median blended price and the endpoints behind it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrQuote {
+    pub usd_e6: u64,
+    pub at_ms: u64,
+    /// (provider, quantization, blended USD per 1M tokens) for each endpoint used.
+    pub used: Vec<(String, String, f64)>,
+    /// Which set was used: a quantization tier, "preferred" (all tiers) or "all".
+    pub set: String,
+}
+
+/// Pick endpoints: the first quantization tier with at least `or_min_endpoints`;
+/// else all listed tiers together if that reaches it; else every endpoint.
+/// Each endpoint's price is its input:output blend; the quote is the median.
+pub fn or_quote(endpoints: &[OrEndpoint], at_ms: u64, o: &launch::OracleCfg) -> Result<OrQuote> {
+    let valid: Vec<&OrEndpoint> = endpoints
+        .iter()
+        .filter(|e| e.prompt.is_finite() && e.completion.is_finite() && e.prompt >= 0.0 && e.completion >= 0.0 && e.prompt + e.completion > 0.0)
+        .collect();
+    let tier = |qs: &[String]| valid.iter().copied().filter(|e| qs.iter().any(|q| q == &e.quantization)).collect::<Vec<_>>();
+    let mut chosen = None;
+    for q in &o.or_quantizations {
+        let m = tier(std::slice::from_ref(q));
+        if m.len() >= o.or_min_endpoints {
+            chosen = Some((m, q.clone()));
+            break;
+        }
+    }
+    let (set, name) = match chosen {
+        Some(c) => c,
+        None => {
+            let m = tier(&o.or_quantizations);
+            if m.len() >= o.or_min_endpoints { (m, "preferred".to_owned()) } else { (valid.clone(), "all".to_owned()) }
+        }
+    };
+    if set.is_empty() {
+        bail!("openrouter: no priced endpoints");
+    }
+    let b = o.flop_blend_in_out;
+    let mut used: Vec<(String, String, f64)> = set
+        .iter()
+        .map(|e| (e.provider.clone(), e.quantization.clone(), (b * e.prompt + e.completion) / (b + 1.0) * 1e6))
+        .collect();
+    used.sort_by(|x, y| x.2.total_cmp(&y.2));
+    let n = used.len();
+    let median = if n % 2 == 1 { used[n / 2].2 } else { (used[n / 2 - 1].2 + used[n / 2].2) / 2.0 };
+    let usd_e6 = (median * 1e6).round();
+    if !(usd_e6 >= 1.0 && usd_e6 < u64::MAX as f64) {
+        bail!("openrouter: median {median} USD per 1M tokens out of range");
+    }
+    Ok(OrQuote { usd_e6: usd_e6 as u64, at_ms, used, set: name })
+}
+
+#[derive(Deserialize)]
+struct OrReply {
+    data: OrData,
+}
+#[derive(Deserialize)]
+struct OrData {
+    endpoints: Vec<OrRow>,
+}
+#[derive(Deserialize)]
+struct OrRow {
+    provider_name: String,
+    #[serde(default)]
+    quantization: Option<String>,
+    pricing: OrPricing,
+}
+#[derive(Deserialize)]
+struct OrPricing {
+    prompt: String,
+    completion: String,
+}
+
+fn parse_or(text: &str) -> Result<Vec<OrEndpoint>> {
+    let reply: OrReply = serde_json::from_str(text).context("openrouter: unexpected endpoints reply")?;
+    Ok(reply
+        .data
+        .endpoints
+        .into_iter()
+        .filter_map(|r| {
+            Some(OrEndpoint {
+                provider: r.provider_name,
+                quantization: r.quantization.unwrap_or_else(|| "unknown".into()),
+                prompt: r.pricing.prompt.parse().ok()?,
+                completion: r.pricing.completion.parse().ok()?,
+            })
+        })
+        .collect())
+}
+
+fn fetch_or(client: &reqwest::blocking::Client, o: &launch::OracleCfg) -> Result<OrQuote> {
+    let text = client.get(&o.or_url).send()?.error_for_status()?.text()?;
+    or_quote(&parse_or(&text)?, launch::now_ms(), o)
+}
+
+/// The mark under `openrouter`: the last good quote while it is fresh.
+pub fn or_mark(q: Option<&OrQuote>, now_ms: u64, o: &launch::OracleCfg) -> Result<(u64, u64)> {
+    let q = q.context("openrouter: no successful fetch yet")?;
+    let age_s = now_ms.saturating_sub(q.at_ms) / 1000;
+    if age_s > o.or_max_age_s {
+        bail!("openrouter stale: last good fetch {age_s} s ago, max {}", o.or_max_age_s);
+    }
+    Ok((q.usd_e6, q.at_ms))
+}
+
+/// One status line: the mark's legs, the FLOP-implied FLOP/USD, caps applied.
+pub fn status(or: Option<&OrQuote>, side: &Result<FlopSide>, o: &launch::OracleCfg) -> String {
+    let mut t = format!("flop status: mark_source={}", o.flop_mark_source);
+    match or {
+        Some(q) => {
+            let legs: Vec<String> = q.used.iter().map(|(p, qn, usd)| format!("{p} {qn} ${usd:.4}")).collect();
+            t.push_str(&format!("; openrouter ${:.4} ({} set: {})", q.usd_e6 as f64 / 1e6, q.set, legs.join(", ")));
+        }
+        None => t.push_str("; openrouter none"),
+    }
+    match side {
+        Ok(s) => {
+            t.push_str(&format!(
+                "; flop {:.6} FLOP/G_n over {} prints, {} buyers, {} miners",
+                s.flop_per_gn(), s.prints, s.agents, s.miners
+            ));
+            if !s.capped_agents.is_empty() || !s.capped_miners.is_empty() {
+                t.push_str(&format!("; capped buyers {:?} miners {:?}", s.capped_agents, s.capped_miners));
+            }
+            if let Some(q) = or {
+                let fx = q.usd_e6 as f64 / 1e6 / (s.flop_per_gn() * o.flop_gn_per_mtok as f64);
+                t.push_str(&format!("; FLOP-implied FLOP/USD {fx:.10} (stand-in {:.10})", o.flop_usd_standin()));
+            }
+        }
+        Err(e) => t.push_str(&format!("; {e}")),
+    }
+    t
 }
 
 impl FlopIndex {
@@ -135,9 +370,24 @@ impl FlopIndex {
         {
             bail!("flop_ref_usd_in/out, flop_blend_in_out, flop_anchor_flop_per_gn and flop_gn_per_mtok must be > 0");
         }
+        let share = |x: f64| x > 0.0 && x <= 1.0;
+        if !(share(cfg.flop_max_agent_share) && share(cfg.flop_max_miner_share)) || cfg.flop_min_agents == 0 {
+            bail!("flop_max_agent_share / flop_max_miner_share must be in (0, 1], flop_min_agents > 0");
+        }
+        match cfg.flop_mark_source.as_str() {
+            "openrouter" => {
+                if !cfg.or_url.starts_with("https://") || cfg.or_min_endpoints == 0 || cfg.or_refresh_s < 60
+                    || cfg.or_max_age_s < cfg.or_refresh_s
+                {
+                    bail!("or_url must be https, or_min_endpoints > 0, or_refresh_s >= 60, or_max_age_s >= or_refresh_s");
+                }
+            }
+            "flop_standin" => {}
+            other => bail!("flop_mark_source must be openrouter or flop_standin, not {other:?}"),
+        }
         eprintln!(
-            "flop index: USD per 1M tokens; reference ${:.6}/1M at {}:1 in:out; FLOP/USD STAND-IN {:.10}",
-            cfg.flop_ref_usd_per_mtok(), cfg.flop_blend_in_out, cfg.flop_usd_standin()
+            "flop index: USD per 1M tokens of the benchmark ({} GF/token); mark_source={}; {}:1 in:out; FLOP/USD STAND-IN {:.10}",
+            cfg.flop_gn_per_mtok / 1_000_000, cfg.flop_mark_source, cfg.flop_blend_in_out, cfg.flop_usd_standin()
         );
         // A 100-row page took 3-7 s from Pearl on 2026-11-10; 5 s failed every read.
         let client = reqwest::blocking::Client::builder()
@@ -146,9 +396,11 @@ impl FlopIndex {
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let cached: Cache = Arc::new(Mutex::new(None));
-        let (writer, o) = (Arc::clone(&cached), cfg.clone());
+        let or: OrCache = Arc::new(Mutex::new(None));
+        let (writer, or_writer, o) = (Arc::clone(&cached), Arc::clone(&or), cfg.clone());
         let mut models: Vec<Model> = Vec::new();
-        let (mut models_at, mut last_table) = (None::<Instant>, String::new());
+        let (mut models_at, mut or_at) = (None::<Instant>, None::<Instant>);
+        let (mut last_table, mut last_status) = (String::new(), String::new());
         std::thread::spawn(move || loop {
             // Model registry for the status table: hourly, and kept on a failed read.
             if models_at.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(3600)) {
@@ -157,19 +409,41 @@ impl FlopIndex {
                     Err(e) => eprintln!("flop model registry read failed: {e:#}"),
                 }
             }
+            // OpenRouter: every or_refresh_s; a failed read keeps the last good
+            // quote, which `or_mark` ages out after or_max_age_s.
+            if o.flop_mark_source == "openrouter" && or_at.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(o.or_refresh_s)) {
+                or_at = Some(Instant::now());
+                match fetch_or(&client, &o) {
+                    Ok(q) => *or_writer.lock().unwrap_or_else(|p| p.into_inner()) = Some(q),
+                    Err(e) => eprintln!("openrouter read failed: {e:#}"),
+                }
+            }
             let fetched = fetch(&client, &o).map_err(|e| format!("{e:#}"));
-            if let Ok(prints) = &fetched {
-                if let Ok((mark, _)) = index(prints, launch::now_ms(), &o) {
-                    let t = table(mark, &models, &o);
-                    if t != last_table {
-                        eprintln!("{t}");
-                        last_table = t;
-                    }
+            let now = launch::now_ms();
+            let or_now = or_writer.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            let side = match &fetched {
+                Ok(prints) => flop_side(prints, now, &o),
+                Err(e) => Err(anyhow!("flop read failed: {e}")),
+            };
+            let st = status(or_now.as_ref(), &side, &o);
+            if st != last_status {
+                eprintln!("{st}");
+                last_status = st;
+            }
+            let mark = match o.flop_mark_source.as_str() {
+                "openrouter" => or_mark(or_now.as_ref(), now, &o).ok(),
+                _ => fetched.as_ref().ok().and_then(|p| index(p, now, &o).ok()),
+            };
+            if let Some((mark, _)) = mark {
+                let t = table(mark, &models, &o);
+                if t != last_table {
+                    eprintln!("{t}");
+                    last_table = t;
                 }
             }
             let mut cache = writer.lock().unwrap_or_else(|p| p.into_inner());
             match fetched {
-                // One failed read keeps the last good prints; `index` still
+                // One failed read keeps the last good prints; the FLOP side still
                 // ages them out after `flop_max_age_s`.
                 Err(e) if matches!(*cache, Some(Ok(_))) => eprintln!("flop read failed (keeping last read): {e}"),
                 Err(e) => {
@@ -181,10 +455,14 @@ impl FlopIndex {
             drop(cache);
             std::thread::sleep(Duration::from_secs(o.flop_refresh_s));
         });
-        Ok(Self { cfg: cfg.clone(), cached })
+        Ok(Self { cfg: cfg.clone(), cached, or })
     }
 
     pub fn latest(&mut self) -> Result<(u64, u64)> {
+        if self.cfg.flop_mark_source == "openrouter" {
+            let q = self.or.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            return or_mark(q.as_ref(), launch::now_ms(), &self.cfg);
+        }
         match &*self.cached.lock().unwrap_or_else(|p| p.into_inner()) {
             None => bail!("flop index: no read yet"),
             Some(Ok(prints)) => index(prints, launch::now_ms(), &self.cfg),
@@ -329,8 +607,9 @@ mod tests {
     const P3: u128 = 3_000_000_000_000_000;
 
     fn p(age_s: u64, gn: u128, price: u128) -> Print {
-        // Miners rotate over 7 (60 s steps too) so the distinct-miner gate passes by default.
-        Print { at_ms: NOW - age_s * 1000, gn, planck_per_gn: price, miner: format!("m{}", age_s % 7) }
+        // Miners rotate over 7 and buyers over 5 (60 s steps too) so the
+        // distinct-miner and distinct-buyer gates and the caps pass by default.
+        Print { at_ms: NOW - age_s * 1000, gn, planck_per_gn: price, miner: format!("m{}", age_s % 7), agent: format!("a{}", (age_s + age_s / 60) % 5) }
     }
 
     fn many(n: usize, price: u128) -> Vec<Print> {
@@ -392,6 +671,9 @@ mod tests {
         let mut o = cfg();
         o.flop_min_prints = 3;
         o.flop_min_miners = 1;
+        o.flop_min_agents = 1;
+        o.flop_max_agent_share = 1.0;
+        o.flop_max_miner_share = 1.0;
         // One big print at the high price outweighs two small cheap ones.
         let prints = [p(60, 1, 1_000_000_000_000_000), p(60, 1, 1_000_000_000_000_000), p(60, 10, P3)];
         assert!(index(&prints, NOW, &o).unwrap().0.abs_diff(257_813) <= 1);
@@ -431,6 +713,7 @@ mod tests {
             aggregate_gn: gn.into(),
             escrow: escrow.into(),
             miner: "m".into(),
+            agent: "a".into(),
             market_kind: kind.into(),
             settlement_kind: settled.into(),
             self_trade,
@@ -440,7 +723,7 @@ mod tests {
         // 10 FLOP escrow over 3436 G_n: 0.00291 FLOP/G_n (a live row, 2026-11-11).
         assert_eq!(
             row("spot", "settled", false, "3436", "10000000000000000000").print(),
-            Some(Print { at_ms: NOW, gn: 3436, planck_per_gn: 2_910_360_884_749_708, miner: "m".into() })
+            Some(Print { at_ms: NOW, gn: 3436, planck_per_gn: 2_910_360_884_749_708, miner: "m".into(), agent: "a".into() })
         );
         assert!(row("spot", "settled", true, "16", "16").print().is_none(), "self-trade");
         assert!(row("forward", "settled", false, "16", "16").print().is_none(), "forward");
@@ -454,7 +737,7 @@ mod tests {
 
     #[test]
     fn parses_an_sse_reply_and_tool_errors() {
-        let inner = r#"{"data":[{"settledAt":1,"aggregateGn":"16","escrow":"48000000000000000","miner":"m1","marketKind":"spot","settlementKind":"settled","selfTrade":false,"extrinsicHash":"0x1","eventIndex":3,"extra":1}],"pagination":{"total":1,"limit":100,"offset":0,"hasMore":false}}"#;
+        let inner = r#"{"data":[{"settledAt":1,"aggregateGn":"16","escrow":"48000000000000000","miner":"m1","agent":"a1","marketKind":"spot","settlementKind":"settled","selfTrade":false,"extrinsicHash":"0x1","eventIndex":3,"extra":1}],"pagination":{"total":1,"limit":100,"offset":0,"hasMore":false}}"#;
         let reply = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":inner}]}});
         let sse = format!("event: message\ndata: {reply}\n\n");
         // `data:` with no space is valid SSE too.
@@ -467,5 +750,123 @@ mod tests {
         assert!(!page.pagination.has_more);
         let err = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"limit too big"}]}});
         assert!(parse_page(&err.to_string()).is_err());
+    }
+
+    #[test]
+    fn a_flooding_buyer_is_capped_not_dropped() {
+        let o = cfg();
+        // 30 honest prints at 0.003 from 5 buyers, then one buyer floods the
+        // window with 10x the honest weight at 0.03 FLOP/G_n.
+        let mut prints = many(30, P3);
+        for i in 0..30 {
+            let mut x = p(61 + i * 60, 100, 10 * P3);
+            x.agent = "whale".into();
+            prints.push(x);
+        }
+        let side = flop_side(&prints, NOW, &o).unwrap();
+        assert_eq!(side.capped_agents, vec!["whale".to_string()]);
+        // Capped at half the weight, the whale ties the honest half: the median is
+        // the lowest price covering half, still the honest price.
+        assert_eq!(side.planck_per_gn, P3);
+        // Uncapped, it would set the price.
+        let mut loose = o.clone();
+        loose.flop_max_agent_share = 1.0;
+        assert_eq!(flop_side(&prints, NOW, &loose).unwrap().planck_per_gn, 10 * P3);
+        // A smaller cap leaves the whale a minority, kept in the window.
+        let mut tight = o.clone();
+        tight.flop_max_agent_share = 0.3;
+        let s = flop_side(&prints, NOW, &tight).unwrap();
+        assert_eq!((s.planck_per_gn, s.prints), (P3, 60));
+    }
+
+    #[test]
+    fn a_flooding_miner_is_capped() {
+        let o = cfg();
+        let mut prints = many(30, P3);
+        for i in 0..30 {
+            let mut x = p(61 + i * 60, 100, 10 * P3);
+            x.miner = "bigminer".into();
+            prints.push(x);
+        }
+        let side = flop_side(&prints, NOW, &o).unwrap();
+        assert!(side.capped_miners.contains(&"bigminer".to_string()), "{side:?}");
+        assert_eq!(side.planck_per_gn, P3);
+    }
+
+    #[test]
+    fn fewer_than_three_buyers_is_stale() {
+        let o = cfg();
+        assert_eq!(o.flop_min_agents, 3);
+        let mut prints = many(o.flop_min_prints, P3);
+        for (i, x) in prints.iter_mut().enumerate() {
+            x.agent = format!("a{}", i % 2);
+        }
+        let e = flop_side(&prints, NOW, &o).unwrap_err();
+        assert!(e.to_string().contains("distinct buyers"), "{e}");
+        prints[0].agent = "a2".into();
+        assert!(flop_side(&prints, NOW, &o).is_ok());
+    }
+
+    fn ep(provider: &str, q: &str, prompt: f64, completion: f64) -> OrEndpoint {
+        OrEndpoint { provider: provider.into(), quantization: q.into(), prompt: prompt * 1e-6, completion: completion * 1e-6 }
+    }
+
+    #[test]
+    fn openrouter_picks_the_preferred_tier_and_takes_the_median() {
+        let o = cfg();
+        assert_eq!(o.flop_mark_source, "openrouter");
+        // 2026-11-11 list: blended DeepInfra bf16 $0.2578, GMICloud bf16 $0.6219, Cerebras fp16 $1.021.
+        let eps = [
+            ep("DeepInfra", "bf16", 0.15, 1.875),
+            ep("GMICloud", "bf16", 0.40, 3.95),
+            ep("Cerebras", "fp16", 0.85, 3.6),
+            ep("Cheap", "fp8", 0.01, 0.02),
+        ];
+        let q = or_quote(&eps, NOW, &o).unwrap();
+        assert_eq!(q.set, "bf16");
+        assert_eq!(q.used.len(), 2);
+        // Even count: mean of the two (0.2578125 + 0.621875) / 2.
+        assert!(q.usd_e6.abs_diff(439_844) <= 1, "{}", q.usd_e6);
+        // One bf16 and one fp16: the preferred tiers together, mean of the two.
+        let q = or_quote(&[eps[0].clone(), eps[2].clone(), eps[3].clone()], NOW, &o).unwrap();
+        assert_eq!(q.set, "preferred");
+        assert!(q.usd_e6.abs_diff(639_844) <= 1, "{}", q.usd_e6);
+        // Only one preferred endpoint at all: every endpoint.
+        let q = or_quote(&[eps[0].clone(), eps[3].clone()], NOW, &o).unwrap();
+        assert_eq!(q.set, "all");
+        assert!(or_quote(&[], NOW, &o).is_err());
+    }
+
+    #[test]
+    fn openrouter_goes_stale_without_a_good_fetch() {
+        let o = cfg();
+        assert!(or_mark(None, NOW, &o).is_err());
+        let q = OrQuote { usd_e6: 439_844, at_ms: NOW - o.or_max_age_s * 1000, used: vec![], set: "bf16".into() };
+        assert_eq!(or_mark(Some(&q), NOW, &o).unwrap(), (439_844, q.at_ms));
+        let e = or_mark(Some(&q), NOW + 1000, &o).unwrap_err();
+        assert!(e.to_string().contains("stale"), "{e}");
+    }
+
+    #[test]
+    fn parses_openrouter_endpoints() {
+        let text = r#"{"data":{"id":"qwen/qwen3.8-27b","endpoints":[
+            {"provider_name":"DeepInfra","quantization":"bf16","pricing":{"prompt":"0.00000015","completion":"0.000001875"}},
+            {"provider_name":"X","pricing":{"prompt":"0.0000001","completion":"0.0000002"}},
+            {"provider_name":"Bad","quantization":"fp8","pricing":{"prompt":"n/a","completion":"0"}}]}}"#;
+        let eps = parse_or(text).unwrap();
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps[1].quantization, "unknown");
+        assert!((eps[0].completion - 1.875e-6).abs() < 1e-15);
+    }
+
+    #[test]
+    fn status_logs_the_flop_implied_rate() {
+        let o = cfg();
+        let q = OrQuote { usd_e6: 257_813, at_ms: NOW, used: vec![("DeepInfra".into(), "bf16".into(), 0.2578)], set: "bf16".into() };
+        let side = flop_side(&many(o.flop_min_prints, P3), NOW, &o);
+        let s = status(Some(&q), &side, &o);
+        // At the anchor price the implied rate equals the stand-in.
+        assert!(s.contains("FLOP-implied FLOP/USD 0.000001652"), "{s}");
+        assert!(s.contains("5 buyers, 7 miners"), "{s}");
     }
 }

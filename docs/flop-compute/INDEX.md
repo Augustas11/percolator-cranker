@@ -28,17 +28,37 @@ decision, 2026-11-11). What buyers and miners hedge is the dollar price of
 compute; a FLOP-denominated index would mostly mirror the token price upside
 down, because miners reprice to stay competitive in dollars.
 
-`mark = (FLOP per G_n) x 52e6 G_n per 1M tokens (52 GF/token) x FLOP/USD`.
+**Mark source** (`flop_mark_source`, default `openrouter`):
 
-There is no FLOP/USD market until mainnet, so FLOP/USD is a configured
-**stand-in**, derived from config rather than typed: the rate at which the
+- `openrouter`, the live USD leg. Every 5 minutes the bots read OpenRouter's
+  public endpoints list for qwen/qwen3.8-27b. Each endpoint's price is its
+  15:1 input:output blend (`flop_blend_in_out`); the mark is the median across
+  endpoints. Endpoints are picked by quantization: bf16 if at least 2 serve it,
+  else fp16, else bf16 and fp16 together, else every endpoint. No successful
+  fetch for 30 minutes is stale: no pushes, the on-chain mark ages. On
+  2026-11-11 the bf16 pair (DeepInfra $0.2578, GMICloud $0.6219) gave $0.44.
+- `flop_standin`: `(FLOP per G_n) x 52e6 G_n per 1M tokens (52 GF/token) x
+  FLOP/USD`, with FLOP/USD a configured stand-in (below). Kept for when a live
+  FLOP/USD feed exists.
+
+The FLOP side is computed either way. Under `openrouter` the bots log it
+with the FLOP-implied FLOP/USD rate, `OpenRouter $ / (FLOP per G_n x 52e6)`,
+on each change (`flop status: ...` in `bots.log`), next to the stand-in.
+
+The stand-in is derived from config rather than typed: the rate at which the
 anchor 0.003 FLOP per G_n prices 1M tokens at OpenRouter's qwen/qwen3.8-27b
 price (DeepInfra BF16, matching FLOP's weights) blended at
 `flop_blend_in_out` = 15 input tokens per output token. That is OpenRouter's
 measured mix (State of AI, arXiv 2601.10088). The blend is (15 x $0.15 +
-$1.875) / 16 = $0.2578 per 1M, so FLOP/USD = 0.0000016527 and the opening
-mark is about $0.26 (owner decisions, 2026-11-11). Change the blend or the
-reference prices in config and the stand-in follows. At mainnet the stand-in is replaced by a live FLOP/USD feed.
+$1.875) / 16 = $0.2578 per 1M, so FLOP/USD = 0.0000016527 (owner decisions,
+2026-11-11).
+
+**Manipulation limits** on the FLOP side. No single buyer (`agent`) or miner
+may carry more than half the window's weight (`flop_max_agent_share`,
+`flop_max_miner_share` = 0.5): a bigger one has its weight scaled down to the
+cap, and its prints stay in. A buyer flooding the window at a high price can
+at most tie everyone else, so it can't move the median past the honest
+prices. Fewer than 3 distinct buyers (`flop_min_agents`) is stale.
 
 **All models.** The index uses every model's settlements, priced per G_n;
 there is no model filter. Qwen3.8-27B is only the benchmark unit (like quoting
@@ -66,7 +86,8 @@ heartbeat, like the SOL-PERP pusher.
 
 The index is **stale**, and the pusher sends nothing, when:
 
-- the 6-hour window holds fewer than 20 prints, or fewer than 3 distinct miners; or
+- (mark source `openrouter`) no successful OpenRouter fetch for 30 minutes; or
+- (FLOP side) the 6-hour window holds fewer than 20 prints, or fewer than 3 distinct miners or buyers; or
 - the newest print is more than 30 minutes old; or
 - FLOP's endpoint fails or returns something we can't parse.
 

@@ -159,6 +159,31 @@ pub struct OracleCfg {
     pub flop_blend_in_out: f64,
     #[serde(default)]
     pub flop_anchor_flop_per_gn: f64,
+    /// Where the FLOP perp mark comes from: "openrouter" (live USD leg) or
+    /// "flop_standin" (FLOP side x the FLOP/USD stand-in).
+    #[serde(default = "default_flop_mark_source")]
+    pub flop_mark_source: String,
+    /// No buyer / miner carries more than this share of the window's weight.
+    #[serde(default = "default_flop_max_share")]
+    pub flop_max_agent_share: f64,
+    #[serde(default = "default_flop_max_share")]
+    pub flop_max_miner_share: f64,
+    /// Fewer distinct buyers than this in the window is stale.
+    #[serde(default = "default_flop_min_agents")]
+    pub flop_min_agents: usize,
+    /// OpenRouter endpoints list for the benchmark model.
+    #[serde(default = "default_or_url")]
+    pub or_url: String,
+    /// Quantization tiers in preference order.
+    #[serde(default = "default_or_quantizations")]
+    pub or_quantizations: Vec<String>,
+    #[serde(default = "default_or_min_endpoints")]
+    pub or_min_endpoints: usize,
+    #[serde(default = "default_or_refresh_s")]
+    pub or_refresh_s: u64,
+    /// No successful OpenRouter fetch for this long is stale.
+    #[serde(default = "default_or_max_age_s")]
+    pub or_max_age_s: u64,
 }
 
 impl OracleCfg {
@@ -197,6 +222,14 @@ fn default_flop_max_age_s() -> u64 { 1800 }
 fn default_flop_refresh_s() -> u64 { 60 }
 fn default_flop_min_miners() -> usize { 3 }
 fn default_flop_gn_per_mtok() -> u64 { 52_000_000 }
+fn default_flop_mark_source() -> String { "openrouter".into() }
+fn default_flop_max_share() -> f64 { 0.5 }
+fn default_flop_min_agents() -> usize { 3 }
+fn default_or_url() -> String { "https://openrouter.ai/api/v1/models/qwen/qwen3.8-27b/endpoints".into() }
+fn default_or_quantizations() -> Vec<String> { vec!["bf16".into(), "fp16".into()] }
+fn default_or_min_endpoints() -> usize { 2 }
+fn default_or_refresh_s() -> u64 { 300 }
+fn default_or_max_age_s() -> u64 { 1800 }
 
 /// InitMarket, field for field (`initial_price` is the mock start). TOML
 /// integers are i64, so u128 fields are read as u64.
