@@ -34,7 +34,8 @@ Each day, in log units (0.01 is about 1%):
 - **follow**: a genuine move, every provider about 1.25-3x up or down
   (from the seed; each provider within +-10% of it, moving at its own time
   in the first 6 h); loss is the mean distance from where the mark should
-  be (the clean mark times the move), from 6 h to 48 h. It weighs as much
+  be (the clean mark times the move), from 6 h to 48 h, beyond the +-10% band (a rule that follows at once
+  pays 0). It weighs as much
   as the four attacks together: a mark that doesn't move is not an index. Added 2026-11-11
   after swarm round 1: a mark capped near 2.4%/day passed the gate (+0.213)
   by ignoring everything; with follow it scores clearly negative. The
@@ -55,8 +56,9 @@ attack window and the first held-out jump read one day across the line.
 **Daily-data caveat:** on daily pins an attack covers one snapshot, so a
 time filter or a multi-day smoother clears most of the attack term almost
 for free. A pass by such a rule needs confirming on recorder data, where an
-attack covers 288 snapshots. The reverse holds for follow: a rule that lags one
-snapshot pays about half a move on daily data, 1/500 of it on 5-minute data.
+attack covers 288 snapshots. The reverse holds for follow: on daily data only the
++24 h snapshot is charged, so lagging one snapshot pays the whole move; on
+5-minute data it pays about 1/500 of it.
 
 ## Data
 

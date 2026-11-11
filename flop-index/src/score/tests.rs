@@ -245,9 +245,39 @@ impl Rule for Frozen {
 fn a_frozen_mark_pays_for_not_following_real_moves() {
     let s = panel(8, 60);
     let r = score(&Frozen::default(), &Spec, &s, 1, Split::Heldout).unwrap();
-    // The baseline follows a move up to the per-provider jitter (<= 0.1).
-    assert!(r.base.follow < 0.1, "{}", r.base.follow);
-    // A frozen mark pays the whole move, |ln m| >= ln 1.25.
-    assert!(r.cand.follow > 1.25f64.ln(), "{}", r.cand.follow);
+    // The baseline follows within the jitter band: it pays nothing.
+    assert_eq!(r.base.follow, 0.0);
+    // A frozen mark pays the whole move less the band, >= ln 1.25 - 0.1.
+    assert!(r.cand.follow > 1.25f64.ln() - FOLLOW_JITTER, "{}", r.cand.follow);
     assert!(r.total.gain < -2.0 * r.total.se, "{:?}", r.total);
+}
+
+#[test]
+fn on_hourly_data_an_instant_follower_pays_nothing_and_a_lagging_one_pays() {
+    // Hourly snapshots, so the stagger and the 6 h start matter.
+    let mut s = flat(1);
+    let eps = s.snaps[0].endpoints.clone();
+    s.snaps = (0..24 * 6).map(|h| Snapshot { at_ms: DAY0 * DAY_MS + h * 3_600_000, endpoints: eps.clone() }).collect();
+    let l = day_losses(&Spec, std::slice::from_ref(&s), 1);
+    assert!(l.values().all(|d| d.follow == 0.0));
+    // Holds each new mark for 12 h before following.
+    #[derive(Clone, Default)]
+    struct Lag12(Option<(u64, f64)>);
+    impl Rule for Lag12 {
+        fn step(&mut self, at: u64, eps: &[OrEndpoint]) -> Option<f64> {
+            let m = Spec.step(at, eps)?;
+            match self.0 {
+                Some((t, held)) if at < t + 12 * 3_600_000 => Some(held),
+                _ => {
+                    self.0 = Some((at, m));
+                    Some(m)
+                }
+            }
+        }
+        fn clone_box(&self) -> Box<dyn Rule> {
+            Box::new(self.clone())
+        }
+    }
+    let lag = day_losses(&Lag12::default(), &[s], 1);
+    assert!(lag.values().any(|d| d.follow > 0.01), "{:?}", lag.values().map(|d| d.follow).collect::<Vec<_>>());
 }

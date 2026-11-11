@@ -9,8 +9,9 @@
 //!   injected scenario runs (24 h) and for 24 h after, one anchor a day:
 //!   a spoofed cheap listing (~1% of the median), a promo (~0.1x), half the
 //!   providers down, a provider relisting (~10x);
-//! - follow: lag behind a genuine move (every provider 1.25x to 3x, up or
-//!   down, from the anchor on), over the same 48 h. Added after a near-frozen
+//! - follow: lag behind a genuine move (every provider about 1.25x to 3x,
+//!   up or down, each within +-10% and at its own time in the first 6 h),
+//!   charged from 6 h to 48 h beyond the +-10% band. Added after a near-frozen
 //!   mark passed the gate by ignoring everything, attacks included;
 //! - reference: distance from the leave-one-provider-out median.
 //!
@@ -73,7 +74,8 @@ impl std::str::FromStr for Split {
 pub struct DayLoss {
     pub jump: f64,
     pub attack: [f64; 4],
-    /// Lag behind a genuine market move (every provider moves together).
+    /// Lag behind a genuine market move (all providers move, each by its
+    /// own amount and at its own time).
     pub follow: f64,
     pub reference: f64,
 }
@@ -321,7 +323,9 @@ fn run_series(proto: &dyn Rule, s: &Series, seed: u64, pool: &[String], out: &mu
                 last = Some(x);
             }
             if sn.at_ms >= start + FOLLOW_STAGGER_MS {
-                add(&mut d, dist(last, marks[i].map(|c| c * m)));
+                // The jitter band is free: following is charged, the mix of
+                // providers' slightly different moves is not.
+                add(&mut d, (dist(last, marks[i].map(|c| c * m)) - FOLLOW_JITTER).max(0.0));
             }
         }
         add(&mut out.entry(day).or_default().follow, avg(d));
