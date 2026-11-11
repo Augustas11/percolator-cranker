@@ -226,13 +226,33 @@ pub struct OrEndpoint {
     pub status: i64,
 }
 
+/// One endpoint in the priced set: blended USD per 1M tokens as listed, and
+/// as priced after the cheap-outlier clamp (equal unless clamped).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Used {
+    pub provider: String,
+    pub quantization: String,
+    pub listed: f64,
+    pub priced: f64,
+}
+
+/// How the cheap-outlier guard treats a price under the floor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Guard {
+    /// Count it as the floor. Live rule.
+    Clamp,
+    /// Drop it, and hold if too few remain. Only to verify lines pushed
+    /// before the clamp (they carry no "guard" field).
+    LegacyDrop,
+}
+
 /// The live USD leg: the combined blended price and the endpoints behind it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OrQuote {
     pub usd_e6: u64,
     pub at_ms: u64,
-    /// (provider, quantization, blended USD per 1M tokens) for each endpoint used.
-    pub used: Vec<(String, String, f64)>,
+    /// Each endpoint used, with its listed and clamped price.
+    pub used: Vec<Used>,
     /// Which set was used: a quantization tier, "preferred" (all tiers) or "all".
     pub set: String,
     /// Every priced endpoint fetched, so the push log can be recomputed.
@@ -243,7 +263,7 @@ pub struct OrQuote {
 /// else all listed tiers together if that reaches it; else every endpoint.
 /// Each endpoint's price is its input:output blend; `or_weighting` combines them.
 pub fn or_quote(endpoints: &[OrEndpoint], at_ms: u64, o: &launch::OracleCfg) -> Result<OrQuote> {
-    or_quote_with(endpoints, at_ms, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints, &o.or_weighting, o.or_min_frac_of_median)
+    or_quote_with(endpoints, at_ms, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints, &o.or_weighting, o.or_min_frac_of_median, Guard::Clamp)
 }
 
 /// Combine blended prices (USD per 1M tokens, each > 0).
@@ -271,52 +291,78 @@ pub fn combine(prices: &[f64], weighting: &str) -> Result<f64> {
 
 fn or_quote_with(
     endpoints: &[OrEndpoint], at_ms: u64, blend: f64, quantizations: &[String], min_endpoints: usize, weighting: &str,
-    min_frac_of_median: f64,
+    min_frac_of_median: f64, guard: Guard,
 ) -> Result<OrQuote> {
     let priced = |e: &&OrEndpoint| e.prompt.is_finite() && e.completion.is_finite() && e.prompt >= 0.0 && e.completion >= 0.0 && e.prompt + e.completion > 0.0;
     let valid: Vec<&OrEndpoint> = endpoints.iter().filter(priced).filter(|e| e.status == 0).collect();
     let tier = |qs: &[String]| valid.iter().copied().filter(|e| qs.iter().any(|q| q == &e.quantization)).collect::<Vec<_>>();
-    let mut chosen = None;
-    for q in quantizations {
-        let m = tier(std::slice::from_ref(q));
-        if m.len() >= min_endpoints {
-            chosen = Some((m, q.clone()));
+    // Sets in order: each preferred quantization alone, then the preferred
+    // ones together, then every up endpoint. The first with `min_endpoints`
+    // up endpoints prices the push (owner, 2026-11-11: fall through rather
+    // than hold); none: hold (stale). Cheap prices never empty a set: they
+    // are clamped, below.
+    let mut sets: Vec<(Vec<&OrEndpoint>, String)> = quantizations.iter().map(|q| (tier(std::slice::from_ref(q)), q.clone())).collect();
+    if quantizations.len() > 1 {
+        sets.push((tier(quantizations), "preferred".to_owned()));
+    }
+    // Lines pushed before the clamp priced from "all" with any endpoint.
+    let all_min = if guard == Guard::LegacyDrop { 1 } else { min_endpoints };
+    let mut why = Vec::new();
+    let mut picked = None;
+    for (set, name) in sets {
+        if set.len() >= min_endpoints {
+            picked = Some((set, name));
             break;
         }
+        why.push(format!("{name}: {} endpoint(s)", set.len()));
     }
-    let (set, name) = match chosen {
-        Some(c) => c,
-        None => {
-            let m = tier(quantizations);
-            if m.len() >= min_endpoints { (m, "preferred".to_owned()) } else { (valid.clone(), "all".to_owned()) }
-        }
+    if picked.is_none() && valid.len() >= all_min.max(1) {
+        picked = Some((valid.clone(), "all".to_owned()));
+    }
+    let Some((set, mut name)) = picked else {
+        bail!("openrouter: no set has {min_endpoints} up endpoints ({}; all: {})", why.join("; "), valid.len());
     };
-    if set.is_empty() {
-        bail!("openrouter: no priced endpoints");
-    }
     let b = blend;
-    let mut used: Vec<(String, String, f64)> = set
+    let mut used: Vec<Used> = set
         .iter()
-        .map(|e| (e.provider.clone(), e.quantization.clone(), (b * e.prompt + e.completion) / (b + 1.0) * 1e6))
+        .map(|e| {
+            let usd = (b * e.prompt + e.completion) / (b + 1.0) * 1e6;
+            Used { provider: e.provider.clone(), quantization: e.quantization.clone(), listed: usd, priced: usd }
+        })
         .collect();
-    used.sort_by(|x, y| x.2.total_cmp(&y.2));
+    used.sort_by(|x, y| x.listed.total_cmp(&y.listed));
     // Cheap-outlier guard: 1/b² weights hand a very cheap listing (a
-    // mispricing, a promo) nearly all the weight, so endpoints under
-    // `min_frac_of_median` of the set's median are dropped. If that leaves too
-    // few, hold (stale) rather than jump.
-    let mut name = name;
+    // mispricing, a promo) nearly all the weight, so a price under
+    // `min_frac_of_median` of the set's median counts as that floor (owner,
+    // 2026-11-11: clamp, don't drop). Dropping made the mark jump when the
+    // cheapest provider crossed the floor; clamping keeps it continuous and
+    // never lets a cheaper listing raise it.
     if min_frac_of_median > 0.0 {
-        let floor = min_frac_of_median * combine(&used.iter().map(|u| u.2).collect::<Vec<_>>(), "median")?;
-        let before = used.len();
-        used.retain(|u| u.2 >= floor);
-        if used.len() < before {
-            if used.len() < min_endpoints {
-                bail!("openrouter: {} endpoint(s) under {floor:.4} dropped as outliers, {} left, need {min_endpoints}", before - used.len(), used.len());
+        let floor = min_frac_of_median * combine(&used.iter().map(|u| u.listed).collect::<Vec<_>>(), "median")?;
+        match guard {
+            Guard::Clamp => {
+                let mut n = 0;
+                for u in used.iter_mut().filter(|u| u.listed < floor) {
+                    u.priced = floor;
+                    n += 1;
+                }
+                if n > 0 {
+                    name = format!("{name}-clamped");
+                }
             }
-            name = format!("{name}-trimmed");
+            Guard::LegacyDrop => {
+                let before = used.len();
+                used.retain(|u| u.listed >= floor);
+                if used.len() < before {
+                    if used.len() < min_endpoints {
+                        bail!("openrouter: {} endpoint(s) under {floor:.4} dropped as outliers, {} left, need {min_endpoints}", before - used.len(), used.len());
+                    }
+                    name = format!("{name}-trimmed");
+                }
+            }
         }
     }
-    let prices: Vec<f64> = used.iter().map(|u| u.2).collect();
+    let prices: Vec<f64> = used.iter().map(|u| u.priced).collect();
     let price = combine(&prices, weighting)?;
     let usd_e6 = (price * 1e6).round();
     if !(usd_e6 >= 1.0 && usd_e6 < u64::MAX as f64) {
@@ -389,7 +435,17 @@ pub fn status(or: Option<&OrQuote>, side: &Result<FlopSide>, o: &launch::OracleC
     let mut t = format!("flop status: mark_source={}", o.flop_mark_source);
     match or {
         Some(q) => {
-            let legs: Vec<String> = q.used.iter().map(|(p, qn, usd)| format!("{p} {qn} ${usd:.4}")).collect();
+            let legs: Vec<String> = q
+                .used
+                .iter()
+                .map(|u| {
+                    if u.priced != u.listed {
+                        format!("{} {} ${:.4} clamped to ${:.4}", u.provider, u.quantization, u.listed, u.priced)
+                    } else {
+                        format!("{} {} ${:.4}", u.provider, u.quantization, u.listed)
+                    }
+                })
+                .collect();
             t.push_str(&format!("; openrouter ${:.4} ({} {} set: {})", q.usd_e6 as f64 / 1e6, o.or_weighting, q.set, legs.join(", ")));
         }
         None => t.push_str("; openrouter none"),
@@ -548,7 +604,7 @@ impl FlopIndex {
                 "source": "openrouter", "url": o.or_url, "fetched_ms": q.at_ms, "set": q.set,
                 "blend_in_out": o.flop_blend_in_out, "quantizations": o.or_quantizations,
                 "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
-                "min_frac_of_median": o.or_min_frac_of_median,
+                "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "used": q.used,
                 "endpoints": q.endpoints, "flop_side": side_json,
             }))
         } else {
@@ -732,9 +788,30 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
         // Lines from before weighting was logged were medians.
         let weighting = inputs["weighting"].as_str().unwrap_or("median");
         let frac = inputs["min_frac_of_median"].as_f64().unwrap_or(0.0);
-        let q = or_quote_with(&eps, 0, blend, &quants, min, weighting, frac)?;
+        let guard = match inputs["guard"].as_str() {
+            Some("clamp") => Guard::Clamp,
+            None => Guard::LegacyDrop,
+            Some(g) => bail!("unknown guard {g}"),
+        };
+        let q = or_quote_with(&eps, 0, blend, &quants, min, weighting, frac, guard)?;
         if q.usd_e6 != mark {
             bail!("logged endpoints give {} but {mark} was pushed", q.usd_e6);
+        }
+        if let Some(logged) = inputs["used"].as_array() {
+            // Float tolerance: a logged f64 may parse back one ulp off.
+            let near = |v: &serde_json::Value, x: f64| v.as_f64().is_some_and(|y| (y - x).abs() <= 1e-9 * x.abs().max(1.0));
+            let same = logged.len() == q.used.len()
+                && logged.iter().zip(&q.used).all(|(l, u)| {
+                    l["provider"] == u.provider.as_str() && l["quantization"] == u.quantization.as_str() && near(&l["listed"], u.listed) && near(&l["priced"], u.priced)
+                });
+            if !same {
+                bail!("logged per-endpoint prices don't match the recomputed ones");
+            }
+        }
+        if let Some(set) = inputs["set"].as_str() {
+            if set != q.set {
+                bail!("logged endpoints price from set {} but the line says {set}", q.set);
+            }
         }
     }
     Ok(mark)
@@ -1046,7 +1123,7 @@ mod tests {
     #[test]
     fn status_logs_the_flop_implied_rate() {
         let o = cfg();
-        let q = OrQuote { usd_e6: 257_813, at_ms: NOW, used: vec![("DeepInfra".into(), "bf16".into(), 0.2578)], set: "bf16".into(), endpoints: vec![] };
+        let q = OrQuote { usd_e6: 257_813, at_ms: NOW, used: vec![Used { provider: "DeepInfra".into(), quantization: "bf16".into(), listed: 0.2578, priced: 0.2578 }], set: "bf16".into(), endpoints: vec![] };
         let side = flop_side(&many(o.flop_min_prints, P3), NOW, &o);
         let s = status(Some(&q), &side, &o);
         // At the anchor price the implied rate equals the stand-in.
@@ -1063,7 +1140,7 @@ mod tests {
         let inputs = serde_json::json!({
             "source": "openrouter", "set": q.set, "blend_in_out": o.flop_blend_in_out,
             "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
-            "min_frac_of_median": o.or_min_frac_of_median, "endpoints": q.endpoints,
+            "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "used": q.used, "endpoints": q.endpoints,
         });
         let line = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "slot": 7, "inputs": inputs})).unwrap();
         assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), q.usd_e6);
@@ -1129,26 +1206,239 @@ mod tests {
         let q = or_quote(&eps, NOW, &o).unwrap();
         // DeepInfra is down: the two remaining bf16 endpoints, both $0.6219.
         assert_eq!(q.used.len(), 2);
-        assert!(q.used.iter().all(|u| u.0 != "DeepInfra"));
+        assert!(q.used.iter().all(|u| u.provider != "DeepInfra"));
         assert!(q.usd_e6.abs_diff(621_875) <= 1, "{}", q.usd_e6);
         // The down endpoint is still logged, so the log recomputes the same mark.
         assert_eq!(q.endpoints.len(), 3);
     }
 
+    /// Today's list in miniature: the bf16 pair, Cerebras fp16, a cheap fp8.
+    fn list_with_deepinfra_cut(cut: f64) -> Vec<OrEndpoint> {
+        vec![
+            ep("DeepInfra", "bf16", 0.15 * (1.0 - cut), 1.875 * (1.0 - cut)),
+            ep("GMICloud", "bf16", 0.45, 3.2),
+            ep("Cerebras", "fp16", 0.99, 1.49),
+            ep("Chutes", "fp8", 0.039, 1.25),
+        ]
+    }
+
+    fn mark(eps: &[OrEndpoint]) -> f64 {
+        or_quote(eps, NOW, &cfg()).unwrap().usd_e6 as f64 / 1e6
+    }
+
     #[test]
-    fn a_cheap_outlier_is_dropped_or_holds() {
+    fn a_15_percent_deepinfra_cut_still_pushes_from_bf16() {
+        let o = cfg();
+        let q = or_quote(&list_with_deepinfra_cut(0.15), NOW, &o).unwrap();
+        assert_eq!(q.set, "bf16");
+        // Deeper cuts clamp DeepInfra but stay in bf16.
+        for cut in [0.22, 0.5, 0.9] {
+            let q = or_quote(&list_with_deepinfra_cut(cut), NOW, &o).unwrap();
+            assert_eq!(q.set, "bf16-clamped", "cut {cut}");
+            assert_eq!(q.used.len(), 2);
+            let d = q.used.iter().find(|u| u.provider == "DeepInfra").unwrap();
+            assert!(d.priced > d.listed, "{d:?}");
+        }
+    }
+
+    #[test]
+    fn the_mark_moves_continuously_across_the_old_cliff() {
+        // Under the drop rule a 22% cut jumped the mark ~3x ($0.24 -> $0.73).
+        let (a, b) = (mark(&list_with_deepinfra_cut(0.21)), mark(&list_with_deepinfra_cut(0.22)));
+        assert!((a - b).abs() / a < 0.02, "{a} -> {b}");
+        // No step anywhere on a fine sweep: 0.1% more cut moves it under 0.5%.
+        let mut prev = mark(&list_with_deepinfra_cut(0.0));
+        for i in 1..990 {
+            let m = mark(&list_with_deepinfra_cut(i as f64 / 1000.0));
+            assert!((prev - m).abs() / prev < 0.005, "cut {}: {prev} -> {m}", i as f64 / 1000.0);
+            prev = m;
+        }
+    }
+
+    #[test]
+    fn a_cut_never_raises_the_mark_for_endpoints_under_twice_it() {
+        // Inverse-square weighting is only monotone for endpoints priced under 2x
+        // the mark: a cheaper expensive endpoint wins weight (SPEC: "How
+        // endpoints combine"). Today both bf16 endpoints are under 2x.
+        let base = [
+            ("DeepInfra", 0.15, 1.875),
+            ("GMICloud", 0.45, 3.2),
+            ("Novita", 0.30, 2.4),
+            ("Pricey", 1.2, 9.0),
+        ];
+        for k in 2..=base.len() {
+            for who in 0..k {
+                let list = |cut: f64| -> Vec<OrEndpoint> {
+                    base[..k]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &(p, i_, o_))| {
+                            let f = if i == who { 1.0 - cut } else { 1.0 };
+                            ep(p, "bf16", i_ * f, o_ * f)
+                        })
+                        .collect()
+                };
+                let mut prev = mark(&list(0.0));
+                for step in 1..100 {
+                    let eps = list(step as f64 / 100.0);
+                    let m = mark(&eps);
+                    let me = (15.0 * eps[who].prompt + eps[who].completion) / 16.0 * 1e6;
+                    if me < 2.0 * m {
+                        // $0.00001 slack: usd_e6 rounding, and a step that crosses 2x.
+                        assert!(m <= prev + 1e-5, "k {k} who {who} step {step}: {prev} -> {m}");
+                    } else {
+                        // Above 2x the mark a cut may raise it, but only a little.
+                        assert!(m <= prev * 1.01, "k {k} who {who} step {step}: {prev} -> {m}");
+                    }
+                    prev = m;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_one_cent_promo_cannot_pull_the_mark_below_about_half() {
         let o = cfg();
         let (a, b) = ((0.15, 1.875), (0.45, 3.2));
-        // A third bf16 listing at ~$0.01 would take ~99% of 1/b² weight; it is dropped.
+        let fair = mark(&[ep("DeepInfra", "bf16", a.0, a.1), ep("GMICloud", "bf16", b.0, b.1)]);
+        // A third bf16 listing at ~$0.01 would take ~99% of 1/b² weight unclamped.
         let eps = [ep("DeepInfra", "bf16", a.0, a.1), ep("GMICloud", "bf16", b.0, b.1), ep("Promo", "bf16", 0.005, 0.08)];
         let q = or_quote(&eps, NOW, &o).unwrap();
-        assert_eq!((q.set.as_str(), q.usd_e6), ("bf16-trimmed", 311_207));
-        // Unguarded, it would own the mark.
+        assert_eq!(q.set, "bf16-clamped");
+        let m = q.usd_e6 as f64 / 1e6;
+        assert!(m >= 0.5 * fair, "{m} vs {fair}");
         let mut loose = o.clone();
         loose.or_min_frac_of_median = 0.0;
         assert!(or_quote(&eps, NOW, &loose).unwrap().usd_e6 < 20_000);
-        // Two endpoints, one slashed to under half the median: too few left, hold.
-        let eps = [ep("DeepInfra", "bf16", 0.01, 0.1), ep("GMICloud", "bf16", b.0, b.1)];
-        assert!(or_quote(&eps, NOW, &o).unwrap_err().to_string().contains("outliers"));
+        // Two endpoints, one slashed to ~$0.01: it pushes, clamped, not below half.
+        let eps = [ep("DeepInfra", "bf16", 0.005, 0.08), ep("GMICloud", "bf16", b.0, b.1)];
+        let q = or_quote(&eps, NOW, &o).unwrap();
+        assert_eq!(q.set, "bf16-clamped");
+        let median = (0.0098 + 0.621875) / 2.0;
+        assert!(q.usd_e6 as f64 / 1e6 >= 0.5 * median, "{}", q.usd_e6);
+    }
+
+    #[test]
+    fn the_spec_example_cut_raises_the_mark_a_little() {
+        // SPEC "Cheap-outlier clamp": an endpoint over 2x the mark cutting its price.
+        let o = cfg();
+        let third = |usd: f64| ep("Third", "bf16", usd, usd);
+        let pair = [ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2)];
+        let with = |usd: f64| or_quote(&[pair[0].clone(), pair[1].clone(), third(usd)], NOW, &o).unwrap();
+        let (hi, lo) = (with(3.0), with(0.8));
+        assert_eq!((hi.set.as_str(), hi.usd_e6, lo.usd_e6), ("bf16-clamped", 395_508, 419_152));
+        // Clamped to half the $0.621875 median.
+        assert!((hi.used[0].priced - 0.3109375).abs() < 1e-9, "{:?}", hi.used[0]);
+        // Unclamped, as hand-computed: $0.328 -> $0.351.
+        let mut loose = o.clone();
+        loose.or_min_frac_of_median = 0.0;
+        let raw = |usd: f64| or_quote(&[pair[0].clone(), pair[1].clone(), third(usd)], NOW, &loose).unwrap().usd_e6;
+        assert_eq!((raw(3.0), raw(0.8)), (328_046, 350_999));
+    }
+
+    #[test]
+    fn half_the_set_cheap_drags_the_floor_down_too() {
+        // Known limit (SPEC): the floor is half the median, so when cheap
+        // listings are half the set the median itself is cheap. Two promos next
+        // to today's pair take the mark from $0.311 to ~$0.076.
+        let b = (0.45, 3.2);
+        let eps = [
+            ep("DeepInfra", "bf16", 0.15, 1.875),
+            ep("GMICloud", "bf16", b.0, b.1),
+            ep("PromoA", "bf16", 0.005, 0.08),
+            ep("PromoB", "bf16", 0.005, 0.08),
+        ];
+        let m = mark(&eps);
+        assert!((0.07..0.08).contains(&m), "{m}");
+    }
+
+    #[test]
+    fn down_endpoints_fall_through_to_the_next_set() {
+        let o = cfg();
+        // bf16 has one up endpoint: fp16 alone has one too, so bf16+fp16.
+        let mut eps = list_with_deepinfra_cut(0.0);
+        eps[1].status = 1;
+        let q = or_quote(&eps, NOW, &o).unwrap();
+        // DeepInfra is under half of that pair's median, so it is clamped there.
+        assert_eq!(q.set, "preferred-clamped");
+        // Only the fp8 and one bf16 up: every up endpoint.
+        eps[2].status = 1;
+        let q = or_quote(&eps, NOW, &o).unwrap();
+        assert!(q.set.starts_with("all"), "{}", q.set);
+    }
+
+    #[test]
+    fn every_set_failing_holds() {
+        let o = cfg();
+        // One up endpoint in total: no set reaches 2.
+        let e = or_quote(&[ep("DeepInfra", "bf16", 0.15, 1.875)], NOW, &o).unwrap_err();
+        assert!(e.to_string().contains("no set has 2 up endpoints"), "{e}");
+        // Down endpoints don't help.
+        let mut eps = list_with_deepinfra_cut(0.0);
+        for x in eps.iter_mut().skip(1) {
+            x.status = 1;
+        }
+        assert!(or_quote(&eps, NOW, &o).is_err());
+        assert!(or_quote(&[], NOW, &o).is_err());
+    }
+
+    fn line_for(o: &launch::OracleCfg, oracle: &Keypair, q: &OrQuote, set: &str, used: serde_json::Value) -> String {
+        let inputs = serde_json::json!({
+            "source": "openrouter", "set": set, "blend_in_out": o.flop_blend_in_out,
+            "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
+            "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "used": used, "endpoints": q.endpoints,
+        });
+        signed_push(oracle, serde_json::json!({"mark_e6": q.usd_e6, "inputs": inputs})).unwrap()
+    }
+
+    #[test]
+    fn the_verifier_passes_clamped_and_fallback_lines() {
+        let o = cfg();
+        let oracle = Keypair::new();
+        // Clamped: logs DeepInfra's listed and clamped price.
+        let q = or_quote(&list_with_deepinfra_cut(0.5), NOW, &o).unwrap();
+        assert_eq!(q.set, "bf16-clamped");
+        let line = line_for(&o, &oracle, &q, &q.set, serde_json::to_value(&q.used).unwrap());
+        assert!(line.contains("\"listed\"") && line.contains("\"priced\""));
+        assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), q.usd_e6);
+        // Signed, right mark, wrong set named: caught.
+        let wrong = line_for(&o, &oracle, &q, "bf16", serde_json::to_value(&q.used).unwrap());
+        assert!(verify_push(&wrong, Some(&oracle.pubkey())).unwrap_err().to_string().contains("set"));
+        // Signed, right mark, a clamped price logged as unclamped: caught.
+        let mut used = serde_json::to_value(&q.used).unwrap();
+        for u in used.as_array_mut().unwrap() {
+            u["priced"] = u["listed"].clone();
+        }
+        let wrong = line_for(&o, &oracle, &q, &q.set, used);
+        assert!(verify_push(&wrong, Some(&oracle.pubkey())).unwrap_err().to_string().contains("per-endpoint"));
+        // Fallback: GMICloud down, priced from bf16+fp16.
+        let mut eps = list_with_deepinfra_cut(0.0);
+        eps[1].status = 1;
+        let q = or_quote(&eps, NOW, &o).unwrap();
+        assert!(q.set.starts_with("preferred"), "{}", q.set);
+        let line = line_for(&o, &oracle, &q, &q.set, serde_json::to_value(&q.used).unwrap());
+        assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), q.usd_e6);
+    }
+
+    #[test]
+    fn lines_from_before_the_clamp_still_verify_under_the_drop_rule() {
+        let o = cfg();
+        let oracle = Keypair::new();
+        // A promo the drop rule removed: those lines priced the bf16 pair only.
+        let eps = [ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2), ep("Promo", "bf16", 0.005, 0.08)];
+        let q = or_quote_with(&eps, NOW, o.flop_blend_in_out, &o.or_quantizations, 2, "inverse_square", 0.5, Guard::LegacyDrop).unwrap();
+        assert_eq!((q.set.as_str(), q.usd_e6), ("bf16-trimmed", 311_207));
+        let inputs = serde_json::json!({
+            "source": "openrouter", "set": q.set, "blend_in_out": o.flop_blend_in_out,
+            "quantizations": o.or_quantizations, "min_endpoints": 2, "weighting": "inverse_square",
+            "min_frac_of_median": 0.5, "endpoints": q.endpoints,
+        });
+        let line = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "inputs": inputs})).unwrap();
+        assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), 311_207);
+        // A guard the verifier doesn't know is refused, not read as the old rule.
+        let mut odd = inputs.clone();
+        odd["guard"] = "winsorize".into();
+        let line = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "inputs": odd})).unwrap();
+        assert!(verify_push(&line, Some(&oracle.pubkey())).unwrap_err().to_string().contains("unknown guard"));
     }
 }
