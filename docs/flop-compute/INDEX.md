@@ -145,14 +145,14 @@ Two more caveats come from FLOP's own repos:
 - AuthMark: our pusher holds the oracle authority and pushes the index. That
   key can set any mark, which is acceptable only for a devnet demo.
 - Collateral is our devnet test mint, and PnL is in USD per 1M tokens. The
-  FLOP/USD leg is a stand-in, so the mark moves only with FLOP per G_n.
+  mark is OpenRouter's live USD price; the FLOP side runs as a check.
 - 2x leverage (50% initial, 25% maintenance), because the index is thin and
-  gappy. The mark may move 20 bps per slot, so a ~3% jump between FLOP's few
-  price levels is followed in about 15 slots (~6 s).
+  gappy. The mark may move 20 bps per slot, so a 40% jump (a provider leaving
+  the median) is followed in about 200 slots (~90 s).
 - The permissionless asset-init fee stays 0, as on SOL-PERP.
 - Trades: the bots' off-chain matcher co-signs bilateral trades between the
-  run's LP and test-trader wallets. There is no hedge venue for compute and no
-  on-chain matcher.
+  run's LP and test-trader wallets, as a small market maker (SPEC.md). There
+  is no hedge venue for compute and no on-chain matcher.
 - The keeper (drip) cranks it like any other Percolator market.
 
 ## Running it
