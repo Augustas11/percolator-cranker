@@ -171,6 +171,10 @@ pub struct OracleCfg {
     /// Fewer distinct buyers than this in the window is stale.
     #[serde(default = "default_flop_min_agents")]
     pub flop_min_agents: usize,
+    /// FLOP's gateway agent. Every gateway customer settles under it, so the
+    /// buyer rules see it as one buyer; its G_n share is logged, not used.
+    #[serde(default = "default_flop_gateway_agent")]
+    pub flop_gateway_agent: String,
     /// OpenRouter endpoints list for the benchmark model.
     #[serde(default = "default_or_url")]
     pub or_url: String,
@@ -233,6 +237,7 @@ fn default_flop_gn_per_mtok() -> u64 { 52_000_000 }
 fn default_flop_mark_source() -> String { "openrouter".into() }
 fn default_flop_max_share() -> f64 { 0.45 }
 fn default_flop_min_agents() -> usize { 3 }
+fn default_flop_gateway_agent() -> String { "5GsXb3TmNGixuEsbtixqHnqWr9UQJ2M8bkqBQWteNekgF98S".into() }
 fn default_or_url() -> String { "https://openrouter.ai/api/v1/models/qwen/qwen3.8-27b/endpoints".into() }
 fn default_or_quantizations() -> Vec<String> { vec!["bf16".into(), "fp16".into()] }
 fn default_or_min_endpoints() -> usize { 2 }
