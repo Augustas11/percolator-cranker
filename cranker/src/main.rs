@@ -1,5 +1,5 @@
 //! Minimal permissionless cranker for percolator-prog (pinned to
-//! wrapper `5cb331dd` / engine `4db11a8c`).
+//! our wrapper fork, see scripts/pins.env; engine `b22bef7d`).
 //!
 //! **Reference / dry-run only; not a paid live service.** Nothing is deployed on a public cluster.
 //!

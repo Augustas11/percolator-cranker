@@ -525,7 +525,7 @@ fn paired_crank_liquidates_in_a_moving_market() -> Result<()> {
 }
 
 #[test]
-#[ignore = "known-bad on pinned engine 4db11a8c: crank cert goes stale every slot (upstream percolator#248); re-check (un-ignore) after a re-pin onto percolator#248; the wrapper may still need paired cranks"]
+#[ignore = "known-bad: crank cert goes stale every slot; engine b22bef7d has percolator#248 but the wrapper crank still needs accrue-first wiring; the keeper uses paired cranks (paired_crank_liquidates_in_a_moving_market passes)"]
 fn single_crank_liquidates_in_a_moving_market() -> Result<()> {
     moving_market("single_crank_liquidates_in_a_moving_market", false)
 }

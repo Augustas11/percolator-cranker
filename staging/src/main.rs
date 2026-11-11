@@ -962,8 +962,13 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         let p = "thread";
         let trade_now = Instant::now();
         let t = if live && trade_due(last_trade, trade_now, trade_every_secs, st.rolling && st.open.is_some()) {
-            last_trade = Some(trade_now);
-            trade.record(st.match_trade(&push_lifecycle))
+            let r = trade.record(st.match_trade(&push_lifecycle));
+            // A refusal or skip sends nothing: retry next tick instead of waiting
+            // out the cadence (the first tick often runs before the first mark push).
+            if r != "-" && !r.starts_with("refused(") {
+                last_trade = Some(trade_now);
+            }
+            r
         } else { "-".into() };
         let b = if live { backing.record(st.manage_backing()) } else { "-".into() };
         let i = if live && tick % insurance_every == 0 { insurance.record(st.top_up_insurance(st.cfg.amounts.insurance_topup)) } else { "-".into() };

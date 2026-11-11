@@ -15,6 +15,8 @@ if [ ! -d "$DEST/.git" ]; then
   mkdir -p "$(dirname "$DEST")"
   git clone -q "$PERCOLATOR_PROG_REPO" "$DEST"
 fi
+# The pinned SHA may live on our fork, not upstream: follow pins.env.
+git -C "$DEST" remote set-url origin "$PERCOLATOR_PROG_REPO"
 git -C "$DEST" fetch -q origin
 git -C "$DEST" checkout -q --detach "$PERCOLATOR_PROG_SHA"
 echo "percolator-prog @ $(git -C "$DEST" rev-parse --short HEAD) in $DEST"
