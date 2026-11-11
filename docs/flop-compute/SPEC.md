@@ -38,14 +38,21 @@ mark (a $5 one would add ~3%). `or_weighting = median` keeps the old method.
 **Cheap-outlier guard.** Under 1/price² weights a very cheap listing (a
 mispricing, a promo, a near-zero completion price) would take almost all the
 weight. So before weighting, endpoints priced under half the set's median
-(`or_min_frac_of_median` = 0.5) are dropped. If that leaves fewer than 2, the
-mark holds (stale) rather than jumping.
+(`or_min_frac_of_median` = 0.5) are dropped.
 
-**Fallbacks, in order, for the OpenRouter leg:** bf16 endpoints if at least
-2; else fp16 if at least 2; else bf16 and fp16 together if at least 2; else
-every endpoint. There is no fallback to a last-good value past 30 minutes, to
-FLOP's nominal gateway prices, or to a guess. A stale index pushes nothing and
-the on-chain mark ages.
+**Sets, in order** (owner decision 2026-11-11: fall through, don't hold).
+The bots try bf16 endpoints alone, then fp16 alone, then bf16 and fp16
+together, then every up endpoint. In each set they apply the outlier guard;
+the first set that still has at least 2 endpoints prices the push. The mark
+holds (stale) only when every set has fewer than 2. With today's two bf16
+endpoints, a DeepInfra cut of about 18% or more drops it from the bf16 pair;
+the push then comes from bf16+fp16 (or every endpoint), so it may blend
+quantizations. The set that priced each push is in `bots.log` (`flop status`)
+and in the signed push log (`set`, with `-trimmed` when the guard dropped
+anything), and the verifier checks that the logged endpoints pick that same
+set. There is no fallback to a last-good value past 30 minutes, to FLOP's
+nominal gateway prices, or to a guess. A stale index pushes nothing and the
+on-chain mark ages.
 
 `flop_mark_source = flop_standin` switches the mark to
 `FLOP side x 52e6 x FLOP/USD`, with FLOP/USD a configured stand-in until a live

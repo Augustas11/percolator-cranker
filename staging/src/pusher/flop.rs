@@ -276,46 +276,50 @@ fn or_quote_with(
     let priced = |e: &&OrEndpoint| e.prompt.is_finite() && e.completion.is_finite() && e.prompt >= 0.0 && e.completion >= 0.0 && e.prompt + e.completion > 0.0;
     let valid: Vec<&OrEndpoint> = endpoints.iter().filter(priced).filter(|e| e.status == 0).collect();
     let tier = |qs: &[String]| valid.iter().copied().filter(|e| qs.iter().any(|q| q == &e.quantization)).collect::<Vec<_>>();
-    let mut chosen = None;
-    for q in quantizations {
-        let m = tier(std::slice::from_ref(q));
-        if m.len() >= min_endpoints {
-            chosen = Some((m, q.clone()));
-            break;
-        }
+    // Sets in order: each preferred quantization alone, then the preferred
+    // ones together, then every up endpoint. The first set that still has
+    // `min_endpoints` after the outlier guard prices the push (owner,
+    // 2026-11-11: fall through rather than hold); none left: hold (stale).
+    let mut sets: Vec<(Vec<&OrEndpoint>, String)> = quantizations.iter().map(|q| (tier(std::slice::from_ref(q)), q.clone())).collect();
+    if quantizations.len() > 1 {
+        sets.push((tier(quantizations), "preferred".to_owned()));
     }
-    let (set, name) = match chosen {
-        Some(c) => c,
-        None => {
-            let m = tier(quantizations);
-            if m.len() >= min_endpoints { (m, "preferred".to_owned()) } else { (valid.clone(), "all".to_owned()) }
-        }
-    };
-    if set.is_empty() {
-        bail!("openrouter: no priced endpoints");
-    }
+    sets.push((valid.clone(), "all".to_owned()));
     let b = blend;
-    let mut used: Vec<(String, String, f64)> = set
-        .iter()
-        .map(|e| (e.provider.clone(), e.quantization.clone(), (b * e.prompt + e.completion) / (b + 1.0) * 1e6))
-        .collect();
-    used.sort_by(|x, y| x.2.total_cmp(&y.2));
-    // Cheap-outlier guard: 1/b² weights hand a very cheap listing (a
-    // mispricing, a promo) nearly all the weight, so endpoints under
-    // `min_frac_of_median` of the set's median are dropped. If that leaves too
-    // few, hold (stale) rather than jump.
-    let mut name = name;
-    if min_frac_of_median > 0.0 {
-        let floor = min_frac_of_median * combine(&used.iter().map(|u| u.2).collect::<Vec<_>>(), "median")?;
-        let before = used.len();
-        used.retain(|u| u.2 >= floor);
-        if used.len() < before {
-            if used.len() < min_endpoints {
-                bail!("openrouter: {} endpoint(s) under {floor:.4} dropped as outliers, {} left, need {min_endpoints}", before - used.len(), used.len());
-            }
-            name = format!("{name}-trimmed");
+    let mut why = Vec::new();
+    let mut picked = None;
+    for (set, name) in sets {
+        if set.len() < min_endpoints {
+            why.push(format!("{name}: {} endpoint(s)", set.len()));
+            continue;
         }
+        let mut used: Vec<(String, String, f64)> = set
+            .iter()
+            .map(|e| (e.provider.clone(), e.quantization.clone(), (b * e.prompt + e.completion) / (b + 1.0) * 1e6))
+            .collect();
+        used.sort_by(|x, y| x.2.total_cmp(&y.2));
+        // Cheap-outlier guard: 1/b² weights hand a very cheap listing (a
+        // mispricing, a promo) nearly all the weight, so endpoints under
+        // `min_frac_of_median` of the set's median are dropped.
+        let mut name = name;
+        if min_frac_of_median > 0.0 {
+            let floor = min_frac_of_median * combine(&used.iter().map(|u| u.2).collect::<Vec<_>>(), "median")?;
+            let before = used.len();
+            used.retain(|u| u.2 >= floor);
+            if used.len() < before {
+                if used.len() < min_endpoints {
+                    why.push(format!("{name}: {} under {floor:.4} dropped as outliers, {} left", before - used.len(), used.len()));
+                    continue;
+                }
+                name = format!("{name}-trimmed");
+            }
+        }
+        picked = Some((used, name));
+        break;
     }
+    let Some((used, name)) = picked else {
+        bail!("openrouter: no set has {min_endpoints} good endpoints ({})", why.join("; "));
+    };
     let prices: Vec<f64> = used.iter().map(|u| u.2).collect();
     let price = combine(&prices, weighting)?;
     let usd_e6 = (price * 1e6).round();
@@ -736,6 +740,11 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
         if q.usd_e6 != mark {
             bail!("logged endpoints give {} but {mark} was pushed", q.usd_e6);
         }
+        if let Some(set) = inputs["set"].as_str() {
+            if set != q.set {
+                bail!("logged endpoints price from set {} but the line says {set}", q.set);
+            }
+        }
     }
     Ok(mark)
 }
@@ -1147,8 +1156,65 @@ mod tests {
         let mut loose = o.clone();
         loose.or_min_frac_of_median = 0.0;
         assert!(or_quote(&eps, NOW, &loose).unwrap().usd_e6 < 20_000);
-        // Two endpoints, one slashed to under half the median: too few left, hold.
+        // Two endpoints and nothing else listed, one slashed under half the
+        // median: every set fails the guard, hold.
         let eps = [ep("DeepInfra", "bf16", 0.01, 0.1), ep("GMICloud", "bf16", b.0, b.1)];
         assert!(or_quote(&eps, NOW, &o).unwrap_err().to_string().contains("outliers"));
+    }
+
+    /// Today's list in miniature: the bf16 pair, Cerebras fp16, a cheap fp8.
+    fn list_with_deepinfra_cut(cut: f64) -> Vec<OrEndpoint> {
+        vec![
+            ep("DeepInfra", "bf16", 0.15 * (1.0 - cut), 1.875 * (1.0 - cut)),
+            ep("GMICloud", "bf16", 0.45, 3.2),
+            ep("Cerebras", "fp16", 0.99, 1.49),
+            ep("Chutes", "fp8", 0.039, 1.25),
+        ]
+    }
+
+    #[test]
+    fn a_deepinfra_cut_falls_through_to_the_next_tier_and_still_pushes() {
+        let o = cfg();
+        // No cut: the bf16 pair prices it.
+        assert_eq!(or_quote(&list_with_deepinfra_cut(0.0), NOW, &o).unwrap().set, "bf16");
+        // A 22% cut puts DeepInfra under half the bf16 median: bf16 has one left,
+        // fp16 alone has one, so bf16+fp16 prices it (DeepInfra trimmed there too).
+        let q = or_quote(&list_with_deepinfra_cut(0.22), NOW, &o).unwrap();
+        assert_eq!(q.set, "preferred-trimmed");
+        let want = combine(&[0.621875, (15.0 * 0.99 + 1.49) / 16.0], "inverse_square").unwrap();
+        assert!(q.usd_e6.abs_diff((want * 1e6).round() as u64) <= 1, "{}", q.usd_e6);
+        // A deep cut still pushes from some set.
+        assert!(or_quote(&list_with_deepinfra_cut(0.9), NOW, &o).is_ok());
+    }
+
+    #[test]
+    fn every_set_failing_holds() {
+        let o = cfg();
+        // One up endpoint in total: no set reaches 2.
+        let e = or_quote(&[ep("DeepInfra", "bf16", 0.15, 1.875)], NOW, &o).unwrap_err();
+        assert!(e.to_string().contains("no set has 2 good endpoints"), "{e}");
+        // Down endpoints don't help.
+        let mut eps = list_with_deepinfra_cut(0.0);
+        for x in eps.iter_mut().skip(1) {
+            x.status = 1;
+        }
+        assert!(or_quote(&eps, NOW, &o).is_err());
+    }
+
+    #[test]
+    fn the_verifier_passes_a_fallback_line_and_checks_its_set() {
+        let o = cfg();
+        let q = or_quote(&list_with_deepinfra_cut(0.22), NOW, &o).unwrap();
+        let oracle = Keypair::new();
+        let inputs = |set: &str| serde_json::json!({
+            "source": "openrouter", "set": set, "blend_in_out": o.flop_blend_in_out,
+            "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
+            "min_frac_of_median": o.or_min_frac_of_median, "endpoints": q.endpoints,
+        });
+        let line = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "inputs": inputs(&q.set)})).unwrap();
+        assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), q.usd_e6);
+        // Signed, right mark, wrong tier named: caught.
+        let wrong = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "inputs": inputs("bf16")})).unwrap();
+        assert!(verify_push(&wrong, Some(&oracle.pubkey())).unwrap_err().to_string().contains("set"));
     }
 }
