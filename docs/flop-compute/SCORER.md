@@ -43,16 +43,16 @@ Each day, in log units (0.01 is about 1%):
   filter lagging a 2.5x cut by a day).
 - **reference**: distance from the leave-one-provider-out median.
 
-The report also prints `ex-ref`: the total without the reference part,
-with its own standard error. The reference is a median, so it favours
-median-like rules by construction (the judge's reason for vetoing median
-weighting, swarm round 1); a gain that lives only there is suspect.
-
 Day loss = jump + mean of the four attacks + follow + reference, each averaged over
 the models scored that day. Standard error is over days, Newey-West
 corrected (attack windows span two days and rules carry state). A snapshot
 is scored when it has 2+ up providers. A rule that
 holds (returns no price) keeps its last mark; no mark at all costs 1.0.
+
+The report also prints `ex-ref`: jump + mean attack + follow, paired per
+day with its own standard error. It is advisory; the gate still uses the
+total. The reference part is a median, so it favours median-like rules by
+construction; a gain that lives only there is suspect.
 
 **Held out:** the last 30% of scored days (`--split heldout`). Tune on
 `--split tune` only. Rules replay the whole history, so the last tune day's

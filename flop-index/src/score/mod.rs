@@ -440,7 +440,7 @@ pub fn score(cand: &dyn Rule, base: &dyn Rule, series: &[Series], seed: u64, spl
         attack: pick(&|l| l.attack_mean()),
         scenario: [pick(&|l| l.attack[0]), pick(&|l| l.attack[1]), pick(&|l| l.attack[2]), pick(&|l| l.attack[3])],
         follow: pick(&|l| l.follow),
-        ex_reference: pick(&|l| l.total() - l.reference),
+        ex_reference: pick(&|l| l.ex_reference()),
         reference: pick(&|l| l.reference),
         base: mean(&b),
         cand: mean(&c),
