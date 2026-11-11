@@ -3,7 +3,7 @@
 
 # owner identity / private repo
 augstar
-Augustas11/percolator   # the private repo; the public repo Augustas11/drip is fine
+Augustas11/percolator-cranker   # the private repo; public Augustas11/drip and the Augustas11/percolator-prog fork are fine
 _aug11_
 aug11
 percolator-cranker/

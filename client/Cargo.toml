@@ -16,9 +16,8 @@ solana-program = "1.18"
 solana-transaction-status = "1.18"
 spl-token = { version = "4.0", features = ["no-entrypoint"] }
 spl-associated-token-account = { version = "2.0", features = ["no-entrypoint"] }
-# Wrapper `5cb331dd` (origin/main) pins engine `4db11a8c`. Deliberate
-# wrapper-pin, not a master-tip override.
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "4db11a8cb0053815e23a35d3a7d3edc265d8d866" }
+# Must equal our wrapper fork's engine pin (scripts/pins.env).
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "b22bef7d6122fd7d82680ce9859e8b77fd8ef656" }
 # Reuse the wrapper's instruction encoder + state helpers.
 percolator-prog = { path = "../repo-prog" }
 anyhow = "1"

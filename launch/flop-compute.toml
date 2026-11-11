@@ -1,16 +1,17 @@
 # FLOP-COMPUTE launch config: a devnet DEMO market on FLOP Network's compute
 # price (docs/flop-compute/INDEX.md). Devnet and local only; never mainnet,
 # never real money. Separate from SOL-PERP and changes nothing about it.
-# The mark is FLOP per TFLOP, e6, from real FLOP settlements; PnL is paid in
-# the test mint as if that number were dollars (the devnet token has no value).
+# The mark is USD per 1M tokens of Qwen3.8-27B, e6: real FLOP settlements
+# (FLOP per G_n) x 52e6 G_n per 1M tokens x a FLOP/USD STAND-IN (no FLOP/USD
+# market until mainnet; see flop_usd_standin). PnL is paid in the test mint.
 # Same layout as launch/sol-perp.toml; only the differences are commented.
 
 # Must equal scripts/pins.env, the single source of truth that
 # scripts/fetch_upstream.sh and the crates' build.rs read. launch_market.sh
 # refuses to run when they differ.
 [pins]
-wrapper_sha = "5cb331dde354517c6371a8acf92cecb194f3bb73"
-engine_rev = "4db11a8cb0053815e23a35d3a7d3edc265d8d866"
+wrapper_sha = "6b27a826996726b75727b0b448dca2e51caab7a5"
+engine_rev = "b22bef7d6122fd7d82680ce9859e8b77fd8ef656"
 
 # Steps, roles and keys work as in sol-perp.toml (docs/LAUNCH.md).
 [cluster.local]
@@ -34,15 +35,48 @@ matcher_ctxs = []
 matcher_max_ref_age_slots = 80
 
 [oracle]
-# FLOP index (pusher/flop.rs): GN-weighted median over spot, non-self-trade
-# settlements in the last flop_window_s; stale (no push) with fewer than
-# flop_min_prints in the window or when the newest is older than flop_max_age_s.
+# FLOP index (pusher/flop.rs): G_n-weighted median of escrow / aggregateGn over
+# spot, non-self-trade settlements in the last flop_window_s; stale (no push)
+# with fewer than flop_min_prints or flop_min_miners distinct miners in the
+# window, or when the newest is older than flop_max_age_s.
 # FLOP devnet ran ~35 settlements an hour on 2026-11-10.
 flop_mcp_url = "https://mcp.flop.network/mcp"
 flop_window_s = 21600
 flop_min_prints = 20
 flop_max_age_s = 1800
 flop_refresh_s = 60
+flop_min_miners = 3
+# Qwen3.8-27B: 52 GF/token = 52e6 G_n per 1M tokens.
+flop_gn_per_mtok = 52000000
+# FLOP/USD STAND-IN, devnet only (no FLOP/USD market until mainnet; then a
+# live feed replaces it). Derived, not typed: the rate at which the anchor
+# FLOP per G_n prices 1M tokens at OpenRouter's qwen/qwen3.8-27b (DeepInfra
+# BF16, matching FLOP's weights) blended input:output price. Blend 15:1 is
+# OpenRouter's measured mix (State of AI, arXiv 2601.10088: ~6,000 in / 400
+# out). (15 x 0.15 + 1.875) / 16 = $0.2578125 per 1M -> FLOP/USD 0.0000016527.
+# Owner decisions 2026-11-11; the blend is a convention and may change.
+flop_ref_usd_in = 0.15
+flop_ref_usd_out = 1.875
+flop_blend_in_out = 15
+flop_anchor_flop_per_gn = 0.003
+# Mark = live OpenRouter USD leg: each up endpoint's 15:1 blend, combined by
+# 1/price^2 weights as OpenRouter's default routing spreads load (owner,
+# 2026-11-11), over bf16, else fp16, endpoints; fewer than 2 falls back to all. flop_standin keeps the old
+# FLOP side x stand-in mark for when a live FLOP/USD exists.
+flop_mark_source = "openrouter"
+or_url = "https://openrouter.ai/api/v1/models/qwen/qwen3.8-27b/endpoints"
+or_quantizations = ["bf16", "fp16"]
+or_min_endpoints = 2
+or_refresh_s = 300
+or_max_age_s = 1800                # no good fetch in 30 min: stale, hold
+or_weighting = "inverse_square"     # or "median"
+or_min_frac_of_median = 0.5        # drop listings under half the median; too few left: hold
+# Manipulation limits on the FLOP side: one buyer or miner is scaled down to
+# 45% of the window's weight (strictly under half, so it can't tie everyone
+# else and set a low median); fewer than 3 distinct buyers is stale.
+flop_max_agent_share = 0.45
+flop_max_miner_share = 0.45
+flop_min_agents = 3
 # Status polling interval for mark pushes and accrual transactions.
 confirm_poll_ms = 500
 # Unused by price_source = "flop"; the config loader requires them.
@@ -64,12 +98,12 @@ priority_fee_micro_lamports = 10000
 push_cu_limit = 14000
 # Source publish age, not landing age. Slow sources (e.g. devnet Pyth
 # fallback, ~13 s) refuse opens unless this is raised for that run.
-open_max_mark_age_ms = 1900000
+open_max_mark_age_ms = 1800000   # = or_max_age_s: the MM stops when the source does
 
 # InitMarket. Values and reasoning: docs/OPERATOR_PLAYBOOK.md section 2.
 [market]
 max_portfolio_assets = 1
-initial_price = 2970000          # 2.97 FLOP/TFLOP; the live index sets it
+initial_price = 311207           # ~$0.31 per 1M tokens (OpenRouter bf16, 1/price² weighted, 2026-11-11); the live mark sets it
 h_min = 0
 h_max = 150
 min_nonzero_mm_req = 1000
@@ -112,14 +146,18 @@ force_close_delay_slots = 20
 # Pushes also refresh any configured on-chain TradeCpi matcher contexts.
 [matcher]
 program_id = "8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE"
-# REPORT.md: tickets above $100k carry 2.7–4.8 bps adverse selection.
-max_fill_notional_usd = 100000
-# REPORT.md inventory limit (~line 260), ops/CAPITAL_PLAN.md: 10% of
-# $1M daily volume. No on-chain OI cap at this pin: this IS the OI cap.
-# Keep the engine refusal when AuthMark target != effective mark.
-max_lp_inventory_usd = 100000
-size_q = 1000000000               # 1,000 TFLOP (~2,970 test dollars)
+# Market maker (devnet demo): small size, small inventory, quotes pulled
+# (no opens or closes) when the mark is stale, a kill-switch file, a JSON line
+# per fill. At this engine pin a co-signed fill books at the oracle mark; the
+# quote price only sizes the fee, so a +-1% quote can't be expressed: spread_bps
+# stays at the 10 bps the wrapper has accepted on devnet.
+max_fill_notional_usd = 100
+max_lp_inventory_usd = 500
+size_q = 100000000                # 100 x 1M tokens (~31 test dollars)
 spread_bps = 10
+pull_when_stale = true
+kill_file = "/run-dir/KILL"       # touch it to stop all trades; rm to resume
+log_fills = true
 fee_bps = 15                     # >= trade_fee_base_bps (the wrapper refuses less)
 
 [amounts]

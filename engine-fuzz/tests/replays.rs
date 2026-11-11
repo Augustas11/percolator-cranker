@@ -177,26 +177,35 @@ fn case_253(settle_b_first: bool) -> Report {
     run(s, &acts)
 }
 
-/// Flip to `assert_clean` once upstream fixes #253.
+/// Fixed at engine b22bef7d (#253): both winners net +150_000 even when L1 resizes
+/// before settling its B share. At 4db11a8c L1 netted +171_391 and L2 +128_608.
 #[test]
-fn upstream_253_b_skip_resize_is_present() {
+fn upstream_253_b_skip_resize_is_fixed() {
     let r = case_253(false);
-    // Expected +150_000 each; L1 nets +171_391 and L2 +128_608.
-    assert_violates(&r, &[Invariant::LossSharePerWinner]);
-    assert!(r.resized_before_loss_settled);
-    assert!(!r.unexplained_transfer(&r.check()), "#253 is a known cause");
-    assert_eq!(r.accounts[0].out(), 1_171_391);
-    assert_eq!(r.accounts[1].out(), 1_128_608);
+    assert_clean(&r);
+    assert_eq!(r.accounts[0].out(), 1_150_000);
+    assert_eq!(r.accounts[1].out(), 1_150_000);
     assert_eq!(r.accounts[0].fair, 1_150_000);
     assert_eq!(r.accounts[1].fair, 1_150_000);
 }
 
-/// Without the #253 label the same run must raise the alarm: this is how a new
-/// cause of winners paying for each other shows up.
+/// The #253 run with its pre-fix payouts (L1 +21_391 over fair, L2 21_392 under)
+/// and violation put back, so the alarm logic keeps a fixed fixture.
+fn transfer_fixture() -> (Report, Vec<Violation>) {
+    let mut r = case_253(false);
+    r.accounts[0].fair -= 21_391;
+    r.accounts[1].fair += 21_392;
+    r.resized_before_loss_settled = true;
+    let v = vec![Violation { invariant: Invariant::LossSharePerWinner, detail: String::new() }];
+    (r, v)
+}
+
+/// A winner-to-winner transfer is silent only with a known cause label; without it
+/// the alarm fires: this is how a new cause of winners paying for each other shows up.
 #[test]
 fn transfer_alarm_fires_when_no_known_cause() {
-    let mut r = case_253(false);
-    let v = r.check();
+    let (mut r, v) = transfer_fixture();
+    assert!(!r.unexplained_transfer(&v), "resize-before-settle is a known cause");
     r.resized_before_loss_settled = false;
     assert!(r.unexplained_transfer(&v));
 }
@@ -204,9 +213,8 @@ fn transfer_alarm_fires_when_no_known_cause() {
 /// With the total wrong, a shortfall alone is a leak; only an overpayment is a transfer.
 #[test]
 fn transfer_alarm_with_a_wrong_total_needs_an_overpayment() {
-    let mut r = case_253(false);
+    let (mut r, mut v) = transfer_fixture();
     r.resized_before_loss_settled = false;
-    let mut v = r.check();
     v.push(Violation { invariant: Invariant::LossShareTotal, detail: String::new() });
     assert!(r.unexplained_transfer(&v), "account 0 is overpaid");
     r.accounts[0].fair = r.accounts[0].out() as i128;
@@ -258,13 +266,13 @@ fn case_stale_winner_reversal(provider: [u128; 2], crank_winner_first: bool) -> 
     run(s, &acts)
 }
 
+/// Fixed at engine b22bef7d: A is paid its fair 100_190. At 4db11a8c the provider
+/// took 50_200 and A got 99_990.
 #[test]
-fn design_stale_winner_reversal_provider_takes_trader_gain() {
+fn design_stale_winner_reversal_trader_gain_is_fixed() {
     let r = case_stale_winner_reversal([50_000, 0], false);
-    assert_violates(&r, &[Invariant::NoDefaultPayout]);
-    assert_eq!(r.accounts[0].fair, 100_190);
-    assert_eq!(r.accounts[0].out(), 99_990);
-    assert_eq!(r.provider_out, 50_200);
+    assert_clean(&r);
+    assert_eq!(r.accounts[0].out(), 100_190);
 }
 
 #[test]
@@ -317,14 +325,13 @@ fn case_bankruptcy_before_winner_refresh(refresh_winner_first: bool) -> Report {
     run(s, &acts)
 }
 
-/// Flip to `assert_clean` once fixed upstream.
+/// Fixed at engine b22bef7d: W is paid its fair 110_000. At 4db11a8c W got 94_728
+/// and 15_272 was retired.
 #[test]
-fn new_bankruptcy_before_winner_refresh_is_present() {
+fn new_bankruptcy_before_winner_refresh_is_fixed() {
     let r = case_bankruptcy_before_winner_refresh(false);
-    assert_violates(&r, &[Invariant::LossShareTotal, Invariant::LossSharePerWinner]);
-    assert_eq!(r.accounts[1].fair, 110_000);
-    assert_eq!(r.accounts[1].out(), 94_728);
-    assert_eq!(r.retired, 15_272);
+    assert_clean(&r);
+    assert_eq!(r.accounts[1].out(), 110_000);
 }
 
 #[test]
@@ -359,16 +366,16 @@ fn case_212_provider(loser_first: bool) -> Report {
     run(s, &acts)
 }
 
-/// At the pin the provider sweeps the loser's payment and the winner is paid short
-/// (engine #172 site 2). On #212's head (96f70b43) the winner is paid in full but the
-/// provider recovers 13_764 (inv4). Same numbers as the LiteSVM run through the wrapper.
-/// Flip to `assert_clean` once fixed upstream.
+/// At 4db11a8c the provider swept the loser's payment and the winner was paid short
+/// (935_300; engine #172 site 2). At engine b22bef7d the winner is paid in full but the
+/// provider recovers only 13_764 of 78_464 (inv4), the same as on #212's head
+/// (96f70b43). Flip to `assert_clean` once fixed upstream.
 #[test]
 fn upstream_212_provider_case_is_present() {
     let r = case_212_provider(true);
-    assert_violates(&r, &[Invariant::LossShareTotal, Invariant::LossSharePerWinner]);
-    assert_eq!(r.accounts[1].out(), 935_300);
-    assert_eq!(r.provider_out, 278_464);
+    assert_violates(&r, &[Invariant::ProviderPrincipal]);
+    assert_eq!(r.accounts[1].out(), 1_200_000);
+    assert_eq!(r.provider_out, 13_764);
 }
 
 #[test]

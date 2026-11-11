@@ -6,6 +6,7 @@ mod exchanges;
 mod flop;
 pub use exchanges::Exchanges;
 pub use flop::FlopIndex;
+pub use flop::verify_log as verify_push_log;
 
 const STALL_WINDOW_MS: u64 = 3_600_000;
 
@@ -256,6 +257,20 @@ pub fn start(st: &Staging) -> Result<(Arc<Mutex<Shared>>, Arc<Mutex<()>>, std::t
                             drop(s);
                             last_slot = slot;
                             last_landed = Some(sent);
+                            // Checkable pusher: what was pushed and from what, signed
+                            // by the oracle authority (`staging verify-push-log`).
+                            if let PriceSource::Flop(f) = &source {
+                                if let Some(inputs) = f.last_inputs() {
+                                    let rec = serde_json::json!({
+                                        "v": 1, "market": market.to_string(), "slot": slot, "sig": sig.to_string(),
+                                        "mark_e6": mark, "published_ms": published, "landed_ms": landed, "inputs": inputs,
+                                    });
+                                    match flop::signed_push(&oracle, rec) {
+                                        Ok(line) => println!("{line}"),
+                                        Err(e) => eprintln!("flop push log: {e:#}"),
+                                    }
+                                }
+                            }
                             if keeper_log {
                                 println!("{{\"event\":\"mark_lag\",\"ms\":{lag},\"src_age_ms\":{src_age_ms},\"send_ms\":{send_ms},\"confirm_ms\":{confirm_ms},\"target_ms\":{},\"at_ms\":{landed}{}}}", cfg.lag_target_ms, if fallback { ",\"fallback\":true" } else { "" });
                             }

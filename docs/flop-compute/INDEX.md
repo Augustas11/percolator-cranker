@@ -16,16 +16,70 @@ audited.** See "What this is not" below.
 - `marketKind` = `spot` (forwards are left out);
 - `settlementKind` = `settled`;
 - `selfTrade` = false;
-- positive `aggregateGn` (compute delivered) and positive `pricePerGflop`.
+- positive `aggregateGn` (compute delivered) and positive `escrow`.
 
-**Value.** The GN-weighted median of `pricePerGflop` over those settlements
-in the last 6 hours. Sort the prints by price and take the lowest price at
+**Value.** The GN-weighted median of the buyer's price, `escrow / aggregateGn`
+(FLOP per G_n), over those settlements in the last 6 hours. Sort the prints by price and take the lowest price at
 which half of the window's GN is covered. A median ignores one odd print;
 weighting by GN means a large job counts more than a tiny one.
 
-**Units.** FLOP per TFLOP. The on-chain mark is that number times 1e6
-(`pricePerGflop` is planck per Gflop with 18 decimals, so
-`mark_e6 = pricePerGflop / 1e9`). On 2026-11-10 it was 2.97 FLOP per TFLOP.
+**Units.** USD per 1M tokens of Qwen3.8-27B, times 1e6 on chain (owner
+decision, 2026-11-11). What buyers and miners hedge is the dollar price of
+compute; a FLOP-denominated index would mostly mirror the token price upside
+down, because miners reprice to stay competitive in dollars.
+
+**Mark source** (`flop_mark_source`, default `openrouter`):
+
+- `openrouter`, the live USD leg. Every 5 minutes the bots read OpenRouter's
+  public endpoints list for qwen/qwen3.8-27b. Each endpoint's price is its
+  15:1 input:output blend (`flop_blend_in_out`); the mark is their average
+  weighted by 1/price², as OpenRouter's default routing spreads load
+  (SPEC.md says why). Only up endpoints count. Endpoints are picked by
+  quantization: bf16 if at least 2 serve it, else fp16, else bf16 and fp16
+  together, else every endpoint. No successful fetch for 30 minutes is stale:
+  no pushes, the on-chain mark ages. On 2026-11-11 the bf16 pair (DeepInfra
+  $0.2578, GMICloud $0.6219) gives $0.311.
+- `flop_standin`: `(FLOP per G_n) x 52e6 G_n per 1M tokens (52 GF/token) x
+  FLOP/USD`, with FLOP/USD a configured stand-in (below). Kept for when a live
+  FLOP/USD feed exists.
+
+The FLOP side is computed either way. Under `openrouter` the bots log it
+with the FLOP-implied FLOP/USD rate, `OpenRouter $ / (FLOP per G_n x 52e6)`,
+on each change (`flop status: ...` in `bots.log`), next to the stand-in.
+
+The stand-in is derived from config rather than typed: the rate at which the
+anchor 0.003 FLOP per G_n prices 1M tokens at OpenRouter's qwen/qwen3.8-27b
+price (DeepInfra BF16, matching FLOP's weights) blended at
+`flop_blend_in_out` = 15 input tokens per output token. That is OpenRouter's
+measured mix (State of AI, arXiv 2601.10088). The blend is (15 x $0.15 +
+$1.875) / 16 = $0.2578 per 1M, so FLOP/USD = 0.0000016527 (owner decisions,
+2026-11-11).
+
+**Manipulation limits** on the FLOP side. No single buyer (`agent`) or miner
+may carry more than 45% of the window's weight (`flop_max_agent_share`,
+`flop_max_miner_share` = 0.45): a bigger one has its weight scaled down to the
+cap, and its prints stay in. A buyer flooding the window stays a minority, so
+it can't set the median, priced high or low. (At exactly half, a low-priced
+flood would tie everyone else and the lower median would take its price.) Fewer than 3 distinct buyers (`flop_min_agents`) is stale.
+
+**All models.** The index uses every model's settlements, priced per G_n;
+there is no model filter. Qwen3.8-27B is only the benchmark unit (like quoting
+oil in Brent): it has had 15 settlements ever, so a feed filtered to it would
+be permanently stale.
+
+**Conversion table.** The bots log a table (`flop table: ...` in `bots.log`)
+whenever the mark changes, computed from the live mark and FLOP's model
+registry (`gflopsPerToken` from `flop_get_model_pricing`, refreshed hourly):
+
+| Quote | Formula | At a $0.2578 mark |
+|---|---|---|
+| Model M, $ per 1M tokens | mark x gflopsPerToken_M / 52 | |
+| Qwen3.8-27B (52 GF/token) | mark | $0.2578 |
+| Qwen3-8B (17 GF/token) | mark x 17 / 52 | $0.0843 |
+| Qwen2.5-0.5B (2 GF/token) | mark x 2 / 52 | $0.0099 |
+| Pure compute, $ per exaFLOP (1e9 G_n) | mark / 0.052 | $4.96 |
+
+The last column is an example; the log line always uses the live mark.
 
 **Refresh.** The pusher refetches every 60 s and pushes on a move or a
 heartbeat, like the SOL-PERP pusher.
@@ -34,16 +88,17 @@ heartbeat, like the SOL-PERP pusher.
 
 The index is **stale**, and the pusher sends nothing, when:
 
-- the 6-hour window holds fewer than 20 prints; or
+- (mark source `openrouter`) no successful OpenRouter fetch for 30 minutes; or
+- (FLOP side) the 6-hour window holds fewer than 20 prints, or fewer than 3 distinct miners or buyers; or
 - the newest print is more than 30 minutes old; or
 - FLOP's endpoint fails or returns something we can't parse.
 
 When the index is stale, the on-chain mark just ages. There is no fallback:
 we never substitute FLOP's nominal gateway prices (`api.flop.network/v1/models`,
 tagged `devnet-nominal`), a last-good value, or a guess. Opening a trade
-requires a mark whose newest print is under ~32 minutes old. That check uses
-the print's time, not when FLOP was last read, so if FLOP's endpoint breaks,
-opens can continue at the last mark for up to ~32 minutes. If the index stays
+requires a mark whose source time is under 30 minutes old (the OpenRouter
+fetch time; under `flop_standin`, the newest print's time), so if the source
+breaks, trades can continue at the last mark for up to 30 minutes. If the index stays
 stale for about 24 hours (216,000 slots), anyone can resolve the market under
 the wrapper's permissionless stale-resolve rule.
 
@@ -73,9 +128,9 @@ filtered out explicitly.
 
 Two more caveats come from FLOP's own repos:
 
-- `pricePerGflop` is what the miner was paid per unit of compute
-  (`minerPaid / aggregateGn`; in the row we checked, 47.52e15 / 16 = 2.97e15).
-  It is not the escrow ratio. A reviewer on `flop-labs/yellowpaper` #208 argues
+- The index uses the buyer's price, `escrow / aggregateGn`, not
+  `pricePerGflop`, which is what the miner was paid (`minerPaid / aggregateGn`,
+  about 1% less). A reviewer on `flop-labs/yellowpaper` #208 argues
   that today's per-settlement figures reflect reservation terms and an
   administratively set registry price, not a negotiated price.
 - FLOP Labs' decision record, as quoted in yellowpaper #208 and #223, says
@@ -91,15 +146,15 @@ Two more caveats come from FLOP's own repos:
 
 - AuthMark: our pusher holds the oracle authority and pushes the index. That
   key can set any mark, which is acceptable only for a devnet demo.
-- Collateral is our devnet test mint. PnL is paid as if FLOP per TFLOP were
-  dollars; the devnet FLOP token has no value, so nothing converts.
+- Collateral is our devnet test mint, and PnL is in USD per 1M tokens. The
+  mark is OpenRouter's live USD price; the FLOP side runs as a check.
 - 2x leverage (50% initial, 25% maintenance), because the index is thin and
-  gappy. The mark may move 20 bps per slot, so a ~3% jump between FLOP's few
-  price levels is followed in about 15 slots (~6 s).
+  gappy. The mark may move 20 bps per slot, so a 40% jump (a provider leaving
+  the set) is followed in about 200 slots (~90 s).
 - The permissionless asset-init fee stays 0, as on SOL-PERP.
 - Trades: the bots' off-chain matcher co-signs bilateral trades between the
-  run's LP and test-trader wallets. There is no hedge venue for compute and no
-  on-chain matcher.
+  run's LP and test-trader wallets, as a small market maker (SPEC.md). There
+  is no hedge venue for compute and no on-chain matcher.
 - The keeper (drip) cranks it like any other Percolator market.
 
 ## Running it

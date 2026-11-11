@@ -1233,11 +1233,42 @@ impl World {
                 continue;
             }
             let fresh = self.bucket_fresh_atoms(d);
-            let amount = if all {
+            let mut amount = if all {
                 fresh
             } else {
                 fresh.saturating_sub(self.domain_claims_atoms_ceil(d))
             };
+            // Engine #249: in Resolved mode a provider may only take the surplus above the
+            // reserve that still pays underpaid winners (the junior payout pool). That
+            // reserve is forfeited to the junior residual at expiry, by design; the
+            // fairness invariants judge whether the provider bore more than it should.
+            if self.mode() == MarketModeV16::Resolved {
+                let surplus = {
+                    let m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+                    m.resolved_counterparty_backing_surplus(d)
+                };
+                let surplus = match surplus {
+                    Ok(s) => s,
+                    // LockActive: the junior pool is not settled yet, so nothing is
+                    // withdrawable now; the end-of-run provider checks still judge the
+                    // final recovery. Any other error is unexpected.
+                    Err(V16Error::LockActive) => {
+                        self.trace.push(format!("terminal: domain {d} resolved surplus locked"));
+                        0
+                    }
+                    Err(e) => {
+                        liveness.push(format!("resolved surplus read failed in domain {d}: {e:?}"));
+                        0
+                    }
+                };
+                if surplus < amount {
+                    let reserve = amount - surplus;
+                    self.trace.push(format!(
+                        "terminal: domain {d} resolved surplus {surplus} < requested {amount}; reserve {reserve} kept for junior payouts"
+                    ));
+                    amount = surplus;
+                }
+            }
             if amount == 0 {
                 continue;
             }
@@ -1493,6 +1524,17 @@ impl Report {
             // with no fees its fair recovery is still its full principal. Terminal
             // defaults (resolved-mode split) are outside the model, as for inv3 below.
             let terminal = self.defaults.iter().any(|d| d.terminal);
+            // Terminal defaults: since engine #249 the resolved reserve may pay winners
+            // left short, but never more than the total shortfall.
+            if terminal && self.provider_out + shortfall + tol < self.provider_principal {
+                v.push(Violation {
+                    invariant: Invariant::ProviderPrincipal,
+                    detail: format!(
+                        "terminal default: provider recovered {} of principal {}, more than the shortfall {shortfall} withheld, tol {tol}",
+                        self.provider_out, self.provider_principal
+                    ),
+                });
+            }
             if !terminal && self.provider_out + tol < self.provider_principal {
                 v.push(Violation {
                     invariant: Invariant::ProviderPrincipal,

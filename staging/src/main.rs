@@ -548,6 +548,10 @@ impl Staging {
         if self.trader_pf == Pubkey::default() {
             return Ok(None); // no test trader (mainnet)
         }
+        let m = &self.cfg.matcher;
+        if !m.kill_file.is_empty() && std::path::Path::new(&m.kill_file).exists() {
+            return Ok(Some("refused(kill_switch)".into()));
+        }
         // Match the pusher's processed confirmation, including the preceding
         // push, and keep market/LP in one snapshot through trade confirmation.
         let _in_flight = lifecycle.lock().unwrap();
@@ -575,7 +579,7 @@ impl Staging {
             None if coin => self.cfg.matcher.size_q as i128,
             None => -(self.cfg.matcher.size_q as i128),
         };
-        if self.open.is_none() {
+        if self.open.is_none() || self.cfg.matcher.pull_when_stale {
             let fresh = self.pushed.as_ref().is_some_and(|p| {
                 let p = p.lock().unwrap();
                 p.market == self.market && p.published_ms.is_some_and(|at| launch::now_ms().saturating_sub(at) <= self.cfg.oracle.open_max_mark_age_ms)
@@ -624,6 +628,12 @@ impl Staging {
             return Err(error);
         }
         self.open = if self.open.is_some() { None } else { Some(q) };
+        if self.cfg.matcher.log_fills {
+            println!(
+                "{{\"event\":\"mm_fill\",\"size_q\":{q},\"mark_e6\":{mark},\"quote_e6\":{price},\"lp_inventory_q\":{},\"at_ms\":{}}}",
+                lp_position - q, launch::now_ms()
+            );
+        }
         Ok(Some(format!("{}{}", if q > 0 { "+" } else { "-" }, q.unsigned_abs())))
     }
 
@@ -867,7 +877,8 @@ fn real_main() -> Result<()> {
         Some("roles") => launch::roles_main(&args[1..]),
         Some("lifecycle") => launch::lifecycle_main(&args[1..]),
         Some("prices") => pusher::prices(&args[1..]),
-        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles | prices | lifecycle] <config> <cluster> <run dir>"),
+        Some("verify-push-log") => pusher::verify_push_log(&args[1..]),
+        Some(m) => bail!("unknown mode {m}; usage: staging [step <name> | bots | roles | prices | lifecycle] <config> <cluster> <run dir> | verify-push-log <bots.log> <oracle pubkey>"),
     }
 }
 
@@ -962,8 +973,15 @@ fn run(mut st: Staging, bots: bool) -> Result<()> {
         let p = "thread";
         let trade_now = Instant::now();
         let t = if live && trade_due(last_trade, trade_now, trade_every_secs, st.rolling && st.open.is_some()) {
-            last_trade = Some(trade_now);
-            trade.record(st.match_trade(&push_lifecycle))
+            let r = trade.record(st.match_trade(&push_lifecycle));
+            // A pre-send refusal or skip sends nothing: retry next tick instead of
+            // waiting out the cadence (the first tick often runs before the first
+            // mark push). target_effective_lag is refused on chain, so it waits.
+            let unsent = r == "-" || (r.starts_with("refused(") && r != "refused(target_effective_lag)");
+            if !unsent {
+                last_trade = Some(trade_now);
+            }
+            r
         } else { "-".into() };
         let b = if live { backing.record(st.manage_backing()) } else { "-".into() };
         let i = if live && tick % insurance_every == 0 { insurance.record(st.top_up_insurance(st.cfg.amounts.insurance_topup)) } else { "-".into() };
@@ -1155,7 +1173,7 @@ mod fill_tests {
     }
 
     fn cfg() -> launch::MatcherCfg {
-        launch::MatcherCfg { program_id: Pubkey::new_unique().to_string(), size_q: 1, spread_bps: 10, fee_bps: 12, max_fill_notional_usd: 100_000, max_lp_inventory_usd: 100_000 }
+        launch::MatcherCfg { program_id: Pubkey::new_unique().to_string(), size_q: 1, spread_bps: 10, fee_bps: 12, max_fill_notional_usd: 100_000, max_lp_inventory_usd: 100_000, pull_when_stale: false, kill_file: String::new(), log_fills: false }
     }
     #[test]
     fn cap_uses_higher_price() {

@@ -141,6 +141,70 @@ pub struct OracleCfg {
     pub flop_max_age_s: u64,
     #[serde(default = "default_flop_refresh_s")]
     pub flop_refresh_s: u64,
+    /// Distinct miners needed in the window, else stale (no push).
+    #[serde(default = "default_flop_min_miners")]
+    pub flop_min_miners: usize,
+    /// Reference model compute per 1M tokens, in G_n (Qwen3.8-27B: 52 GF/token).
+    #[serde(default = "default_flop_gn_per_mtok")]
+    pub flop_gn_per_mtok: u64,
+    /// FLOP/USD STAND-IN inputs (devnet has no FLOP/USD market until mainnet):
+    /// the reference model's USD price per 1M input and output tokens, the
+    /// input:output token blend, and the FLOP per G_n anchor they are matched
+    /// to. See `OracleCfg::flop_usd_standin`. 0 = unset (the index refuses).
+    #[serde(default)]
+    pub flop_ref_usd_in: f64,
+    #[serde(default)]
+    pub flop_ref_usd_out: f64,
+    #[serde(default)]
+    pub flop_blend_in_out: f64,
+    #[serde(default)]
+    pub flop_anchor_flop_per_gn: f64,
+    /// Where the FLOP perp mark comes from: "openrouter" (live USD leg) or
+    /// "flop_standin" (FLOP side x the FLOP/USD stand-in).
+    #[serde(default = "default_flop_mark_source")]
+    pub flop_mark_source: String,
+    /// No buyer / miner carries more than this share of the window's weight.
+    #[serde(default = "default_flop_max_share")]
+    pub flop_max_agent_share: f64,
+    #[serde(default = "default_flop_max_share")]
+    pub flop_max_miner_share: f64,
+    /// Fewer distinct buyers than this in the window is stale.
+    #[serde(default = "default_flop_min_agents")]
+    pub flop_min_agents: usize,
+    /// OpenRouter endpoints list for the benchmark model.
+    #[serde(default = "default_or_url")]
+    pub or_url: String,
+    /// Quantization tiers in preference order.
+    #[serde(default = "default_or_quantizations")]
+    pub or_quantizations: Vec<String>,
+    #[serde(default = "default_or_min_endpoints")]
+    pub or_min_endpoints: usize,
+    #[serde(default = "default_or_refresh_s")]
+    pub or_refresh_s: u64,
+    /// No successful OpenRouter fetch for this long is stale.
+    #[serde(default = "default_or_max_age_s")]
+    pub or_max_age_s: u64,
+    /// How endpoints combine: "inverse_square" (1/price^2 weights, as
+    /// OpenRouter's default routing) or "median".
+    #[serde(default = "default_or_weighting")]
+    pub or_weighting: String,
+    /// Endpoints priced under this fraction of the set's median are dropped
+    /// before weighting (0 = off).
+    #[serde(default = "default_or_min_frac")]
+    pub or_min_frac_of_median: f64,
+}
+
+impl OracleCfg {
+    /// Blended reference USD per 1M tokens: (blend x in + out) / (blend + 1).
+    pub fn flop_ref_usd_per_mtok(&self) -> f64 {
+        (self.flop_blend_in_out * self.flop_ref_usd_in + self.flop_ref_usd_out) / (self.flop_blend_in_out + 1.0)
+    }
+
+    /// STAND-IN FLOP/USD: the rate at which the anchor FLOP per G_n prices 1M
+    /// tokens at the blended reference USD price.
+    pub fn flop_usd_standin(&self) -> f64 {
+        self.flop_ref_usd_per_mtok() / (self.flop_anchor_flop_per_gn * self.flop_gn_per_mtok as f64)
+    }
 }
 
 fn default_exchange_binance_url() -> String { "wss://stream.binance.com:9443/ws/solusdt@ticker".into() }
@@ -164,6 +228,18 @@ fn default_flop_window_s() -> u64 { 6 * 3600 }
 fn default_flop_min_prints() -> usize { 20 }
 fn default_flop_max_age_s() -> u64 { 1800 }
 fn default_flop_refresh_s() -> u64 { 60 }
+fn default_flop_min_miners() -> usize { 3 }
+fn default_flop_gn_per_mtok() -> u64 { 52_000_000 }
+fn default_flop_mark_source() -> String { "openrouter".into() }
+fn default_flop_max_share() -> f64 { 0.45 }
+fn default_flop_min_agents() -> usize { 3 }
+fn default_or_url() -> String { "https://openrouter.ai/api/v1/models/qwen/qwen3.8-27b/endpoints".into() }
+fn default_or_quantizations() -> Vec<String> { vec!["bf16".into(), "fp16".into()] }
+fn default_or_min_endpoints() -> usize { 2 }
+fn default_or_refresh_s() -> u64 { 300 }
+fn default_or_max_age_s() -> u64 { 1800 }
+fn default_or_weighting() -> String { "inverse_square".into() }
+fn default_or_min_frac() -> f64 { 0.5 }
 
 /// InitMarket, field for field (`initial_price` is the mock start). TOML
 /// integers are i64, so u128 fields are read as u64.
@@ -211,6 +287,16 @@ pub struct MatcherCfg {
     pub max_lp_inventory_usd: u64,
     pub spread_bps: u64,
     pub fee_bps: u64,
+    /// Market maker: also refuse closes (not just opens) on a stale mark.
+    #[serde(default)]
+    pub pull_when_stale: bool,
+    /// Market maker kill switch: while this file exists, no trades at all.
+    /// Empty = none.
+    #[serde(default)]
+    pub kill_file: String,
+    /// Print a JSON line per fill (`"event":"mm_fill"`).
+    #[serde(default)]
+    pub log_fills: bool,
 }
 
 #[derive(Deserialize, Clone)]
