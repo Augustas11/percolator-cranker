@@ -35,22 +35,35 @@ marginal barrel trades rather than the average of advertised offers. On
 One endpoint alone is its own price; a new expensive endpoint barely moves the
 mark (a $5 one would add ~3%). `or_weighting = median` keeps the old method.
 
-**Cheap-outlier guard.** Under 1/price² weights a very cheap listing (a
-mispricing, a promo, a near-zero completion price) would take almost all the
-weight. So before weighting, endpoints priced under half the set's median
-(`or_min_frac_of_median` = 0.5) are dropped.
+**Cheap-outlier clamp** (owner decision 2026-11-11: clamp, don't drop).
+Under 1/price² weights a very cheap listing (a mispricing, a promo, a
+near-zero completion price) would take almost all the weight. So before
+weighting, any endpoint priced under half the set's median
+(`or_min_frac_of_median` = 0.5) counts as half the median. Nothing is dropped
+for being cheap. An earlier rule dropped such endpoints; with two bf16
+endpoints that made the mark jump ~3x ($0.24 to $0.73) when DeepInfra's cut
+went from 21% to 22%. With the clamp the mark moves smoothly with every price,
+and a $0.01 promo can't pull it below about half the median.
+
+Inverse-square weighting has one known exception to "a cheaper provider never
+raises the mark": a cut by an endpoint priced over 2x the mark raises it a
+little, because the cheaper expensive endpoint wins weight (e.g. bf16 at
+$0.26, $0.62 and $3.00: cutting the $3.00 one to $0.80 moves the mark $0.396
+to $0.419). Cuts by endpoints under 2x the mark, which today is both bf16
+endpoints, never raise it.
 
 **Sets, in order** (owner decision 2026-11-11: fall through, don't hold).
 The bots try bf16 endpoints alone, then fp16 alone, then bf16 and fp16
-together, then every up endpoint. In each set they apply the outlier guard;
-the first set that still has at least 2 endpoints prices the push. The mark
-holds (stale) only when every set has fewer than 2. With today's two bf16
-endpoints, a DeepInfra cut of about 18% or more drops it from the bf16 pair;
-the push then comes from bf16+fp16 (or every endpoint), so it may blend
-quantizations. The set that priced each push is in `bots.log` (`flop status`)
-and in the signed push log (`set`, with `-trimmed` when the guard dropped
-anything), and the verifier checks that the logged endpoints pick that same
-set. There is no fallback to a last-good value past 30 minutes, to FLOP's
+together, then every up endpoint, and price from the first set with at least
+2 up endpoints (then clamp and weight inside it). So the next set is used only
+when endpoints are down or missing, never because one got cheap. The mark
+holds (stale) only when every set has fewer than 2. A push from bf16+fp16 or
+from every endpoint may blend quantizations. Each push logs its set in
+`bots.log` (`flop status`) and in the signed push log (`set`, with
+`-clamped` when the clamp applied), plus each used endpoint's listed and
+clamped price (`used`). The verifier checks the set and those prices against
+the logged endpoints. Lines pushed before the clamp have no `guard` field and
+verify under the old drop rule. There is no fallback to a last-good value past 30 minutes, to FLOP's
 nominal gateway prices, or to a guess. A stale index pushes nothing and the
 on-chain mark ages.
 

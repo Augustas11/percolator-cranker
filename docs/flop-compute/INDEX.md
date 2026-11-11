@@ -36,8 +36,8 @@ down, because miners reprice to stay competitive in dollars.
   weighted by 1/price², as OpenRouter's default routing spreads load
   (SPEC.md says why). Only up endpoints count. Endpoints are picked by
   quantization: bf16, else fp16, else bf16 and fp16 together, else every
-  endpoint, taking the first set with at least 2 endpoints left after
-  dropping listings under half its median. No successful fetch for 30 minutes is stale:
+  endpoint, taking the first set with at least 2 up endpoints. A listing
+  under half the set's median counts as half the median. No successful fetch for 30 minutes is stale:
   no pushes, the on-chain mark ages. On 2026-11-11 the bf16 pair (DeepInfra
   $0.2578, GMICloud $0.6219) gives $0.311.
 - `flop_standin`: `(FLOP per G_n) x 52e6 G_n per 1M tokens (52 GF/token) x
