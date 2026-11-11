@@ -16,16 +16,25 @@ audited.** See "What this is not" below.
 - `marketKind` = `spot` (forwards are left out);
 - `settlementKind` = `settled`;
 - `selfTrade` = false;
-- positive `aggregateGn` (compute delivered) and positive `pricePerGflop`.
+- positive `aggregateGn` (compute delivered) and positive `escrow`.
 
-**Value.** The GN-weighted median of `pricePerGflop` over those settlements
-in the last 6 hours. Sort the prints by price and take the lowest price at
+**Value.** The GN-weighted median of the buyer's price, `escrow / aggregateGn`
+(FLOP per G_n), over those settlements in the last 6 hours. Sort the prints by price and take the lowest price at
 which half of the window's GN is covered. A median ignores one odd print;
 weighting by GN means a large job counts more than a tiny one.
 
-**Units.** FLOP per TFLOP. The on-chain mark is that number times 1e6
-(`pricePerGflop` is planck per Gflop with 18 decimals, so
-`mark_e6 = pricePerGflop / 1e9`). On 2026-11-10 it was 2.97 FLOP per TFLOP.
+**Units.** USD per 1M tokens of Qwen3.8-27B, times 1e6 on chain (owner
+decision, 2026-11-11). What buyers and miners hedge is the dollar price of
+compute; a FLOP-denominated index would mostly mirror the token price upside
+down, because miners reprice to stay competitive in dollars.
+
+`mark = (FLOP per G_n) x 52e6 G_n per 1M tokens (52 GF/token) x FLOP/USD`.
+
+There is no FLOP/USD market until mainnet, so FLOP/USD is a configured
+**stand-in**, `flop_usd_standin = 0.0000065`. It makes today's 0.003 FLOP per
+G_n equal OpenRouter's qwen/qwen3.8-27b price at a 50/50 input/output mix
+($0.15 in, $1.875 out, so $1.0125 per 1M). The opening mark is therefore about
+$1.01. At mainnet the stand-in is replaced by a live FLOP/USD feed.
 
 **Refresh.** The pusher refetches every 60 s and pushes on a move or a
 heartbeat, like the SOL-PERP pusher.
@@ -34,7 +43,7 @@ heartbeat, like the SOL-PERP pusher.
 
 The index is **stale**, and the pusher sends nothing, when:
 
-- the 6-hour window holds fewer than 20 prints; or
+- the 6-hour window holds fewer than 20 prints, or fewer than 3 distinct miners; or
 - the newest print is more than 30 minutes old; or
 - FLOP's endpoint fails or returns something we can't parse.
 
@@ -73,9 +82,9 @@ filtered out explicitly.
 
 Two more caveats come from FLOP's own repos:
 
-- `pricePerGflop` is what the miner was paid per unit of compute
-  (`minerPaid / aggregateGn`; in the row we checked, 47.52e15 / 16 = 2.97e15).
-  It is not the escrow ratio. A reviewer on `flop-labs/yellowpaper` #208 argues
+- The index uses the buyer's price, `escrow / aggregateGn`, not
+  `pricePerGflop`, which is what the miner was paid (`minerPaid / aggregateGn`,
+  about 1% less). A reviewer on `flop-labs/yellowpaper` #208 argues
   that today's per-settlement figures reflect reservation terms and an
   administratively set registry price, not a negotiated price.
 - FLOP Labs' decision record, as quoted in yellowpaper #208 and #223, says
@@ -91,8 +100,8 @@ Two more caveats come from FLOP's own repos:
 
 - AuthMark: our pusher holds the oracle authority and pushes the index. That
   key can set any mark, which is acceptable only for a devnet demo.
-- Collateral is our devnet test mint. PnL is paid as if FLOP per TFLOP were
-  dollars; the devnet FLOP token has no value, so nothing converts.
+- Collateral is our devnet test mint, and PnL is in USD per 1M tokens. The
+  FLOP/USD leg is a stand-in, so the mark moves only with FLOP per G_n.
 - 2x leverage (50% initial, 25% maintenance), because the index is thin and
   gappy. The mark may move 20 bps per slot, so a ~3% jump between FLOP's few
   price levels is followed in about 15 slots (~6 s).

@@ -141,6 +141,16 @@ pub struct OracleCfg {
     pub flop_max_age_s: u64,
     #[serde(default = "default_flop_refresh_s")]
     pub flop_refresh_s: u64,
+    /// Distinct miners needed in the window, else stale (no push).
+    #[serde(default = "default_flop_min_miners")]
+    pub flop_min_miners: usize,
+    /// Reference model compute per 1M tokens, in G_n (Qwen3.8-27B: 52 GF/token).
+    #[serde(default = "default_flop_gn_per_mtok")]
+    pub flop_gn_per_mtok: u64,
+    /// FLOP/USD. Devnet has no FLOP/USD market: a configured STAND-IN until a
+    /// live feed exists at mainnet. 0 = unset (the FLOP index refuses to start).
+    #[serde(default)]
+    pub flop_usd_standin: f64,
 }
 
 fn default_exchange_binance_url() -> String { "wss://stream.binance.com:9443/ws/solusdt@ticker".into() }
@@ -164,6 +174,8 @@ fn default_flop_window_s() -> u64 { 6 * 3600 }
 fn default_flop_min_prints() -> usize { 20 }
 fn default_flop_max_age_s() -> u64 { 1800 }
 fn default_flop_refresh_s() -> u64 { 60 }
+fn default_flop_min_miners() -> usize { 3 }
+fn default_flop_gn_per_mtok() -> u64 { 52_000_000 }
 
 /// InitMarket, field for field (`initial_price` is the mock start). TOML
 /// integers are i64, so u128 fields are read as u64.
