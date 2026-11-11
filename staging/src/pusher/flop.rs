@@ -241,9 +241,9 @@ pub struct OrQuote {
 
 /// Pick endpoints: the first quantization tier with at least `or_min_endpoints`;
 /// else all listed tiers together if that reaches it; else every endpoint.
-/// Each endpoint's price is its input:output blend; the quote is the median.
+/// Each endpoint's price is its input:output blend; `or_weighting` combines them.
 pub fn or_quote(endpoints: &[OrEndpoint], at_ms: u64, o: &launch::OracleCfg) -> Result<OrQuote> {
-    or_quote_with(endpoints, at_ms, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints, &o.or_weighting)
+    or_quote_with(endpoints, at_ms, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints, &o.or_weighting, o.or_min_frac_of_median)
 }
 
 /// Combine blended prices (USD per 1M tokens, each > 0).
@@ -271,6 +271,7 @@ pub fn combine(prices: &[f64], weighting: &str) -> Result<f64> {
 
 fn or_quote_with(
     endpoints: &[OrEndpoint], at_ms: u64, blend: f64, quantizations: &[String], min_endpoints: usize, weighting: &str,
+    min_frac_of_median: f64,
 ) -> Result<OrQuote> {
     let priced = |e: &&OrEndpoint| e.prompt.is_finite() && e.completion.is_finite() && e.prompt >= 0.0 && e.completion >= 0.0 && e.prompt + e.completion > 0.0;
     let valid: Vec<&OrEndpoint> = endpoints.iter().filter(priced).filter(|e| e.status == 0).collect();
@@ -299,6 +300,22 @@ fn or_quote_with(
         .map(|e| (e.provider.clone(), e.quantization.clone(), (b * e.prompt + e.completion) / (b + 1.0) * 1e6))
         .collect();
     used.sort_by(|x, y| x.2.total_cmp(&y.2));
+    // Cheap-outlier guard: 1/b² weights hand a very cheap listing (a
+    // mispricing, a promo) nearly all the weight, so endpoints under
+    // `min_frac_of_median` of the set's median are dropped. If that leaves too
+    // few, hold (stale) rather than jump.
+    let mut name = name;
+    if min_frac_of_median > 0.0 {
+        let floor = min_frac_of_median * combine(&used.iter().map(|u| u.2).collect::<Vec<_>>(), "median")?;
+        let before = used.len();
+        used.retain(|u| u.2 >= floor);
+        if used.len() < before {
+            if used.len() < min_endpoints {
+                bail!("openrouter: {} endpoint(s) under {floor:.4} dropped as outliers, {} left, need {min_endpoints}", before - used.len(), used.len());
+            }
+            name = format!("{name}-trimmed");
+        }
+    }
     let prices: Vec<f64> = used.iter().map(|u| u.2).collect();
     let price = combine(&prices, weighting)?;
     let usd_e6 = (price * 1e6).round();
@@ -422,6 +439,9 @@ impl FlopIndex {
         match cfg.flop_mark_source.as_str() {
             "openrouter" => {
                 combine(&[1.0], &cfg.or_weighting)?;
+                if !(cfg.or_min_frac_of_median >= 0.0 && cfg.or_min_frac_of_median < 1.0) {
+                    bail!("or_min_frac_of_median must be in [0, 1)");
+                }
                 if !cfg.or_url.starts_with("https://") || cfg.or_min_endpoints == 0 || cfg.or_refresh_s < 60
                     || cfg.or_max_age_s < cfg.or_refresh_s
                 {
@@ -528,6 +548,7 @@ impl FlopIndex {
                 "source": "openrouter", "url": o.or_url, "fetched_ms": q.at_ms, "set": q.set,
                 "blend_in_out": o.flop_blend_in_out, "quantizations": o.or_quantizations,
                 "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
+                "min_frac_of_median": o.or_min_frac_of_median,
                 "endpoints": q.endpoints, "flop_side": side_json,
             }))
         } else {
@@ -710,7 +731,8 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
         let eps: Vec<OrEndpoint> = serde_json::from_value(inputs["endpoints"].clone())?;
         // Lines from before weighting was logged were medians.
         let weighting = inputs["weighting"].as_str().unwrap_or("median");
-        let q = or_quote_with(&eps, 0, blend, &quants, min, weighting)?;
+        let frac = inputs["min_frac_of_median"].as_f64().unwrap_or(0.0);
+        let q = or_quote_with(&eps, 0, blend, &quants, min, weighting, frac)?;
         if q.usd_e6 != mark {
             bail!("logged endpoints give {} but {mark} was pushed", q.usd_e6);
         }
@@ -974,8 +996,9 @@ mod tests {
     fn openrouter_picks_the_preferred_tier_and_takes_the_median() {
         let mut o = cfg();
         assert_eq!(o.flop_mark_source, "openrouter");
-        // Tier selection, checked with the median weighting.
+        // Tier selection, checked with the median weighting and no outlier guard.
         o.or_weighting = "median".into();
+        o.or_min_frac_of_median = 0.0;
         // 2026-11-11 list: blended DeepInfra bf16 $0.2578, GMICloud bf16 $0.6219, Cerebras fp16 $1.021.
         let eps = [
             ep("DeepInfra", "bf16", 0.15, 1.875),
@@ -1040,7 +1063,7 @@ mod tests {
         let inputs = serde_json::json!({
             "source": "openrouter", "set": q.set, "blend_in_out": o.flop_blend_in_out,
             "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
-            "endpoints": q.endpoints,
+            "min_frac_of_median": o.or_min_frac_of_median, "endpoints": q.endpoints,
         });
         let line = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "slot": 7, "inputs": inputs})).unwrap();
         assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), q.usd_e6);
@@ -1110,5 +1133,22 @@ mod tests {
         assert!(q.usd_e6.abs_diff(621_875) <= 1, "{}", q.usd_e6);
         // The down endpoint is still logged, so the log recomputes the same mark.
         assert_eq!(q.endpoints.len(), 3);
+    }
+
+    #[test]
+    fn a_cheap_outlier_is_dropped_or_holds() {
+        let o = cfg();
+        let (a, b) = ((0.15, 1.875), (0.45, 3.2));
+        // A third bf16 listing at ~$0.01 would take ~99% of 1/b² weight; it is dropped.
+        let eps = [ep("DeepInfra", "bf16", a.0, a.1), ep("GMICloud", "bf16", b.0, b.1), ep("Promo", "bf16", 0.005, 0.08)];
+        let q = or_quote(&eps, NOW, &o).unwrap();
+        assert_eq!((q.set.as_str(), q.usd_e6), ("bf16-trimmed", 311_207));
+        // Unguarded, it would own the mark.
+        let mut loose = o.clone();
+        loose.or_min_frac_of_median = 0.0;
+        assert!(or_quote(&eps, NOW, &loose).unwrap().usd_e6 < 20_000);
+        // Two endpoints, one slashed to under half the median: too few left, hold.
+        let eps = [ep("DeepInfra", "bf16", 0.01, 0.1), ep("GMICloud", "bf16", b.0, b.1)];
+        assert!(or_quote(&eps, NOW, &o).unwrap_err().to_string().contains("outliers"));
     }
 }

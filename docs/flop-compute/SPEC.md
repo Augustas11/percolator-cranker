@@ -35,6 +35,12 @@ marginal barrel trades rather than the average of advertised offers. On
 One endpoint alone is its own price; a new expensive endpoint barely moves the
 mark (a $5 one would add ~3%). `or_weighting = median` keeps the old method.
 
+**Cheap-outlier guard.** Under 1/price² weights a very cheap listing (a
+mispricing, a promo, a near-zero completion price) would take almost all the
+weight. So before weighting, endpoints priced under half the set's median
+(`or_min_frac_of_median` = 0.5) are dropped. If that leaves fewer than 2, the
+mark holds (stale) rather than jumping.
+
 **Fallbacks, in order, for the OpenRouter leg:** bf16 endpoints if at least
 2; else fp16 if at least 2; else bf16 and fp16 together if at least 2; else
 every endpoint. There is no fallback to a last-good value past 30 minutes, to
