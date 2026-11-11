@@ -22,6 +22,12 @@ contract (`size_q` = 1e6) is 1M benchmark tokens.
 | Mark (`openrouter`) | OpenRouter endpoints list for qwen/qwen3.8-27b: median of each endpoint's 15:1 blend | 5 min | no successful fetch for 30 min |
 | FLOP side (check; mark under `flop_standin`) | FLOP Network spot settlements, all models, 6 h window, GN-weighted median of escrow / aggregateGn | 60 s | < 20 prints, < 3 miners, < 3 buyers, or newest print > 30 min old |
 
+**Two-endpoint caveat.** On 2026-11-11 only two endpoints serve bf16
+(DeepInfra $0.2578, GMICloud $0.6219), so the median is their average, $0.44
+(owner decision: keep it). Either provider repricing moves the mark, by half
+its own change; one of them leaving drops the mark to the fp16 tier or to all
+endpoints.
+
 **Fallbacks, in order, for the OpenRouter leg:** bf16 endpoints if at least
 2; else fp16 if at least 2; else bf16 and fp16 together if at least 2; else
 every endpoint. There is no fallback to a last-good value past 30 minutes, to
