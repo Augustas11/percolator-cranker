@@ -241,7 +241,8 @@ fn opt(s: &str) -> Result<Option<f64>> {
 /// The 5-minute OpenRouter recorder (recorder PR 74, or_record.rs): one
 /// line per snapshot, `{at_ms, rows: [{model, provider, quantization,
 /// prompt, completion, status}] | null}`, prices USD per token (number or
-/// string). Group `recorder:<model>`.
+/// string). Group `recorder:<model>`. A null status counts as up, as in the
+/// pusher.
 fn recorder_jsonl(text: &str, groups: &mut BTreeMap<String, BTreeMap<u64, Vec<OrEndpoint>>>) -> Result<()> {
     let num = |v: &serde_json::Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()));
     for (n, line) in text.lines().enumerate() {
@@ -251,8 +252,12 @@ fn recorder_jsonl(text: &str, groups: &mut BTreeMap<String, BTreeMap<u64, Vec<Or
         let v: serde_json::Value = serde_json::from_str(line).with_context(|| format!("line {}", n + 1))?;
         let at = v["at_ms"].as_u64().with_context(|| format!("line {}: no at_ms", n + 1))?;
         let Some(rows) = v["rows"].as_array() else { continue };
+        // A row's model may be null: then the model in the fetched URL
+        // (.../models/<org>/<model>/endpoints).
+        let url_model = v["url"].as_str().and_then(|u| u.split("/models/").nth(1)).and_then(|m| m.strip_suffix("/endpoints")).unwrap_or("unknown");
         for r in rows {
-            let (Some(model), Some(provider), Some(p), Some(c)) = (r["model"].as_str(), r["provider"].as_str(), num(&r["prompt"]), num(&r["completion"])) else {
+            let model = r["model"].as_str().unwrap_or(url_model);
+            let (Some(provider), Some(p), Some(c)) = (r["provider"].as_str(), num(&r["prompt"]), num(&r["completion"])) else {
                 continue;
             };
             let e = OrEndpoint {
@@ -317,5 +322,23 @@ mod tests {
         // c has only one known price: not listed yet.
         assert_eq!(day("2026-08-02"), vec![("a".into(), 20), ("b".into(), 50)]);
         assert_eq!(day("2026-08-03"), vec![("a".into(), 20)]);
+    }
+
+    #[test]
+    fn recorder_lines_load_as_the_recorder_writes_them() {
+        let text = concat!(
+            r#"{"at_ms":1794355200000,"url":"https://openrouter.ai/api/v1/models/qwen/qwen3.8-27b/endpoints","rows":[{"model":null,"endpoint":"deepinfra/bf16","provider":"DeepInfra","quantization":"bf16","prompt":1.5e-7,"completion":1.875e-6,"status":0},{"model":null,"endpoint":"gmicloud/bf16","provider":"GMICloud","quantization":"bf16","prompt":4.5e-7,"completion":3.2e-6,"status":-2},{"model":null,"endpoint":"x","provider":"X","quantization":null,"prompt":null,"completion":1e-6,"status":null}],"raw":"..."}"#,
+            "\n",
+            r#"{"at_ms":1794355500000,"url":"u","rows":null,"error":"timeout","raw":""}"#,
+            "\n"
+        );
+        let mut g = BTreeMap::new();
+        recorder_jsonl(text, &mut g).unwrap();
+        let s = &g["recorder:qwen/qwen3.8-27b"];
+        assert_eq!(s.len(), 1, "a failed fetch is no snapshot");
+        let eps = &s[&1_794_355_200_000];
+        assert_eq!(eps.len(), 2, "an unpriced row is skipped");
+        assert_eq!((eps[0].provider.as_str(), eps[0].quantization.as_str(), eps[0].status), ("DeepInfra", "bf16", 0));
+        assert_eq!(eps[1].status, -2);
     }
 }
