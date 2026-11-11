@@ -82,7 +82,8 @@ fn main() {
     // A panic (in a candidate rule, say) is a run that did not happen too.
     std::panic::set_hook(Box::new(|info| {
         // A reader that stopped early (`| head -1`) already has the number.
-        if info.to_string().contains("failed printing to stdout") {
+        let m = info.to_string();
+        if m.contains("failed printing to stdout") && m.contains("Broken pipe") {
             std::process::exit(0);
         }
         eprintln!("flop-score: DID NOT RUN: panic: {info}");

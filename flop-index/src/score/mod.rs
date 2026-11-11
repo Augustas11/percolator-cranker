@@ -161,7 +161,7 @@ fn plan(eps: &[crate::OrEndpoint], rng: u64, k: usize, pool: &[String], listed: 
     let quant = up(eps).find(|e| provs.first() == Some(&e.provider)).map(|e| e.quantization.clone()).unwrap_or_default();
     let free: Vec<&String> = pool.iter().filter(|p| !listed.contains(p.as_str()) && !eps.iter().any(|e| e.provider == **p)).collect();
     r = splitmix(r);
-    let spoof_name = if free.is_empty() { "spoof".to_owned() } else { free[(r % free.len() as u64) as usize].clone() };
+    let spoof_name = if free.is_empty() { format!("p{:08x}", r >> 32) } else { free[(r % free.len() as u64) as usize].clone() };
     r = splitmix(r);
     let u = (r >> 11) as f64 / (1u64 << 53) as f64;
     let (lo, hi) = MULT[k];

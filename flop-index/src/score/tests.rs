@@ -199,7 +199,8 @@ fn the_spoof_wears_a_real_name_and_strengths_vary_with_the_seed() {
     let a = plan(&eps, attack_rng(1, "g", DAY0, 0), 0, &pool, &none);
     assert_eq!(a.spoof_name, "Nebius", "never a provider already listed");
     let later: BTreeSet<&str> = ["Nebius"].into();
-    assert_eq!(plan(&eps, attack_rng(1, "g", DAY0, 0), 0, &pool, &later).spoof_name, "spoof", "nor one the series lists later");
+    let n = plan(&eps, attack_rng(1, "g", DAY0, 0), 0, &pool, &later).spoof_name;
+    assert!(n != "Nebius" && n.starts_with('p'), "nor one the series lists later: {n}");
     // Its input:output shape is a real listing's, not 1:1.
     let mut real = eps.clone();
     for e in &mut real {
