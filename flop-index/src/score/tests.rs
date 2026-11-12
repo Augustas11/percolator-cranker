@@ -59,7 +59,7 @@ fn the_baseline_scores_zero_against_itself() {
 }
 
 #[test]
-fn a_plain_mean_loses_on_relisting_and_jumps() {
+fn a_plain_mean_loses_on_relisting() {
     // Measured, not wished for: on the pinned data the plain mean scores
     // better overall (SCORER.md, results). It is worse where a mean must be:
     // a provider relisting at 10x. (Under the 2-point clamp, before

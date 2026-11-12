@@ -348,15 +348,27 @@ pub(super) fn record_rows(text: &str) -> Result<Vec<RecRow>> {
 }
 
 /// An alert line when the set of clamped endpoints changes (the first promo,
-/// or the last one ending); None otherwise. `prev` is updated.
+/// or the last one ending), or when the clamp turns off or on (a set under
+/// 3 endpoints has no promo guard); None otherwise. `prev` is updated: the
+/// clamp state, then the clamped endpoints.
 pub fn clamp_alert(prev: &mut Vec<String>, q: &OrQuote) -> Option<String> {
-    let now: Vec<String> = q.used.iter().filter(|u| u.priced != u.listed).map(|u| format!("{} {}", u.provider, u.quantization)).collect();
+    // Start as "clamp on, nothing clamped": a quiet start needs no alert.
+    if prev.is_empty() {
+        prev.push("clamp on".into());
+    }
+    let mut now: Vec<String> = vec![format!("clamp {}", q.clamp)];
+    now.extend(q.used.iter().filter(|u| u.priced != u.listed).map(|u| format!("{} {}", u.provider, u.quantization)));
     if now == *prev {
         return None;
     }
+    let was_off = prev.first().is_some_and(|c| c != "clamp on");
     *prev = now;
-    if prev.is_empty() {
-        return Some(format!("flop alert: no endpoint clamped (set {}, mark ${:.4})", q.set, q.usd_e6 as f64 / 1e6));
+    if q.clamp != "on" {
+        return Some(format!("flop alert: clamp {} (set {}, mark ${:.4}): no promo guard on this set", q.clamp, q.set, q.usd_e6 as f64 / 1e6));
+    }
+    if prev.len() == 1 {
+        let what = if was_off { "clamp on again, no endpoint clamped" } else { "no endpoint clamped" };
+        return Some(format!("flop alert: {what} (set {}, mark ${:.4})", q.set, q.usd_e6 as f64 / 1e6));
     }
     let legs: Vec<String> = q
         .used
@@ -753,7 +765,12 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
         let frac = inputs["min_frac_of_median"].as_f64().unwrap_or(0.0);
         let guard = match inputs["guard"].as_str() {
             // Lines from before 2026-11-12 carry no clamp_min_endpoints: they clamped any set.
-            Some("clamp") => Guard::Clamp { min_set: serde_json::from_value(inputs["clamp_min_endpoints"].clone()).unwrap_or(0) },
+            Some("clamp") => Guard::Clamp {
+                min_set: match inputs.get("clamp_min_endpoints") {
+                    None => 0,
+                    Some(v) => serde_json::from_value(v.clone()).context("clamp_min_endpoints")?,
+                },
+            },
             None => Guard::LegacyDrop,
             Some(g) => bail!("unknown guard {g}"),
         };
@@ -777,8 +794,30 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
                 bail!("logged endpoints price from set {} but the line says {set}", q.set);
             }
         }
+        if let Some(c) = inputs.get("clamp") {
+            if c.as_str() != Some(q.clamp.as_str()) {
+                bail!("logged endpoints give clamp {} but the line says {c}", q.clamp);
+            }
+        }
     }
     Ok(mark)
+}
+
+/// The clamp rule a push line declares may not loosen: see `verify_log`.
+fn rule_ok(line: &str, new_rule_seen: &mut bool) -> Result<()> {
+    let at = line.rfind(SIG_KEY).context("no signature")?;
+    let rec: serde_json::Value = serde_json::from_str(&format!("{}}}", &line[..at]))?;
+    let inputs = &rec["inputs"];
+    if inputs["source"] != "openrouter" || inputs["guard"] != "clamp" {
+        return Ok(());
+    }
+    match inputs.get("clamp_min_endpoints").and_then(|v| v.as_u64()) {
+        Some(m) if m < 3 => bail!("clamp_min_endpoints {m}: the clamp needs at least 3 endpoints"),
+        Some(_) => *new_rule_seen = true,
+        None if *new_rule_seen => bail!("no clamp_min_endpoints after lines that had it: the old clamp-any-set rule"),
+        None => {}
+    }
+    Ok(())
 }
 
 /// `staging verify-push-log <bots.log> <oracle pubkey>`
@@ -790,11 +829,19 @@ pub fn verify_log(args: &[String]) -> Result<()> {
     let oracle = Some(oracle);
     let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
     let (mut ok, mut bad) = (0, 0);
+    // A line verifies under the rule it declares. Rules only tighten over a
+    // log: once a line declares clamp_min_endpoints, a later clamp line
+    // without it (the old clamp-any-set rule) or under 3 is refused.
+    let mut new_rule_seen = false;
     for (n, line) in text.lines().enumerate() {
         if !line.starts_with("{\"event\":\"flop_push\"") && !line.contains("\"event\":\"flop_push\"") {
             continue;
         }
-        match verify_push(line, oracle.as_ref()) {
+        let checked = verify_push(line, oracle.as_ref()).and_then(|mark| {
+            rule_ok(line, &mut new_rule_seen)?;
+            Ok(mark)
+        });
+        match checked {
             Ok(_) => ok += 1,
             Err(e) => {
                 bad += 1;
@@ -1367,7 +1414,12 @@ mod tests {
             for &b in &grid {
                 for &c in &grid {
                     for &d in &grid {
-                        out.push(vec![at("A", "bf16", a), at("B", "bf16", b), at("C", "fp16", c), at("D", "fp16", d), at("E", "fp8", 0.2)]);
+                        // Three bf16: one of them down leaves 2 (no clamp); C, D or E
+                        // down keeps 3 (clamp on).
+                        out.push(vec![
+                            at("A", "bf16", a), at("B", "bf16", b), at("F", "bf16", 0.5),
+                            at("C", "fp16", c), at("D", "fp16", d), at("E", "fp8", 0.2),
+                        ]);
                     }
                 }
             }
@@ -1381,7 +1433,7 @@ mod tests {
         // the push has under 3 endpoints. Then every remaining endpoint is
         // priced exactly as listed, never lifted.
         let o = cfg();
-        let mut checked = 0;
+        let (mut under, mut over) = (0, 0);
         for eps in outage_cases() {
             for down in 0..eps.len() {
                 let mut after = eps.clone();
@@ -1389,11 +1441,15 @@ mod tests {
                 let Ok(q) = or_quote(&after, NOW, &o) else { continue };
                 if q.used.len() < 3 {
                     assert!(q.used.iter().all(|u| u.priced == u.listed), "down {down}: {:?}", q.used);
-                    checked += 1;
+                    under += 1;
+                } else {
+                    // Some cases keep 3 bf16 (C, D or E down): the clamp stays on.
+                    assert_eq!(q.clamp, "on");
+                    over += 1;
                 }
             }
         }
-        assert!(checked > 1000, "{checked}");
+        assert!(under > 1000 && over > 1000, "{under} {over}");
     }
 
     #[test]
@@ -1436,7 +1492,7 @@ mod tests {
         let pair = [ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2)];
         let promo = ep("Promo", "bf16", 0.005, 0.08);
         let mut prev = Vec::new();
-        let clean = or_quote(&pair, NOW, &o).unwrap();
+        let clean = or_quote(&[pair[0].clone(), pair[1].clone(), ep("Novita", "bf16", 0.30, 2.4)], NOW, &o).unwrap();
         assert_eq!(clamp_alert(&mut prev, &clean), None);
         let hit = or_quote(&[pair[0].clone(), pair[1].clone(), promo], NOW, &o).unwrap();
         let line = clamp_alert(&mut prev, &hit).unwrap();
@@ -1446,6 +1502,67 @@ mod tests {
         // Same clamp on the next fetch: no repeat.
         assert_eq!(clamp_alert(&mut prev, &hit), None);
         assert!(clamp_alert(&mut prev, &clean).unwrap().starts_with("flop alert: no endpoint clamped"));
+    }
+
+    #[test]
+    fn the_clamp_turning_off_alerts_once() {
+        // A promo clamped in a 3-set; then GMICloud goes down: a 2-set, no
+        // guard, the promo prices as listed. That must not read "all clear".
+        let o = cfg();
+        let mut gmi = ep("GMICloud", "bf16", 0.45, 3.2);
+        let eps = |gmi: &OrEndpoint| [ep("DeepInfra", "bf16", 0.15, 1.875), gmi.clone(), ep("Promo", "bf16", 0.005, 0.08)];
+        let mut prev = Vec::new();
+        let hit = or_quote(&eps(&gmi), NOW, &o).unwrap();
+        assert!(clamp_alert(&mut prev, &hit).unwrap().starts_with("flop alert: clamped Promo"));
+        gmi.status = -2;
+        let off = or_quote(&eps(&gmi), NOW, &o).unwrap();
+        assert_eq!(off.clamp, "off (n<3)");
+        let line = clamp_alert(&mut prev, &off).unwrap();
+        assert!(line.starts_with("flop alert: clamp off (n<3) (set bf16"), "{line}");
+        assert!(line.contains("no promo guard"), "{line}");
+        assert_eq!(clamp_alert(&mut prev, &off), None);
+        // Back to 3: alerts again, the promo clamped.
+        gmi.status = 0;
+        assert!(clamp_alert(&mut prev, &hit).unwrap().starts_with("flop alert: clamped Promo"));
+        // A 2-set from the start alerts on the first fetch.
+        let mut fresh = Vec::new();
+        assert!(clamp_alert(&mut fresh, &off).is_some());
+    }
+
+    #[test]
+    fn the_log_verifier_refuses_a_loosened_rule() {
+        let o = cfg();
+        let oracle = Keypair::new();
+        let mut eps = list_with_deepinfra_cut(0.0);
+        eps[1].status = 1;
+        let new = or_quote(&eps, NOW, &o).unwrap();
+        let old = or_quote_with(
+            &eps, NOW, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints, &o.or_weighting, o.or_min_frac_of_median,
+            Guard::Clamp { min_set: 0 },
+        )
+        .unwrap();
+        let old_line = |q: &OrQuote| {
+            let inputs = serde_json::json!({
+                "source": "openrouter", "set": q.set, "blend_in_out": o.flop_blend_in_out,
+                "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
+                "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "used": q.used, "endpoints": q.endpoints,
+            });
+            signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "inputs": inputs})).unwrap()
+        };
+        let new_line = line_for(&o, &oracle, &new, &new.set, serde_json::to_value(&new.used).unwrap());
+        let dir = std::env::temp_dir().join(format!("verify-rule-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |lines: &[String]| {
+            let f = dir.join("bots.log");
+            std::fs::write(&f, lines.join("\n")).unwrap();
+            verify_log(&[f.display().to_string(), oracle.pubkey().to_string()])
+        };
+        // Old then new: fine. New then old (a loosened rule): refused.
+        let good = run(&[old_line(&old), new_line.clone()]);
+        let bad = run(&[new_line, old_line(&old)]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        good.unwrap();
+        assert!(bad.is_err());
     }
 
     #[test]

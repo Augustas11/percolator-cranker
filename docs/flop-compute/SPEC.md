@@ -54,7 +54,12 @@ priced DeepInfra above its listing, and the mark went $0.3112 to $0.3824
 ($0.3035 there). The cost: a 2-endpoint set has no promo guard, so a promo in
 it moves the mark to near its own price. Each push logs `clamp: on` or
 `clamp: off (n<3)` in `flop status` and the signed push log (`clamp`, with
-`clamp_min_endpoints`).
+`clamp_min_endpoints`). `clamp: on` means the guard checked the set; a set
+name ending `-clamped` means it lifted a price. The clamp turning off logs
+`flop alert: clamp off (n<3) ...: no promo guard on this set`, so a promo
+in a 2-endpoint set is noticed by that alert. `staging verify-push-log`
+refuses a log whose rule loosens: after a line with `clamp_min_endpoints`,
+a clamp line without it, or with less than 3, fails.
 
 With 3 or more endpoints an outage can still move the floor: the median moves
 when one goes down, and a price near the floor can be lifted to it (test
