@@ -59,15 +59,16 @@ fn the_baseline_scores_zero_against_itself() {
 }
 
 #[test]
-fn a_plain_mean_loses_on_relisting_and_jumps() {
+fn a_plain_mean_loses_on_relisting() {
     // Measured, not wished for: on the pinned data the plain mean scores
     // better overall (SCORER.md, results). It is worse where a mean must be:
-    // a provider relisting at 10x, and jumps the median doesn't explain.
+    // a provider relisting at 10x. (Under the 2-point clamp, before
+    // 2026-11-12, it also lost on jumps; with no clamp under 3 endpoints the
+    // jump difference on this panel is within noise, so it is not asserted.)
     let s = panel(8, 60);
     for split in [Split::Tune, Split::Heldout] {
         let r = score(&Mean, &Spec, &s, 1, split).unwrap();
         assert!(r.scenario[3].gain < -2.0 * r.scenario[3].se && r.scenario[3].gain < -0.3, "{split:?} relist {:?}", r.scenario[3]);
-        assert!(r.jump.gain < -2.0 * r.jump.se, "{split:?} jump {:?}", r.jump);
     }
 }
 
@@ -177,19 +178,20 @@ fn a_jump_the_median_explains_costs_nothing() {
 }
 
 #[test]
-fn the_live_bf16_pair_relisting_at_10x_lifts_the_mark_6x() {
-    // SPEC's 2026-11-11 pair. GMICloud relisting at 10x moves the median to
-    // $3.24, the half-median floor to $1.62, and clamps DeepInfra *up* to it.
+fn the_live_bf16_pair_relisting_at_10x_no_longer_lifts_the_mark() {
+    // SPEC's 2026-11-11 pair. Under the 2-point clamp (before 2026-11-12)
+    // GMICloud relisting at 10x moved the median to $3.24, the floor to
+    // $1.62, and clamped DeepInfra *up* to it: mark $1.911, 6x. A pair is
+    // now too few for the clamp, so the relisting moves the mark the other
+    // way, to DeepInfra's side: $0.268 (GMICloud loses weight).
     let pair = [ep("DeepInfra", 0.2578), ep("GMICloud", 0.6219)];
     assert!((spec_mark(&pair) - 0.311).abs() < 1e-3);
     let at = Attack { k: 3, victims: vec!["GMICloud".into()], quant: "bf16".into(), spoof_name: String::new(), mult: 10.0 };
     let hit = attacked(&at, &pair);
     let m = spec_mark(&hit);
-    assert!((m - 1.911).abs() < 2e-3, "{m}");
-    // Without the clamp the same relisting moves it the other way, to
-    // DeepInfra's side: $0.268 (GMICloud loses weight).
     let raw = combine(&[0.2578, 6.219], "inverse_square").unwrap();
     assert!((raw - 0.268).abs() < 1e-3, "{raw}");
+    assert!((m - raw).abs() < 2e-3, "{m}");
 }
 
 #[test]

@@ -15,11 +15,21 @@ pub struct Params {
     pub min_endpoints: usize,
     pub weighting: &'static str,
     pub min_frac_of_median: f64,
+    /// The clamp applies only to a set with at least this many up endpoints.
+    pub clamp_min_set: usize,
 }
 
 /// The live rule (owner decisions 2026-11-11): 15:1 blend, bf16 then fp16,
-/// at least 2 up endpoints, 1/price² weights, clamp at half the median.
-pub const SPEC: Params = Params { blend: 15.0, quantizations: &["bf16", "fp16"], min_endpoints: 2, weighting: "inverse_square", min_frac_of_median: 0.5 };
+/// at least 2 up endpoints, 1/price² weights, clamp at half the median; the
+/// clamp needs at least 3 endpoints in the set (owner, 2026-11-12).
+pub const SPEC: Params = Params {
+    blend: 15.0,
+    quantizations: &["bf16", "fp16"],
+    min_endpoints: 2,
+    weighting: "inverse_square",
+    min_frac_of_median: 0.5,
+    clamp_min_set: 3,
+};
 
 /// One OpenRouter endpoint for the benchmark model, prices in USD per token.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -46,8 +56,10 @@ pub struct Used {
 /// How the cheap-outlier guard treats a price under the floor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Guard {
-    /// Count it as the floor. Live rule.
-    Clamp,
+    /// Count it as the floor, in a set of at least `min_set` endpoints;
+    /// smaller sets are not clamped. Live rule: `min_set` 3. Lines pushed
+    /// before 2026-11-12 clamped any set (`min_set` 0).
+    Clamp { min_set: usize },
     /// Drop it, and hold if too few remain. Only to verify lines pushed
     /// before the clamp (they carry no "guard" field).
     LegacyDrop,
@@ -62,6 +74,9 @@ pub struct OrQuote {
     pub used: Vec<Used>,
     /// Which set was used: a quantization tier, "preferred" (all tiers) or "all".
     pub set: String,
+    /// The cheap-outlier guard on this set: "on", "off (n<3)" (set too small
+    /// for a median floor) or "off" (disabled).
+    pub clamp: String,
     /// Every priced endpoint fetched, so the push log can be recomputed.
     pub endpoints: Vec<OrEndpoint>,
 }
@@ -70,7 +85,7 @@ pub struct OrQuote {
 /// shipped config.
 pub fn spec_quote(endpoints: &[OrEndpoint], at_ms: u64) -> Result<OrQuote> {
     let qs: Vec<String> = SPEC.quantizations.iter().map(|q| q.to_string()).collect();
-    or_quote_with(endpoints, at_ms, SPEC.blend, &qs, SPEC.min_endpoints, SPEC.weighting, SPEC.min_frac_of_median, Guard::Clamp)
+    or_quote_with(endpoints, at_ms, SPEC.blend, &qs, SPEC.min_endpoints, SPEC.weighting, SPEC.min_frac_of_median, Guard::Clamp { min_set: SPEC.clamp_min_set })
 }
 
 /// Combine blended prices (USD per 1M tokens, each > 0).
@@ -148,10 +163,22 @@ pub fn or_quote_with(
     // 2026-11-11: clamp, don't drop). Dropping made the mark jump when the
     // cheapest provider crossed the floor; clamping keeps it continuous and
     // never lets a cheaper listing raise it.
-    if min_frac_of_median > 0.0 {
+    //
+    // A set under `min_set` endpoints is not clamped (owner, 2026-11-12): with
+    // two points the half-median floor is a quarter of their sum, so it lifted
+    // the cheaper legitimate endpoint when an outage left two (DeepInfra
+    // $0.2578 priced at $0.3198, mark +23%). Too few points to call one an
+    // outlier.
+    let mut clamp = if min_frac_of_median > 0.0 { "on".to_owned() } else { "off".to_owned() };
+    if let Guard::Clamp { min_set } = guard {
+        if min_frac_of_median > 0.0 && used.len() < min_set {
+            clamp = format!("off (n<{min_set})");
+        }
+    }
+    if clamp == "on" {
         let floor = min_frac_of_median * combine(&used.iter().map(|u| u.listed).collect::<Vec<_>>(), "median")?;
         match guard {
-            Guard::Clamp => {
+            Guard::Clamp { .. } => {
                 let mut n = 0;
                 for u in used.iter_mut().filter(|u| u.listed < floor) {
                     u.priced = floor;
@@ -181,7 +208,7 @@ pub fn or_quote_with(
     }
     // Every priced endpoint, down ones included, so the log can be recomputed.
     let endpoints = endpoints.iter().filter(priced).cloned().collect();
-    Ok(OrQuote { usd_e6: usd_e6 as u64, at_ms, used, set: name, endpoints })
+    Ok(OrQuote { usd_e6: usd_e6 as u64, at_ms, used, set: name, clamp, endpoints })
 }
 
 #[cfg(test)]
@@ -199,5 +226,6 @@ mod tests {
         assert_eq!(o["or_min_endpoints"].as_integer(), Some(s.min_endpoints as i64));
         assert_eq!(o["or_weighting"].as_str(), Some(s.weighting));
         assert_eq!(o["or_min_frac_of_median"].as_float(), Some(s.min_frac_of_median));
+        assert_eq!(o["or_clamp_min_endpoints"].as_integer(), Some(s.clamp_min_set as i64));
     }
 }

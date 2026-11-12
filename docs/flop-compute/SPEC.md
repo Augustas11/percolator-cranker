@@ -44,6 +44,32 @@ for being cheap. An earlier rule dropped such endpoints; with two bf16
 endpoints that made the mark jump ~3x ($0.24 to $0.73) when DeepInfra's cut
 went from 21% to 22%. With the clamp the mark moves smoothly with every price.
 
+The clamp needs at least 3 up endpoints in the set (`or_clamp_min_endpoints`
+= 3; owner decision 2026-11-12). Two points can't name an outlier: their
+half-median floor is a quarter of their sum, so it lifted the cheaper real
+price. On 2026-11-12 GMICloud bf16 went down, the feed fell through to
+bf16+fp16 = DeepInfra $0.2578 and Cerebras $1.0212, the floor ($0.3198)
+priced DeepInfra above its listing, and the mark went $0.3112 to $0.3824
+(+23%) from an outage. A set of 2 now prices plain 1/price² over the listings
+($0.3035 there). The cost: a 2-endpoint set has no promo guard, so a promo in
+it moves the mark to near its own price. Each push logs `clamp: on` or
+`clamp: off (n<3)` in `flop status` and the signed push log (`clamp`, with
+`clamp_min_endpoints`). `clamp: on` means the guard checked the set; a set
+name ending `-clamped` means it lifted a price. The clamp turning off logs
+`flop alert: clamp off (n<3) ...: no promo guard on this set`, so a promo
+in a 2-endpoint set is noticed by that alert. `staging verify-push-log`
+refuses a log whose rule changes: from the first line with
+`clamp_min_endpoints` on, every OpenRouter line must declare exactly the
+shipped rule (guard, clamp minimum, floor fraction, weighting, minimum
+endpoints, quantizations, blend). Earlier lines verify under the rule they
+declare. The cutover is the first new-style line in the log, not a time: a
+log holding only old-style lines verifies under the old rule.
+
+With 3 or more endpoints an outage can still move the floor: the median moves
+when one goes down, and a price near the floor can be lifted to it (test
+`with_three_or_more_an_outage_can_still_move_the_floor`: $0.29 to $0.30).
+That lift is bounded by half the median and is the price of any median floor.
+
 Known limit (owner decision 2026-11-11: keep this rule for now). Promos still
 move the mark. One $0.01 promo next to today's bf16 pair makes the median
 $0.2578 and the floor $0.1289, which 1/price² gives about 77% of the weight:
@@ -70,7 +96,7 @@ raise it.
 **Sets, in order** (owner decision 2026-11-11: fall through, don't hold).
 The bots try bf16 endpoints alone, then fp16 alone, then bf16 and fp16
 together, then every up endpoint, and price from the first set with at least
-2 up endpoints (then clamp and weight inside it). So the next set is used only
+2 up endpoints (then clamp, if it has 3 or more, and weight inside it). So the next set is used only
 when endpoints are down or missing, never because one got cheap. The mark
 holds (stale) only when every set has fewer than 2. A push from bf16+fp16 or
 from every endpoint may blend quantizations. Each push logs its set in
@@ -78,7 +104,8 @@ from every endpoint may blend quantizations. Each push logs its set in
 `-clamped` when the clamp applied), plus each used endpoint's listed and
 clamped price (`used`). The verifier checks the set and those prices against
 the logged endpoints. Lines pushed before the clamp have no `guard` field and
-verify under the old drop rule. There is no fallback to a last-good value past 30 minutes, to FLOP's
+verify under the old drop rule; lines pushed before 2026-11-12 have no
+`clamp_min_endpoints` and verify under the clamp on any set. There is no fallback to a last-good value past 30 minutes, to FLOP's
 nominal gateway prices, or to a guess. A stale index pushes nothing and the
 on-chain mark ages.
 

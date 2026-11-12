@@ -192,10 +192,13 @@ pub struct OracleCfg {
     /// OpenRouter's default routing) or "median".
     #[serde(default = "default_or_weighting")]
     pub or_weighting: String,
-    /// Endpoints priced under this fraction of the set's median are dropped
-    /// before weighting (0 = off).
+    /// Endpoints priced under this fraction of the set's median count as
+    /// that floor (clamp; 0 = off).
     #[serde(default = "default_or_min_frac")]
     pub or_min_frac_of_median: f64,
+    /// The clamp applies only to a set with at least this many up endpoints.
+    #[serde(default = "default_or_clamp_min")]
+    pub or_clamp_min_endpoints: usize,
 }
 
 impl OracleCfg {
@@ -245,6 +248,7 @@ fn default_or_refresh_s() -> u64 { 300 }
 fn default_or_max_age_s() -> u64 { 1800 }
 fn default_or_weighting() -> String { "inverse_square".into() }
 fn default_or_min_frac() -> f64 { 0.5 }
+fn default_or_clamp_min() -> usize { 3 }
 
 /// InitMarket, field for field (`initial_price` is the mock start). TOML
 /// integers are i64, so u128 fields are read as u64.

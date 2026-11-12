@@ -245,7 +245,7 @@ pub use flop_index::{combine, or_quote_with, Guard, OrEndpoint, OrQuote, Used};
 /// else all listed tiers together if that reaches it; else every endpoint.
 /// Each endpoint's price is its input:output blend; `or_weighting` combines them.
 pub fn or_quote(endpoints: &[OrEndpoint], at_ms: u64, o: &launch::OracleCfg) -> Result<OrQuote> {
-    or_quote_with(endpoints, at_ms, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints, &o.or_weighting, o.or_min_frac_of_median, Guard::Clamp)
+    or_quote_with(endpoints, at_ms, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints, &o.or_weighting, o.or_min_frac_of_median, Guard::Clamp { min_set: o.or_clamp_min_endpoints })
 }
 
 #[derive(Deserialize)]
@@ -348,15 +348,27 @@ pub(super) fn record_rows(text: &str) -> Result<Vec<RecRow>> {
 }
 
 /// An alert line when the set of clamped endpoints changes (the first promo,
-/// or the last one ending); None otherwise. `prev` is updated.
+/// or the last one ending), or when the clamp turns off or on (a set under
+/// 3 endpoints has no promo guard); None otherwise. `prev` is updated: the
+/// clamp state, then the clamped endpoints.
 pub fn clamp_alert(prev: &mut Vec<String>, q: &OrQuote) -> Option<String> {
-    let now: Vec<String> = q.used.iter().filter(|u| u.priced != u.listed).map(|u| format!("{} {}", u.provider, u.quantization)).collect();
+    // Start as "clamp on, nothing clamped": a quiet start needs no alert.
+    if prev.is_empty() {
+        prev.push("clamp on".into());
+    }
+    let mut now: Vec<String> = vec![format!("clamp {}", q.clamp)];
+    now.extend(q.used.iter().filter(|u| u.priced != u.listed).map(|u| format!("{} {}", u.provider, u.quantization)));
     if now == *prev {
         return None;
     }
+    let was_off = prev.first().is_some_and(|c| c != "clamp on");
     *prev = now;
-    if prev.is_empty() {
-        return Some(format!("flop alert: no endpoint clamped (set {}, mark ${:.4})", q.set, q.usd_e6 as f64 / 1e6));
+    if q.clamp != "on" {
+        return Some(format!("flop alert: clamp {} (set {}, mark ${:.4}): no promo guard on this set", q.clamp, q.set, q.usd_e6 as f64 / 1e6));
+    }
+    if prev.len() == 1 {
+        let what = if was_off { "clamp on again, no endpoint clamped" } else { "no endpoint clamped" };
+        return Some(format!("flop alert: {what} (set {}, mark ${:.4})", q.set, q.usd_e6 as f64 / 1e6));
     }
     let legs: Vec<String> = q
         .used
@@ -393,7 +405,10 @@ pub fn status(or: Option<&OrQuote>, side: &Result<FlopSide>, mix: Option<&Window
                     }
                 })
                 .collect();
-            t.push_str(&format!("; openrouter ${:.4} ({} {} set: {})", q.usd_e6 as f64 / 1e6, o.or_weighting, q.set, legs.join(", ")));
+            t.push_str(&format!(
+                "; openrouter ${:.4} ({} {} set: {}; clamp: {})",
+                q.usd_e6 as f64 / 1e6, o.or_weighting, q.set, legs.join(", "), q.clamp
+            ));
         }
         None => t.push_str("; openrouter none"),
     }
@@ -450,6 +465,9 @@ impl FlopIndex {
                 combine(&[1.0], &cfg.or_weighting)?;
                 if !(cfg.or_min_frac_of_median >= 0.0 && cfg.or_min_frac_of_median < 1.0) {
                     bail!("or_min_frac_of_median must be in [0, 1)");
+                }
+                if cfg.or_min_frac_of_median > 0.0 && cfg.or_clamp_min_endpoints < 3 {
+                    bail!("or_clamp_min_endpoints must be >= 3: a 2-point median floor lifts the cheaper real price");
                 }
                 if !cfg.or_url.starts_with("https://") || cfg.or_min_endpoints == 0 || cfg.or_refresh_s < 60
                     || cfg.or_max_age_s < cfg.or_refresh_s
@@ -560,7 +578,8 @@ impl FlopIndex {
                 "source": "openrouter", "url": o.or_url, "fetched_ms": q.at_ms, "set": q.set,
                 "blend_in_out": o.flop_blend_in_out, "quantizations": o.or_quantizations,
                 "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
-                "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "used": q.used,
+                "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp",
+                "clamp_min_endpoints": o.or_clamp_min_endpoints, "clamp": q.clamp, "used": q.used,
                 "endpoints": q.endpoints, "flop_side": side_json,
             }))
         } else {
@@ -745,7 +764,13 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
         let weighting = inputs["weighting"].as_str().unwrap_or("median");
         let frac = inputs["min_frac_of_median"].as_f64().unwrap_or(0.0);
         let guard = match inputs["guard"].as_str() {
-            Some("clamp") => Guard::Clamp,
+            // Lines from before 2026-11-12 carry no clamp_min_endpoints: they clamped any set.
+            Some("clamp") => Guard::Clamp {
+                min_set: match inputs.get("clamp_min_endpoints") {
+                    None => 0,
+                    Some(v) => serde_json::from_value(v.clone()).context("clamp_min_endpoints")?,
+                },
+            },
             None => Guard::LegacyDrop,
             Some(g) => bail!("unknown guard {g}"),
         };
@@ -769,8 +794,47 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
                 bail!("logged endpoints price from set {} but the line says {set}", q.set);
             }
         }
+        if let Some(c) = inputs.get("clamp") {
+            if c.as_str() != Some(q.clamp.as_str()) {
+                bail!("logged endpoints give clamp {} but the line says {c}", q.clamp);
+            }
+        }
     }
     Ok(mark)
+}
+
+/// The rule a push line declares may not loosen: see `verify_log`. A line
+/// that declares `clamp_min_endpoints`, and every OpenRouter line after the
+/// first such line, must declare exactly the shipped rule (flop_index::SPEC).
+fn rule_ok(line: &str, new_rule_seen: &mut bool) -> Result<()> {
+    let at = line.rfind(SIG_KEY).context("no signature")?;
+    let rec: serde_json::Value = serde_json::from_str(&format!("{}}}", &line[..at]))?;
+    let inputs = &rec["inputs"];
+    if inputs["source"] != "openrouter" {
+        return Ok(());
+    }
+    if inputs.get("clamp_min_endpoints").is_some() {
+        *new_rule_seen = true;
+    } else if !*new_rule_seen {
+        return Ok(()); // history from before 2026-11-12
+    }
+    let s = &flop_index::SPEC;
+    let want = serde_json::json!({
+        "guard": "clamp", "clamp_min_endpoints": s.clamp_min_set, "min_frac_of_median": s.min_frac_of_median,
+        "weighting": s.weighting, "min_endpoints": s.min_endpoints, "quantizations": s.quantizations,
+        "blend_in_out": s.blend,
+    });
+    for (k, v) in want.as_object().expect("object") {
+        let got = &inputs[k.as_str()];
+        let same = match (got.as_f64(), v.as_f64()) {
+            (Some(a), Some(b)) => a == b,
+            _ => got == v,
+        };
+        if !same {
+            bail!("rule loosened or changed: {k} is {got}, the shipped rule has {v} (this line or an earlier one declared clamp_min_endpoints)");
+        }
+    }
+    Ok(())
 }
 
 /// `staging verify-push-log <bots.log> <oracle pubkey>`
@@ -782,11 +846,19 @@ pub fn verify_log(args: &[String]) -> Result<()> {
     let oracle = Some(oracle);
     let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
     let (mut ok, mut bad) = (0, 0);
+    // A line verifies under the rule it declares. From the first line that
+    // declares clamp_min_endpoints on, every OpenRouter line must declare
+    // exactly the shipped rule (rule_ok).
+    let mut new_rule_seen = false;
     for (n, line) in text.lines().enumerate() {
         if !line.starts_with("{\"event\":\"flop_push\"") && !line.contains("\"event\":\"flop_push\"") {
             continue;
         }
-        match verify_push(line, oracle.as_ref()) {
+        let checked = verify_push(line, oracle.as_ref()).and_then(|mark| {
+            rule_ok(line, &mut new_rule_seen)?;
+            Ok(mark)
+        });
+        match checked {
             Ok(_) => ok += 1,
             Err(e) => {
                 bad += 1;
@@ -849,6 +921,7 @@ mod tests {
         assert_eq!(o.or_min_endpoints, s.min_endpoints);
         assert_eq!(o.or_weighting, s.weighting);
         assert_eq!(o.or_min_frac_of_median, s.min_frac_of_median);
+        assert_eq!(o.or_clamp_min_endpoints, s.clamp_min_set);
     }
 
     #[test]
@@ -1071,7 +1144,7 @@ mod tests {
     fn openrouter_goes_stale_without_a_good_fetch() {
         let o = cfg();
         assert!(or_mark(None, NOW, &o).is_err());
-        let q = OrQuote { usd_e6: 439_844, at_ms: NOW - o.or_max_age_s * 1000, used: vec![], set: "bf16".into(), endpoints: vec![] };
+        let q = OrQuote { usd_e6: 439_844, at_ms: NOW - o.or_max_age_s * 1000, used: vec![], set: "bf16".into(), clamp: "on".into(), endpoints: vec![] };
         assert_eq!(or_mark(Some(&q), NOW, &o).unwrap(), (439_844, q.at_ms));
         let e = or_mark(Some(&q), NOW + 1000, &o).unwrap_err();
         assert!(e.to_string().contains("stale"), "{e}");
@@ -1114,7 +1187,7 @@ mod tests {
     #[test]
     fn status_logs_the_flop_implied_rate() {
         let o = cfg();
-        let q = OrQuote { usd_e6: 257_813, at_ms: NOW, used: vec![Used { provider: "DeepInfra".into(), quantization: "bf16".into(), listed: 0.2578, priced: 0.2578 }], set: "bf16".into(), endpoints: vec![] };
+        let q = OrQuote { usd_e6: 257_813, at_ms: NOW, used: vec![Used { provider: "DeepInfra".into(), quantization: "bf16".into(), listed: 0.2578, priced: 0.2578 }], set: "bf16".into(), clamp: "on".into(), endpoints: vec![] };
         let side = flop_side(&many(o.flop_min_prints, P3), NOW, &o);
         let s = status(Some(&q), &side, None, &o);
         // At the anchor price the implied rate equals the stand-in.
@@ -1131,7 +1204,7 @@ mod tests {
         let inputs = serde_json::json!({
             "source": "openrouter", "set": q.set, "blend_in_out": o.flop_blend_in_out,
             "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
-            "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "used": q.used, "endpoints": q.endpoints,
+            "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "clamp_min_endpoints": o.or_clamp_min_endpoints, "used": q.used, "endpoints": q.endpoints,
         });
         let line = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "slot": 7, "inputs": inputs})).unwrap();
         assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), q.usd_e6);
@@ -1222,25 +1295,32 @@ mod tests {
         let o = cfg();
         let q = or_quote(&list_with_deepinfra_cut(0.15), NOW, &o).unwrap();
         assert_eq!(q.set, "bf16");
-        // Deeper cuts clamp DeepInfra but stay in bf16.
+        // Deeper cuts stay in bf16. Two endpoints are too few for the clamp
+        // (or_clamp_min_endpoints = 3): the cut prices as listed.
         for cut in [0.22, 0.5, 0.9] {
             let q = or_quote(&list_with_deepinfra_cut(cut), NOW, &o).unwrap();
-            assert_eq!(q.set, "bf16-clamped", "cut {cut}");
+            assert_eq!((q.set.as_str(), q.clamp.as_str()), ("bf16", "off (n<3)"), "cut {cut}");
             assert_eq!(q.used.len(), 2);
-            let d = q.used.iter().find(|u| u.provider == "DeepInfra").unwrap();
-            assert!(d.priced > d.listed, "{d:?}");
+            assert!(q.used.iter().all(|u| u.priced == u.listed), "{:?}", q.used);
         }
     }
 
     #[test]
     fn the_mark_moves_continuously_across_the_old_cliff() {
-        // Under the drop rule a 22% cut jumped the mark ~3x ($0.24 -> $0.73).
-        let (a, b) = (mark(&list_with_deepinfra_cut(0.21)), mark(&list_with_deepinfra_cut(0.22)));
+        // A third bf16 endpoint, so the clamp is on (3+): the old drop rule
+        // jumped the mark when DeepInfra crossed the floor.
+        let three = |cut: f64| {
+            let mut v = list_with_deepinfra_cut(cut);
+            v.push(ep("Novita", "bf16", 0.30, 2.4));
+            v
+        };
+        assert_eq!(or_quote(&three(0.9), NOW, &cfg()).unwrap().clamp, "on");
+        let (a, b) = (mark(&three(0.21)), mark(&three(0.22)));
         assert!((a - b).abs() / a < 0.02, "{a} -> {b}");
         // No step anywhere on a fine sweep: 0.1% more cut moves it under 0.5%.
-        let mut prev = mark(&list_with_deepinfra_cut(0.0));
+        let mut prev = mark(&three(0.0));
         for i in 1..990 {
-            let m = mark(&list_with_deepinfra_cut(i as f64 / 1000.0));
+            let m = mark(&three(i as f64 / 1000.0));
             assert!((prev - m).abs() / prev < 0.005, "cut {}: {prev} -> {m}", i as f64 / 1000.0);
             prev = m;
         }
@@ -1301,12 +1381,108 @@ mod tests {
         let mut loose = o.clone();
         loose.or_min_frac_of_median = 0.0;
         assert!(or_quote(&eps, NOW, &loose).unwrap().usd_e6 < 20_000);
-        // Two endpoints, one slashed to ~$0.01: it pushes, clamped, not below half.
+        // Two endpoints, one slashed to ~$0.01: not clamped (owner, 2026-11-12:
+        // two points can't name an outlier), so the mark follows it. The
+        // accepted cost of not lifting real prices after an outage.
         let eps = [ep("DeepInfra", "bf16", 0.005, 0.08), ep("GMICloud", "bf16", b.0, b.1)];
         let q = or_quote(&eps, NOW, &o).unwrap();
-        assert_eq!(q.set, "bf16-clamped");
-        let median = (0.0098 + 0.621875) / 2.0;
-        assert!(q.usd_e6 as f64 / 1e6 >= 0.5 * median, "{}", q.usd_e6);
+        assert_eq!((q.set.as_str(), q.clamp.as_str()), ("bf16", "off (n<3)"));
+        assert!(q.usd_e6 < 20_000, "{}", q.usd_e6);
+    }
+
+    /// 2026-11-12 on Pearl: GMICloud bf16 went down, bf16 had one up endpoint,
+    /// the feed fell through to bf16+fp16 = {DeepInfra, Cerebras}, and the
+    /// two-point floor priced DeepInfra $0.2578 at $0.3198 (mark $0.3112 ->
+    /// $0.3824). Now: no clamp under 3, plain 1/b² over the listings.
+    fn outage_list() -> Vec<OrEndpoint> {
+        let mut gmi = ep("GMICloud", "bf16", 0.45, 3.2);
+        gmi.status = -2;
+        vec![ep("DeepInfra", "bf16", 0.15, 1.875), gmi, ep("Cerebras", "fp16", 0.99, 1.49), ep("Chutes", "fp8", 0.039, 1.25)]
+    }
+
+    #[test]
+    fn the_gmicloud_outage_prices_deepinfra_as_listed() {
+        let q = or_quote(&outage_list(), NOW, &cfg()).unwrap();
+        assert_eq!((q.set.as_str(), q.clamp.as_str()), ("preferred", "off (n<3)"));
+        assert!(q.used.iter().all(|u| u.priced == u.listed), "{:?}", q.used);
+        let d = q.used.iter().find(|u| u.provider == "DeepInfra").unwrap();
+        assert!((d.listed - 0.2578125).abs() < 1e-9, "{d:?}");
+        // 1/b² over $0.2578 and $1.0212: about $0.3035 (was $0.3824 clamped).
+        assert!(q.usd_e6.abs_diff(303_500) <= 100, "{}", q.usd_e6);
+        // The status line says the clamp was off and why.
+        let side = Err(anyhow!("test"));
+        assert!(status(Some(&q), &side, None, &cfg()).contains("clamp: off (n<3)"));
+    }
+
+    #[test]
+    fn three_endpoints_still_clamp() {
+        let eps = [ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2), ep("Promo", "bf16", 0.005, 0.08)];
+        let q = or_quote(&eps, NOW, &cfg()).unwrap();
+        assert_eq!((q.set.as_str(), q.clamp.as_str()), ("bf16-clamped", "on"));
+    }
+
+    /// Endpoint lists to take endpoints down from: bf16, fp16 and fp8 prices
+    /// in USD per 1M blended, on a coarse grid.
+    fn outage_cases() -> Vec<Vec<OrEndpoint>> {
+        let grid = [0.01, 0.1, 0.26, 0.3, 0.62, 1.0, 3.0];
+        let at = |p: &str, q: &str, usd: f64| ep(p, q, usd, usd);
+        let mut out = Vec::new();
+        for &a in &grid {
+            for &b in &grid {
+                for &c in &grid {
+                    for &d in &grid {
+                        // Three bf16: one of them down leaves 2 (no clamp); C, D or E
+                        // down keeps 3 (clamp on).
+                        out.push(vec![
+                            at("A", "bf16", a), at("B", "bf16", b), at("F", "bf16", 0.5),
+                            at("C", "fp16", c), at("D", "fp16", d), at("E", "fp8", 0.2),
+                        ]);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_outage_leaving_under_three_never_lifts_a_price() {
+        // The incident class: an endpoint goes down and the set that prices
+        // the push has under 3 endpoints. Then every remaining endpoint is
+        // priced exactly as listed, never lifted.
+        let o = cfg();
+        let (mut under, mut over) = (0, 0);
+        for eps in outage_cases() {
+            for down in 0..eps.len() {
+                let mut after = eps.clone();
+                after[down].status = -2;
+                let Ok(q) = or_quote(&after, NOW, &o) else { continue };
+                if q.used.len() < 3 {
+                    assert!(q.used.iter().all(|u| u.priced == u.listed), "down {down}: {:?}", q.used);
+                    under += 1;
+                } else {
+                    // Some cases keep 3 bf16 (C, D or E down): the clamp stays on.
+                    assert_eq!(q.clamp, "on");
+                    over += 1;
+                }
+            }
+        }
+        assert!(under > 1000 && over > 1000, "{under} {over}");
+    }
+
+    #[test]
+    fn with_three_or_more_an_outage_can_still_move_the_floor() {
+        // Known limit of any median floor (SPEC): with 3+ endpoints left, one
+        // going down moves the median, so the floor, so a clamped price. Here
+        // B going down raises the floor from $0.275 to $0.30 and lifts A from
+        // $0.29 (unclamped) to $0.30. Bounded by the floor itself.
+        let at = |p: &str, usd: f64| ep(p, "bf16", usd, usd);
+        let mut eps = vec![at("A", 0.29), at("B", 0.5), at("C", 0.6), at("D", 0.7)];
+        let before = or_quote(&eps, NOW, &cfg()).unwrap();
+        assert!(before.used.iter().all(|u| u.priced == u.listed));
+        eps[1].status = -2;
+        let after = or_quote(&eps, NOW, &cfg()).unwrap();
+        let a = after.used.iter().find(|u| u.provider == "A").unwrap();
+        assert!((a.priced - 0.30).abs() < 1e-9 && a.listed < a.priced, "{a:?}");
     }
 
     #[test]
@@ -1333,7 +1509,7 @@ mod tests {
         let pair = [ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2)];
         let promo = ep("Promo", "bf16", 0.005, 0.08);
         let mut prev = Vec::new();
-        let clean = or_quote(&pair, NOW, &o).unwrap();
+        let clean = or_quote(&[pair[0].clone(), pair[1].clone(), ep("Novita", "bf16", 0.30, 2.4)], NOW, &o).unwrap();
         assert_eq!(clamp_alert(&mut prev, &clean), None);
         let hit = or_quote(&[pair[0].clone(), pair[1].clone(), promo], NOW, &o).unwrap();
         let line = clamp_alert(&mut prev, &hit).unwrap();
@@ -1343,6 +1519,94 @@ mod tests {
         // Same clamp on the next fetch: no repeat.
         assert_eq!(clamp_alert(&mut prev, &hit), None);
         assert!(clamp_alert(&mut prev, &clean).unwrap().starts_with("flop alert: no endpoint clamped"));
+    }
+
+    #[test]
+    fn the_clamp_turning_off_alerts_once() {
+        // A promo clamped in a 3-set; then GMICloud goes down: a 2-set, no
+        // guard, the promo prices as listed. That must not read "all clear".
+        let o = cfg();
+        let mut gmi = ep("GMICloud", "bf16", 0.45, 3.2);
+        let eps = |gmi: &OrEndpoint| [ep("DeepInfra", "bf16", 0.15, 1.875), gmi.clone(), ep("Promo", "bf16", 0.005, 0.08)];
+        let mut prev = Vec::new();
+        let hit = or_quote(&eps(&gmi), NOW, &o).unwrap();
+        assert!(clamp_alert(&mut prev, &hit).unwrap().starts_with("flop alert: clamped Promo"));
+        gmi.status = -2;
+        let off = or_quote(&eps(&gmi), NOW, &o).unwrap();
+        assert_eq!(off.clamp, "off (n<3)");
+        let line = clamp_alert(&mut prev, &off).unwrap();
+        assert!(line.starts_with("flop alert: clamp off (n<3) (set bf16"), "{line}");
+        assert!(line.contains("no promo guard"), "{line}");
+        assert_eq!(clamp_alert(&mut prev, &off), None);
+        // Back to 3: alerts again, the promo clamped.
+        gmi.status = 0;
+        assert!(clamp_alert(&mut prev, &hit).unwrap().starts_with("flop alert: clamped Promo"));
+        // A 2-set from the start alerts on the first fetch.
+        let mut fresh = Vec::new();
+        assert!(clamp_alert(&mut fresh, &off).is_some());
+    }
+
+    #[test]
+    fn the_log_verifier_refuses_a_loosened_rule() {
+        let o = cfg();
+        let oracle = Keypair::new();
+        let mut eps = list_with_deepinfra_cut(0.0);
+        eps[1].status = 1;
+        let new = or_quote(&eps, NOW, &o).unwrap();
+        let old = or_quote_with(
+            &eps, NOW, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints, &o.or_weighting, o.or_min_frac_of_median,
+            Guard::Clamp { min_set: 0 },
+        )
+        .unwrap();
+        let old_line = |q: &OrQuote| {
+            let inputs = serde_json::json!({
+                "source": "openrouter", "set": q.set, "blend_in_out": o.flop_blend_in_out,
+                "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
+                "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "used": q.used, "endpoints": q.endpoints,
+            });
+            signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "inputs": inputs})).unwrap()
+        };
+        let new_line = line_for(&o, &oracle, &new, &new.set, serde_json::to_value(&new.used).unwrap());
+        let dir = std::env::temp_dir().join(format!("verify-rule-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |lines: &[String]| {
+            let f = dir.join("bots.log");
+            std::fs::write(&f, lines.join("\n")).unwrap();
+            verify_log(&[f.display().to_string(), oracle.pubkey().to_string()])
+        };
+        // Old then new: fine. New then old (a loosened rule): refused.
+        let good = run(&[old_line(&old), new_line.clone()]);
+        let bad = run(&[new_line.clone(), old_line(&old)]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        good.unwrap();
+        assert!(bad.is_err());
+        // The reason, line by line, and each loosened field.
+        let mut seen = false;
+        rule_ok(&old_line(&old), &mut seen).unwrap();
+        assert!(!seen);
+        rule_ok(&new_line, &mut seen).unwrap();
+        assert!(seen);
+        let e = rule_ok(&old_line(&old), &mut seen).unwrap_err().to_string();
+        assert!(e.contains("guard") || e.contains("clamp_min_endpoints"), "{e}");
+        for (k, v) in [
+            ("clamp_min_endpoints", serde_json::json!(2)),
+            ("clamp_min_endpoints", serde_json::json!(1_000_000)),
+            ("min_frac_of_median", serde_json::json!(0.0)),
+            ("weighting", serde_json::json!("median")),
+            ("min_endpoints", serde_json::json!(1)),
+            ("guard", serde_json::Value::Null),
+        ] {
+            let mut rec: serde_json::Value = serde_json::from_str(&format!("{}}}", &new_line[..new_line.rfind(SIG_KEY).unwrap()])).unwrap();
+            if v.is_null() {
+                rec["inputs"].as_object_mut().unwrap().remove(k);
+            } else {
+                rec["inputs"][k] = v.clone();
+            }
+            let forged = signed_push(&oracle, rec).unwrap();
+            let mut seen = true;
+            let e = rule_ok(&forged, &mut seen).unwrap_err().to_string();
+            assert!(e.contains(k), "{k}={v}: {e}");
+        }
     }
 
     #[test]
@@ -1368,8 +1632,8 @@ mod tests {
         let mut eps = list_with_deepinfra_cut(0.0);
         eps[1].status = 1;
         let q = or_quote(&eps, NOW, &o).unwrap();
-        // DeepInfra is under half of that pair's median, so it is clamped there.
-        assert_eq!(q.set, "preferred-clamped");
+        // A pair is too few for the clamp: DeepInfra prices as listed.
+        assert_eq!((q.set.as_str(), q.clamp.as_str()), ("preferred", "off (n<3)"));
         // Only the fp8 and one bf16 up: every up endpoint.
         eps[2].status = 1;
         let q = or_quote(&eps, NOW, &o).unwrap();
@@ -1395,7 +1659,7 @@ mod tests {
         let inputs = serde_json::json!({
             "source": "openrouter", "set": set, "blend_in_out": o.flop_blend_in_out,
             "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
-            "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "used": used, "endpoints": q.endpoints,
+            "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "clamp_min_endpoints": o.or_clamp_min_endpoints, "used": used, "endpoints": q.endpoints,
         });
         signed_push(oracle, serde_json::json!({"mark_e6": q.usd_e6, "inputs": inputs})).unwrap()
     }
@@ -1404,8 +1668,10 @@ mod tests {
     fn the_verifier_passes_clamped_and_fallback_lines() {
         let o = cfg();
         let oracle = Keypair::new();
-        // Clamped: logs DeepInfra's listed and clamped price.
-        let q = or_quote(&list_with_deepinfra_cut(0.5), NOW, &o).unwrap();
+        // Clamped (3 bf16, so the clamp is on): logs DeepInfra's listed and clamped price.
+        let mut eps = list_with_deepinfra_cut(0.5);
+        eps.push(ep("Novita", "bf16", 0.30, 2.4));
+        let q = or_quote(&eps, NOW, &o).unwrap();
         assert_eq!(q.set, "bf16-clamped");
         let line = line_for(&o, &oracle, &q, &q.set, serde_json::to_value(&q.used).unwrap());
         assert!(line.contains("\"listed\"") && line.contains("\"priced\""));
@@ -1427,6 +1693,27 @@ mod tests {
         assert!(q.set.starts_with("preferred"), "{}", q.set);
         let line = line_for(&o, &oracle, &q, &q.set, serde_json::to_value(&q.used).unwrap());
         assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), q.usd_e6);
+        // A line pushed before 2026-11-12 (no clamp_min_endpoints) clamped
+        // the pair: it still verifies under the rule it was pushed with.
+        let old = or_quote_with(
+            &eps, NOW, o.flop_blend_in_out, &o.or_quantizations, o.or_min_endpoints, &o.or_weighting, o.or_min_frac_of_median,
+            Guard::Clamp { min_set: 0 },
+        )
+        .unwrap();
+        assert_eq!(old.set, "preferred-clamped");
+        let line = line_for(&o, &oracle, &old, &old.set, serde_json::to_value(&old.used).unwrap()).replace(",\"clamp_min_endpoints\":3", "");
+        assert!(!line.contains("clamp_min_endpoints"));
+        assert!(verify_push(&line, Some(&oracle.pubkey())).is_err(), "edited line keeps its old signature");
+        let inputs = serde_json::json!({
+            "source": "openrouter", "set": old.set, "blend_in_out": o.flop_blend_in_out,
+            "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
+            "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "used": old.used, "endpoints": old.endpoints,
+        });
+        let line = signed_push(&oracle, serde_json::json!({"mark_e6": old.usd_e6, "inputs": inputs})).unwrap();
+        assert_eq!(verify_push(&line, Some(&oracle.pubkey())).unwrap(), old.usd_e6);
+        // The same clamped pair claimed under the new rule: caught.
+        let wrong = line_for(&o, &oracle, &old, &old.set, serde_json::to_value(&old.used).unwrap());
+        assert!(verify_push(&wrong, Some(&oracle.pubkey())).is_err());
     }
 
     #[test]

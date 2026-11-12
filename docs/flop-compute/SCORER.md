@@ -95,6 +95,8 @@ the day files and score the same way.
 
 ## Results, pin 2026-11-11, held out (2026-10-13 to 11-10, 29 days)
 
+Scored against SPEC as it stood on 2026-11-11, which clamped sets of 2. Since 2026-11-12 the clamp needs 3 endpoints (SPEC, cheap-outlier clamp), so these numbers are for the old baseline until the scorer is rerun.
+
 | Rule | gain | se | Note |
 |---|---|---|---|
 | spec (baseline) | 0.000 | 0.000 | itself |
@@ -108,12 +110,13 @@ So the brief's last check, "a plain mean scores clearly worse", does not
 hold overall: the mean is worse only on relisting and jumps. The scorer
 was not reshaped to make it hold.
 
-The relist loss comes from the clamp. With two endpoints, one relisting at
-10x lifts the median, the half-median floor rises past the other endpoint,
-and that cheap endpoint is clamped up. On SPEC's bf16 pair (DeepInfra
-$0.2578, GMICloud $0.6219), GMICloud at 10x moves the mark from $0.311 to
-$1.911. Without the clamp it would go to $0.268. Test:
-`the_live_bf16_pair_relisting_at_10x_lifts_the_mark_6x`.
+The relist loss came from the clamp as it then stood. With two endpoints, one
+relisting at 10x lifted the median, the half-median floor rose past the other
+endpoint, and that cheap endpoint was clamped up: on SPEC's bf16 pair
+(DeepInfra $0.2578, GMICloud $0.6219), GMICloud at 10x moved the mark from
+$0.311 to $1.911. Since 2026-11-12 a pair is not clamped and the same
+relisting gives $0.268. Test:
+`the_live_bf16_pair_relisting_at_10x_no_longer_lifts_the_mark`.
 
 ## Adding a candidate
 
