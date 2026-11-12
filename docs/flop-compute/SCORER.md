@@ -95,6 +95,8 @@ the day files and score the same way.
 
 ## Results, pin 2026-11-11, held out (2026-10-13 to 11-10, 29 days)
 
+Scored against SPEC as it stood on 2026-11-11, which clamped sets of 2. Since 2026-11-12 the clamp needs 3 endpoints (SPEC, cheap-outlier clamp), so these numbers are for the old baseline until the scorer is rerun.
+
 | Rule | gain | se | Note |
 |---|---|---|---|
 | spec (baseline) | 0.000 | 0.000 | itself |

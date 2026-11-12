@@ -42,7 +42,7 @@ pub struct SpecMedian;
 impl Rule for SpecMedian {
     fn step(&mut self, at_ms: u64, endpoints: &[OrEndpoint]) -> Option<f64> {
         let qs: Vec<String> = SPEC.quantizations.iter().map(|q| q.to_string()).collect();
-        crate::or_quote_with(endpoints, at_ms, SPEC.blend, &qs, SPEC.min_endpoints, "median", SPEC.min_frac_of_median, crate::Guard::Clamp)
+        crate::or_quote_with(endpoints, at_ms, SPEC.blend, &qs, SPEC.min_endpoints, "median", SPEC.min_frac_of_median, crate::Guard::Clamp { min_set: SPEC.clamp_min_set })
             .ok()
             .map(|q| q.usd_e6 as f64 / 1e6)
     }
