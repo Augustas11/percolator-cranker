@@ -58,8 +58,12 @@ it moves the mark to near its own price. Each push logs `clamp: on` or
 name ending `-clamped` means it lifted a price. The clamp turning off logs
 `flop alert: clamp off (n<3) ...: no promo guard on this set`, so a promo
 in a 2-endpoint set is noticed by that alert. `staging verify-push-log`
-refuses a log whose rule loosens: after a line with `clamp_min_endpoints`,
-a clamp line without it, or with less than 3, fails.
+refuses a log whose rule changes: from the first line with
+`clamp_min_endpoints` on, every OpenRouter line must declare exactly the
+shipped rule (guard, clamp minimum, floor fraction, weighting, minimum
+endpoints, quantizations, blend). Earlier lines verify under the rule they
+declare. The cutover is the first new-style line in the log, not a time: a
+log holding only old-style lines verifies under the old rule.
 
 With 3 or more endpoints an outage can still move the floor: the median moves
 when one goes down, and a price near the floor can be lifted to it (test

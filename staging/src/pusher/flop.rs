@@ -803,19 +803,36 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
     Ok(mark)
 }
 
-/// The clamp rule a push line declares may not loosen: see `verify_log`.
+/// The rule a push line declares may not loosen: see `verify_log`. A line
+/// that declares `clamp_min_endpoints`, and every OpenRouter line after the
+/// first such line, must declare exactly the shipped rule (flop_index::SPEC).
 fn rule_ok(line: &str, new_rule_seen: &mut bool) -> Result<()> {
     let at = line.rfind(SIG_KEY).context("no signature")?;
     let rec: serde_json::Value = serde_json::from_str(&format!("{}}}", &line[..at]))?;
     let inputs = &rec["inputs"];
-    if inputs["source"] != "openrouter" || inputs["guard"] != "clamp" {
+    if inputs["source"] != "openrouter" {
         return Ok(());
     }
-    match inputs.get("clamp_min_endpoints").and_then(|v| v.as_u64()) {
-        Some(m) if m < 3 => bail!("clamp_min_endpoints {m}: the clamp needs at least 3 endpoints"),
-        Some(_) => *new_rule_seen = true,
-        None if *new_rule_seen => bail!("no clamp_min_endpoints after lines that had it: the old clamp-any-set rule"),
-        None => {}
+    if inputs.get("clamp_min_endpoints").is_some() {
+        *new_rule_seen = true;
+    } else if !*new_rule_seen {
+        return Ok(()); // history from before 2026-11-12
+    }
+    let s = &flop_index::SPEC;
+    let want = serde_json::json!({
+        "guard": "clamp", "clamp_min_endpoints": s.clamp_min_set, "min_frac_of_median": s.min_frac_of_median,
+        "weighting": s.weighting, "min_endpoints": s.min_endpoints, "quantizations": s.quantizations,
+        "blend_in_out": s.blend,
+    });
+    for (k, v) in want.as_object().expect("object") {
+        let got = &inputs[k.as_str()];
+        let same = match (got.as_f64(), v.as_f64()) {
+            (Some(a), Some(b)) => a == b,
+            _ => got == v,
+        };
+        if !same {
+            bail!("rule loosened or changed: {k} is {got}, the shipped rule has {v} (lines before had the 2026-11-12 rule)");
+        }
     }
     Ok(())
 }
@@ -1559,10 +1576,37 @@ mod tests {
         };
         // Old then new: fine. New then old (a loosened rule): refused.
         let good = run(&[old_line(&old), new_line.clone()]);
-        let bad = run(&[new_line, old_line(&old)]);
+        let bad = run(&[new_line.clone(), old_line(&old)]);
         std::fs::remove_dir_all(&dir).unwrap();
         good.unwrap();
         assert!(bad.is_err());
+        // The reason, line by line, and each loosened field.
+        let mut seen = false;
+        rule_ok(&old_line(&old), &mut seen).unwrap();
+        assert!(!seen);
+        rule_ok(&new_line, &mut seen).unwrap();
+        assert!(seen);
+        let e = rule_ok(&old_line(&old), &mut seen).unwrap_err().to_string();
+        assert!(e.contains("guard") || e.contains("clamp_min_endpoints"), "{e}");
+        for (k, v) in [
+            ("clamp_min_endpoints", serde_json::json!(2)),
+            ("clamp_min_endpoints", serde_json::json!(1_000_000)),
+            ("min_frac_of_median", serde_json::json!(0.0)),
+            ("weighting", serde_json::json!("median")),
+            ("min_endpoints", serde_json::json!(1)),
+            ("guard", serde_json::Value::Null),
+        ] {
+            let mut rec: serde_json::Value = serde_json::from_str(&format!("{}}}", &new_line[..new_line.rfind(SIG_KEY).unwrap()])).unwrap();
+            if v.is_null() {
+                rec["inputs"].as_object_mut().unwrap().remove(k);
+            } else {
+                rec["inputs"][k] = v.clone();
+            }
+            let forged = signed_push(&oracle, rec).unwrap();
+            let mut seen = true;
+            let e = rule_ok(&forged, &mut seen).unwrap_err().to_string();
+            assert!(e.contains(k), "{k}={v}: {e}");
+        }
     }
 
     #[test]
