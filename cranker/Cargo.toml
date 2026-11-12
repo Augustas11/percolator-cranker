@@ -21,8 +21,8 @@ spl-token = { version = "4.0", features = ["no-entrypoint"] }
 spl-associated-token-account = { version = "2.0", features = ["no-entrypoint"] }
 # Match the wrapper's engine pin exactly — otherwise two `percolator` crates
 # get linked into the graph with mismatched types. Our wrapper fork
-# (scripts/pins.env) pins engine master `b22bef7d`.
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "b22bef7d6122fd7d82680ce9859e8b77fd8ef656" }
+# (scripts/pins.env) pins our engine fork `b7751935` (master b22bef7d + #172 fix).
+percolator = { git = "https://github.com/Augustas11/percolator", rev = "b77519352e0d42ea2e4ce1d8806a7078cb42eed4" }
 percolator-prog = { path = "../repo-prog" }
 solana-transaction-status = "1.18"
 solana-account-decoder = "1.18"

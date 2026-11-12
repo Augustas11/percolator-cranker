@@ -7,7 +7,7 @@ description = "Shadow-ledger money fuzzer for the Percolator v16 engine"
 
 [dependencies]
 # Production pin: same rev as repo-prog/Cargo.toml. run.sh master patches this to a local checkout.
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "b22bef7d6122fd7d82680ce9859e8b77fd8ef656" }
+percolator = { git = "https://github.com/Augustas11/percolator", rev = "b77519352e0d42ea2e4ce1d8806a7078cb42eed4" }
 
 [dev-dependencies]
 proptest = "1.4"
