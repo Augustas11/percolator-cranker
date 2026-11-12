@@ -525,7 +525,7 @@ fn paired_crank_liquidates_in_a_moving_market() -> Result<()> {
 }
 
 #[test]
-#[ignore = "known-bad: crank cert goes stale every slot; engine b22bef7d has percolator#248 but the wrapper crank still needs accrue-first wiring; the keeper uses paired cranks (paired_crank_liquidates_in_a_moving_market passes)"]
+#[ignore = "known-bad: crank cert goes stale every slot; engine b22bef7d (and our fork b7751935) has percolator#248 but the wrapper crank still needs accrue-first wiring; the keeper uses paired cranks (paired_crank_liquidates_in_a_moving_market passes)"]
 fn single_crank_liquidates_in_a_moving_market() -> Result<()> {
     moving_market("single_crank_liquidates_in_a_moving_market", false)
 }

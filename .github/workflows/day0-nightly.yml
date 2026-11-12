@@ -64,9 +64,14 @@ jobs:
             echo "- wrapper main: \`$sha\` (pin \`$PERCOLATOR_PROG_SHA\`)"
             echo "- engine: \`$rev\` (pin \`$PERCOLATOR_ENGINE_REV\`)"
           } >> "$GITHUB_STEP_SUMMARY"
-          # One engine crate in the graph: our crates follow the wrapper's rev.
+          # One engine crate in the graph: our crates take the wrapper's whole
+          # engine line (git URL and rev), since the URL differs too when we
+          # pin our engine fork.
+          dep="$(grep -m1 '^percolator = { git = ' "$PERCOLATOR_PROG_DIR/Cargo.toml")"
+          [ -n "$dep" ] || { echo "no engine git dep in the wrapper's Cargo.toml" >&2; exit 1; }
           for m in cranker/Cargo.toml staging/Cargo.toml monitor/Cargo.toml; do
-            sed -i "s/rev = \"$PERCOLATOR_ENGINE_REV\"/rev = \"$rev\"/" "$m"
+            awk -v d="$dep" '/^percolator = \{ git = /{print d; next} {print}' "$m" > "$m.new" && mv "$m.new" "$m"
+            grep -qxF "$dep" "$m" || { echo "engine line not replaced in $m" >&2; exit 1; }
           done
       - uses: actions/cache@v4
         with:

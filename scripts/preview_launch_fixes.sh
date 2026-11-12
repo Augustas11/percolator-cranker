@@ -35,11 +35,11 @@ if ! solana cluster-version --url "$LOCAL_RPC" >/dev/null 2>&1; then
   echo "no local validator on $LOCAL_RPC; start one with ./scripts/m1_bringup.sh first" >&2
   exit 2
 fi
-ENGINE_GIT="https://github.com/aeyakovenko/percolator"
-
 mkdir -p "$PV"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/pins.env"
+# Patch key: the engine git URL the wrapper and our crates depend on.
+ENGINE_GIT="$PERCOLATOR_ENGINE_REPO"
 # The wrapper checkout comes from fetch_upstream.sh; the engine clone is only
 # needed for the preview, so create it here when missing.
 [ -d "$REPO_ROOT/repo-prog/.git" ] || "$SCRIPT_DIR/fetch_upstream.sh"

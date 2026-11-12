@@ -4,9 +4,10 @@
 #   engine-fuzz/run.sh [pin|master] [cases]
 #
 # pin    : the production engine pin in Cargo.toml (same rev as repo-prog).
-# master : upstream master. Exported read-only from the local engine checkout
-#          (../repo, ref origin/master by default) into target/percolator-master and
-#          patched in with `--config patch...path=...`. Override the source with
+# master : upstream master (aeyakovenko/percolator, fetched into the local engine
+#          checkout ../repo), exported read-only into target/percolator-master and
+#          patched in with `--config patch...path=...` on whatever git URL Cargo.toml
+#          pins (our fork or upstream). Override the source with
 #          MASTER_SRC=/path/to/percolator or the ref with MASTER_REF=<git ref>.
 #
 # Steps: replays, a survey histogram over `cases` random scenarios, then one strict
@@ -23,7 +24,14 @@ cargo_args=(--release)
 if [[ "$target" == "master" ]]; then
   src="${MASTER_SRC:-}"
   if [[ -z "$src" ]]; then
-    ref="${MASTER_REF:-origin/master}"
+    if [[ -n "${MASTER_REF:-}" ]]; then
+      ref="$MASTER_REF"
+    else
+      # Upstream's master, not the remote ../repo was cloned from (that may be our fork).
+      git -C "$here/../repo" fetch -q https://github.com/aeyakovenko/percolator master \
+        || { echo "cannot fetch upstream master into ../repo"; exit 2; }
+      ref=FETCH_HEAD
+    fi
     src="$here/target/percolator-master"
     rm -rf "$src" && mkdir -p "$src"
     git -C "$here/../repo" archive "$ref" | tar -x -C "$src" || { echo "cannot export $ref from ../repo"; exit 2; }
@@ -34,8 +42,14 @@ if [[ "$target" == "master" ]]; then
   # Patching rewrites Cargo.lock; keep the pin's lock untouched.
   cp Cargo.lock "$here/target/Cargo.lock.pin" 2>/dev/null || true
   trap 'cp "$here/target/Cargo.lock.pin" "$here/Cargo.lock" 2>/dev/null || true' EXIT
-  cargo_args+=(--config "patch.\"https://github.com/aeyakovenko/percolator\".percolator.path=\"$src\"")
+  pinned_git="$(grep -o '^percolator = { git = "[^"]*"' Cargo.toml | cut -d'"' -f2)"
+  [[ -n "$pinned_git" ]] || { echo "no engine git dep in Cargo.toml"; exit 2; }
+  cargo_args+=(--config "patch.\"$pinned_git\".percolator.path=\"$src\"")
   export CARGO_TARGET_DIR="$here/target/master"
+  # An unused patch is only a warning in cargo; refuse to fuzz the pin labelled as master.
+  cargo tree --config "patch.\"$pinned_git\".percolator.path=\"$src\"" -i percolator --depth 0 2>/dev/null \
+    | grep -qF "($src)" \
+    || { echo "patch not applied: the engine in the graph is not $src"; exit 2; }
 elif [[ "$target" == "pin" ]]; then
   echo "engine: pin $(grep -o 'rev = "[0-9a-f]*"' Cargo.toml)"
 else

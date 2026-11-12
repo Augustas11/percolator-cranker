@@ -10,8 +10,8 @@
 # scripts/fetch_upstream.sh and the crates' build.rs read. launch_market.sh
 # refuses to run when they differ.
 [pins]
-wrapper_sha = "6b27a826996726b75727b0b448dca2e51caab7a5"
-engine_rev = "b22bef7d6122fd7d82680ce9859e8b77fd8ef656"
+wrapper_sha = "555a9a10a4fff83a3ecd42eed71f8d585219c425"
+engine_rev = "b77519352e0d42ea2e4ce1d8806a7078cb42eed4"
 
 # Steps, roles and keys work as in sol-perp.toml (docs/LAUNCH.md).
 [cluster.local]

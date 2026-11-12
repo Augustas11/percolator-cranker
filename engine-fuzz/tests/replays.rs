@@ -367,15 +367,17 @@ fn case_212_provider(loser_first: bool) -> Report {
 }
 
 /// At 4db11a8c the provider swept the loser's payment and the winner was paid short
-/// (935_300; engine #172 site 2). At engine b22bef7d the winner is paid in full but the
-/// provider recovers only 13_764 of 78_464 (inv4), the same as on #212's head
-/// (96f70b43). Flip to `assert_clean` once fixed upstream.
+/// (935_300; engine #172 site 2). At engine b22bef7d the winner was paid in full but the
+/// provider recovered only 13_764 of 78_464 (inv4), as on #212's head (96f70b43).
+/// Fixed on our engine fork b7751935 (#172 SettleB settles K/F first): the provider
+/// recovers its full principal whichever account is cranked first.
 #[test]
-fn upstream_212_provider_case_is_present() {
+fn upstream_212_provider_case_is_fixed() {
     let r = case_212_provider(true);
-    assert_violates(&r, &[Invariant::ProviderPrincipal]);
+    assert_clean(&r);
     assert_eq!(r.accounts[1].out(), 1_200_000);
-    assert_eq!(r.provider_out, 13_764);
+    assert_eq!(r.provider_out, 78_464);
+    assert_eq!(r.defaults.len(), 1);
 }
 
 #[test]

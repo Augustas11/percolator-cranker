@@ -17,7 +17,7 @@ solana-transaction-status = "1.18"
 spl-token = { version = "4.0", features = ["no-entrypoint"] }
 spl-associated-token-account = { version = "2.0", features = ["no-entrypoint"] }
 # Must equal our wrapper fork's engine pin (scripts/pins.env).
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "b22bef7d6122fd7d82680ce9859e8b77fd8ef656" }
+percolator = { git = "https://github.com/Augustas11/percolator", rev = "b77519352e0d42ea2e4ce1d8806a7078cb42eed4" }
 # Reuse the wrapper's instruction encoder + state helpers.
 percolator-prog = { path = "../repo-prog" }
 anyhow = "1"
