@@ -831,7 +831,7 @@ fn rule_ok(line: &str, new_rule_seen: &mut bool) -> Result<()> {
             _ => got == v,
         };
         if !same {
-            bail!("rule loosened or changed: {k} is {got}, the shipped rule has {v} (lines before had the 2026-11-12 rule)");
+            bail!("rule loosened or changed: {k} is {got}, the shipped rule has {v} (this line or an earlier one declared clamp_min_endpoints)");
         }
     }
     Ok(())
@@ -846,9 +846,9 @@ pub fn verify_log(args: &[String]) -> Result<()> {
     let oracle = Some(oracle);
     let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
     let (mut ok, mut bad) = (0, 0);
-    // A line verifies under the rule it declares. Rules only tighten over a
-    // log: once a line declares clamp_min_endpoints, a later clamp line
-    // without it (the old clamp-any-set rule) or under 3 is refused.
+    // A line verifies under the rule it declares. From the first line that
+    // declares clamp_min_endpoints on, every OpenRouter line must declare
+    // exactly the shipped rule (rule_ok).
     let mut new_rule_seen = false;
     for (n, line) in text.lines().enumerate() {
         if !line.starts_with("{\"event\":\"flop_push\"") && !line.contains("\"event\":\"flop_push\"") {
