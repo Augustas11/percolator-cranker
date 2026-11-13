@@ -68,22 +68,19 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
   ] : [];
   const others = latest ? latest.sellers.filter(s => !s.in_set && !s.tier) : [];
   const flop = latest?.flop_side;
-  const mock = feed?.mock ? " (mock data, not devnet)" : "";
 
   return <>
     <h1>Compute price</h1>
-    <p className="compute-label">devnet · unaudited · not affiliated with Flop Labs</p>
     <section aria-labelledby="compute-price-heading">
-      <h2 id="compute-price-heading">Price of AI inference{mock}</h2>
+      <h2 id="compute-price-heading">Qwen3.8-27B{feed?.mock && <> <span className="badge">sample data</span></>}</h2>
       {!feed ? <p>Price feed not configured.</p>
         : !latest && !error ? <p role="status">Loading the price feed…</p>
         : !latest ? <p role="status" className="error">Price feed unreachable ({error}). Try again in a minute.</p>
         : <>
-          <div className="compute-price"><strong>{money(latest.mark_usd)}</strong><span>per 1 million tokens of Qwen3.8-27B</span></div>
+          <div className="compute-price"><strong>{money(latest.mark_usd)}</strong><span>per 1M tokens</span></div>
           <p className="note">Updated {ago(latest.landed_ms, now)} ({when(latest.landed_ms)}).
             {stale && <> <span className="badge compute-stale">stale</span> No new price for over 30 minutes.</>}</p>
           {error && <p role="status" className="note">Could not refresh ({error}). Showing the last price received.</p>}
-          <p>A token is a small piece of text. This is what it costs, in US dollars, to have the open model Qwen3.8-27B read and write a million of them, averaged across the sellers listed below.</p>
         </>}
     </section>
 
@@ -99,7 +96,7 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
 
       <section aria-labelledby="compute-sellers-heading">
         <h2 id="compute-sellers-heading">Sellers behind the price</h2>
-        <p className="note">Prices are US dollars per 1 million tokens, mixing input and output {latest.blend_in_out}:1. Precision is the number format a seller runs the model in; bf16 and fp16 keep full quality.</p>
+        <p className="note">USD per 1M tokens, input and output mixed {latest.blend_in_out}:1.</p>
         <div className="table-scroll"><table className="compute-table">
           <thead><tr><th scope="col">Seller</th><th scope="col">Precision</th><th scope="col">Listed price</th><th scope="col">Price used</th><th scope="col">Status</th></tr></thead>
           <tbody>{inTable.map(r => <tr key={`${r.provider}-${r.quantization}`}>
@@ -107,7 +104,7 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
           </tr>)}</tbody>
         </table></div>
         {others.length > 0 && <details className="compute-others"><summary>All other sellers ({others.length})</summary>
-          <p className="note">These run the model at lower precision, so they do not set the price while enough full-precision sellers are up.</p>
+          <p className="note">Lower precision. They count only when fewer than 2 full-precision sellers are up.</p>
           <div className="table-scroll"><table className="compute-table">
             <thead><tr><th scope="col">Seller</th><th scope="col">Precision</th><th scope="col">Listed price</th><th scope="col">Status</th></tr></thead>
             <tbody>{others.map(s => <tr key={`${s.provider}-${s.quantization}`}><td>{s.provider}</td><td>{s.quantization}</td><td>{money(s.blended)}</td><td>{status(s.up)}</td></tr>)}</tbody>
@@ -117,7 +114,7 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
 
       {flop && <section aria-labelledby="compute-flop-heading">
         <h2 id="compute-flop-heading">FLOP on-chain price</h2>
-        <p className="note">FLOP Network settles compute jobs on its own chain. G_n is its unit of compute delivered.</p>
+        <p className="note">Paid jobs settled on FLOP's chain. G_n is FLOP's unit of compute.</p>
         <div className="facts-grid">{([
           ["FLOP per G_n", flop.flop_per_gn == null ? "—" : flop.flop_per_gn.toPrecision(3)],
           ["Buyers", flop.buyers ?? "—"],
@@ -125,21 +122,20 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
           ["From FLOP's own gateway", flop.gateway_share == null ? "—" : `${Math.round(flop.gateway_share * 100)}%`],
         ] as const).map(([label, value]) => <div key={label}><div className="fact-label">{label}</div><div className="fact-value">{value}</div></div>)}</div>
         {flop.stale && <p className="note">Not computed right now: {flop.stale}.</p>}
-        <p>On today's devnet this equals FLOP's listed rate, so it is shown for comparison only and does not set the price above.</p>
+        <p>Today this is FLOP's listed rate, not a traded price. It does not set the price above.</p>
       </section>}
 
       <section aria-labelledby="compute-how-heading">
         <h2 id="compute-how-heading">How the price is made</h2>
         <ul>
-          <li>The source is OpenRouter's public list of sellers for Qwen3.8-27B, read every 5 minutes.</li>
-          <li>Each seller's price mixes input and output tokens {latest.blend_in_out}:1, the mix OpenRouter users send.</li>
-          <li>Cheaper sellers count more: each price is weighted by 1 ÷ price², the way OpenRouter spreads requests by default.</li>
-          <li>Only sellers that are up count. bf16 sellers go first; with fewer than 2 up, it tries fp16, then both, then everyone.</li>
-          <li>With 3 or more sellers, a price under half the middle price counts as half the middle price, so one odd cheap listing cannot drag it down. Now: {latest.clamp ?? "unknown"}.</li>
-          <li>If no fresh list arrives for 30 minutes, nothing new is published and the on-chain price simply ages.</li>
-          <li>Each new price is written to a test market on Solana devnet a few minutes apart.</li>
-          {latest.sig && <li>The latest price is in Solana transaction <a href={txUrl(latest.sig)} target="_blank" rel="noreferrer">{short(latest.sig)}</a>.</li>}
-          <li>Every push is also logged as a signed line. Anyone with the log can check it with <code>staging verify-push-log</code>, which checks the signature and recomputes the price from the logged sellers.</li>
+          <li>Source: OpenRouter's public seller list for Qwen3.8-27B, read every 5 minutes.</li>
+          <li>Each seller's price mixes input and output {latest.blend_in_out}:1. Cheaper sellers weigh more (1 ÷ price²), as OpenRouter routes by default.</li>
+          <li>Only sellers that are up count: bf16 first; with fewer than 2, fp16, then both, then all.</li>
+          <li>With 3 or more sellers, a price under half the median counts as half the median. Now: {latest.clamp ?? "unknown"}.</li>
+          <li>No fresh list for 30 minutes: no new price.</li>
+          {latest.sig && <li>Each price is written to a Solana devnet test market. Latest: <a href={txUrl(latest.sig)} target="_blank" rel="noreferrer">{short(latest.sig)}</a>.</li>}
+          <li>Every price is logged as a signed line; <code>staging verify-push-log</code> recomputes it from the logged sellers.</li>
+          <li>Test market, test tokens. Independent of Flop Labs.</li>
           {site.computeRepo && <li>Source code: <a href={site.computeRepo}>{site.computeRepo}</a>.</li>}
         </ul>
         {history && history.changes.length > 0 && <details className="compute-others"><summary>Price changes in the last 7 days ({history.changes.length})</summary><ul>

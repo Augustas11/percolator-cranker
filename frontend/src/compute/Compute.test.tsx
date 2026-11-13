@@ -27,10 +27,10 @@ test("renders the price, chart, sellers, FLOP side and how-to from the mock feed
   const container = await render(new MockComputeFeedClient());
   const text = container.textContent!;
   expect(container.querySelector("h1")?.textContent).toBe("Compute price");
-  expect(text).toContain("devnet · unaudited · not affiliated with Flop Labs");
-  expect(text).toContain("Price of AI inference (mock data, not devnet)");
+  expect(text).toContain("Independent of Flop Labs");
+  expect(text).toContain("sample data");
   expect(container.querySelector(".compute-price strong")?.textContent).toBe("$0.3036");
-  expect(text).toContain("per 1 million tokens of Qwen3.8-27B");
+  expect(text).toContain("per 1M tokens");
   expect(text).toContain("Updated 3 min ago");
   expect(container.querySelector(".compute-stale")).toBeNull();
 
