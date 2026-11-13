@@ -1,4 +1,5 @@
-import type { ComputeFeedClient, ComputeHistory, ComputeLatest } from "./client";
+import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket } from "./client";
+import { marketFixture } from "./fixture";
 
 const HOUR = 3_600_000;
 
@@ -11,7 +12,7 @@ export class MockComputeFeedClient implements ComputeFeedClient {
     const landed = this.now - this.ageMs;
     return {
       v: 1, generated_ms: this.now, mark_usd: 0.303551, landed_ms: landed, source_ms: landed - 140_000,
-      sig: "mock-push-signature", slot: 1000, market: "mock-market", oracle: "mock-oracle",
+      sig: "4w4fnVJdCzYevzVWKzQakgnKQAbhpSmNMG4ugg", slot: 1000, market: "uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J", oracle: "FLMpxq4EYV727uLVNw9Z14fL4ZDzTVtmvibVrLRgWRW4",
       source: "openrouter", set: "preferred", clamp: "off (n<3)", blend_in_out: 15,
       pricing_set: [
         { provider: "DeepInfra", quantization: "bf16", listed: 0.2578125, priced: 0.2578125, up: true },
@@ -27,12 +28,16 @@ export class MockComputeFeedClient implements ComputeFeedClient {
     };
   }
 
+  async market(): Promise<ComputeMarket> {
+    return marketFixture(this.now);
+  }
+
   async history(): Promise<ComputeHistory> {
     const from = this.now - 168 * HOUR;
     const points: [number, number][] = Array.from({ length: 168 }, (_, i) => [from + i * HOUR, i < 140 ? 0.311224 : 0.303551]);
     return {
       v: 1, generated_ms: this.now, from_ms: from, to_ms: this.now, high: 0.311224, low: 0.303551, points,
-      changes: [{ t_ms: from + 140 * HOUR, from: 0.311224, to: 0.303551, sig: "mock-change-signature" }],
+      changes: [{ t_ms: from + 140 * HOUR, from: 0.311224, to: 0.303551, sig: "5Hp7eRC4i3bKqs1qMWiZuc5TiaSjsEAaSiZp2j" }],
       outages: [{ provider: "GMICloud", quantization: "bf16", from_ms: from + 139 * HOUR, to_ms: null }],
       recorder_gaps: [],
     };

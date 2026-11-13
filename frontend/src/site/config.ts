@@ -6,6 +6,7 @@ const market = devnetConfig.market.toBase58();
 export const site = {
   heroLine: null as string | null, // TODO-OWNER: hero line slot. null = not rendered.
   paths: { home: "/", tools: "/tools", arena: "/arena", build: "/build", trade: "/trade", compute: "/compute" },
+  computeTrade: null as string | null, // TODO-OWNER: trade page for the compute perp; until set, /compute links the market account on Solana explorer
   computeRepo: "" as string, // empty while the repo is private; the /compute page hides the link when empty
   repo,
   docs: `${repo}/blob/main/docs/RUNBOOK.md`,

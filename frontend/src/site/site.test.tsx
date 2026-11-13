@@ -7,6 +7,8 @@ import { Link } from "./router";
 import { MockMarketClient } from "../market/mock";
 import { MockIndexerClient } from "../indexer/mock";
 import type { IndexerClient } from "../indexer/client";
+import { MockComputeFeedClient } from "../compute/mock";
+import { marketFixture } from "../compute/fixture";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -19,7 +21,7 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function render(path: string, indexer: IndexerClient | null = new MockIndexerClient(), client = new MockMarketClient({ autoTick: false })) {
+async function render(path: string, indexer: IndexerClient | null = new MockIndexerClient(), client = new MockMarketClient({ autoTick: false }), computeFeed: MockComputeFeedClient | null = null) {
   window.history.pushState({}, "", path);
   const container = document.createElement("div");
   document.body.append(container);
@@ -29,16 +31,16 @@ async function render(path: string, indexer: IndexerClient | null = new MockInde
     client.dispose();
     container.remove();
   };
-  await act(async () => { root.render(<Site client={client} indexer={indexer} indexerBase={null} />); });
+  await act(async () => { root.render(<Site client={client} indexer={indexer} indexerBase={null} computeFeed={computeFeed} />); });
   return container;
 }
 
 test.each([
-  [site.paths.home, "The House ofPercolatorPerps.", "From agent to leaderboard.", "drip"],
+  [site.paths.home, "Price andhedge AIcompute.", "From agent to leaderboard.", "drip"],
   [site.paths.tools, "Tools", "Keeper CLI", "Tools · drip"],
   [site.paths.arena, "Arena", "Rules", "Arena · drip"],
   [site.paths.build, "Build", "Add an MCP tool", "Build · drip"],
-  [site.paths.compute, "Compute price", "Price feed not configured.", "Compute price · drip"],
+  [site.paths.compute, "Compute index", "Price feed not configured.", "Compute index · drip"],
   [site.paths.trade, "SOL-PERP", "Connect wallet", "Trade · drip"],
 ])("renders %s", async (path, heading, text, title) => {
   const container = await render(path);
@@ -323,4 +325,23 @@ test("home explains why Percolator", async () => {
     "A blow-up in one market can't take money from another. The engine ships proofs that trades can't create value.",
     "Any keeper can crank a market. No company-run matching server.",
   ]);
+});
+
+test("home leads with the compute index and the compute perp, SOL-PERP second", async () => {
+  const now = Date.now();
+  const container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient(now));
+  const market = marketFixture(now);
+  const card = container.querySelector(".compute-card")!;
+  expect(card.querySelector(".cc-level strong")?.textContent).toBe(market.index.level.toFixed(2));
+  expect(card.textContent).toContain(`${market.index.n_quotes} quotes · ${market.index.n_providers} providers · ${market.index.n_models} models`);
+  expect(card.querySelectorAll(".cc-models .strip")).toHaveLength(4);
+  expect(card.querySelector(".cc-perp .market-price")?.textContent).toBe("$0.3036 / 1M tokens");
+  expect(card.textContent).toContain("2 of 2 full-precision sellers up");
+  expect(container.querySelector(".hero-description")?.textContent).toContain(`built from ${market.index.n_quotes} seller quotes across ${market.index.n_providers} providers`);
+  expect(container.querySelector('.home-hero .hero-primary')?.getAttribute("href")).toBe("/compute");
+  expect(container.textContent).toContain("Perps run on Percolator, the open-source engine by Anatoly Yakovenko.");
+  const sections = Array.from(container.querySelectorAll("main > section")).map(s => s.className);
+  expect(sections.indexOf("home-sol home-container")).toBe(1);
+  expect(container.querySelector('nav .nav-compute')?.getAttribute("href")).toBe("/compute");
+  expect(container.querySelector(".home-hero")?.textContent).not.toMatch(/mock|sample/i);
 });

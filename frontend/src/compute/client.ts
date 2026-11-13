@@ -42,10 +42,55 @@ export interface ComputeHistory {
   recorder_gaps: { from_ms: number; to_ms: number | null }[];
 }
 
+export type Point = [number, number];
+
+export interface MarketQuote { provider: string; quantization: string; price: number | null; up: boolean; uptime_24h_pct: number | null }
+export interface MarketModel {
+  id: string;
+  name: string;
+  family: string;
+  sellers_total: number;
+  sellers_up: number;
+  median: number;
+  p25: number;
+  p75: number;
+  min: number;
+  max: number;
+  thin?: boolean;
+  cheapest: { provider: string; quantization: string; price: number };
+  change_24h_pct: number | null;
+  series: Point[];
+  quotes: MarketQuote[];
+}
+export interface MarketProvider { name: string; models: number; quotes: number; uptime_24h_pct: number | null; cheapest_in: number }
+export interface MarketChange { at_ms: number; model: string; provider: string; quantization: string; from: number; to: number }
+export interface MarketDynamic { model: string; provider: string; quantization: string; min: number; max: number; changes_24h: number }
+
+/** The broad market: every open model's seller quotes (market.json). USD per 1M tokens, 15:1 input:output. */
+export interface ComputeMarket {
+  generated_ms: number;
+  window: { from_ms: number; to_ms: number };
+  index: {
+    level: number;
+    base_ms: number;
+    change_24h_pct: number | null;
+    change_7d_pct: number | null;
+    n_models: number;
+    n_quotes: number;
+    n_quotes_up: number;
+    n_providers: number;
+    series: Point[];
+  };
+  models: MarketModel[];
+  providers: MarketProvider[];
+  changes: MarketChange[];
+  dynamic: MarketDynamic[];
+}
+
 export interface ComputeFeedClient {
-  readonly mock?: boolean;
   latest(): Promise<ComputeLatest>;
   history(): Promise<ComputeHistory>;
+  market(): Promise<ComputeMarket>;
 }
 
 export const computeFeedUrl = import.meta.env.VITE_COMPUTE_FEED_URL ?? "/compute-feed";
@@ -61,4 +106,5 @@ export class HttpComputeFeedClient implements ComputeFeedClient {
 
   latest() { return this.get<ComputeLatest>("latest.json"); }
   history() { return this.get<ComputeHistory>("history.json"); }
+  market() { return this.get<ComputeMarket>("market.json"); }
 }

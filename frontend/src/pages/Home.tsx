@@ -7,7 +7,12 @@ import { site } from "../site/config";
 import { Link } from "../site/router";
 import { Arrow } from "../site/Nav";
 import CopyButton from "../site/CopyButton";
+import type { ComputeFeedClient, ComputeMarket } from "../compute/client";
+import { useComputeFeed } from "../compute/useFeed";
+import { RangeStrip, marketScale, widest } from "../compute/charts";
+import { ago as agoMs, count, times, usd as perMillion, usd4 } from "../compute/format";
 import "../site/home.css";
+import "../site/compute.css";
 
 const steps = [
   { n: "01", title: "Add the MCP", body: "One line in Claude, Cursor or ChatGPT. Your agent keeps its own key.", icon: "M4 17l6-6-6-6M12 19h8" },
@@ -41,7 +46,32 @@ function ago(time: number | null) {
   return `${amount}${unit} ago`;
 }
 
-export default function Home({ client, indexer, indexerBase }: { client: MarketClient; indexer: IndexerClient | null; indexerBase: string | null }) {
+function ComputeCard({ market, mark, markAgo, sellersUp, sellers }: { market: ComputeMarket | null; mark: number | null; markAgo: string | null; sellersUp: number; sellers: number }) {
+  const scale = market ? marketScale(market) : null;
+  const top = market ? [...market.models].sort((a, b) => b.sellers_total - a.sellers_total).slice(0, 4) : [];
+  const wide = market ? widest(market) : null;
+  return <div className="market-card compute-card">
+    <div className="cc-block">
+      <div className="market-header"><div><div className="market-name">Compute index</div><div className="market-subtitle">Open-model inference{market && <>, updated {agoMs(market.generated_ms, Date.now())}</>}</div></div></div>
+      {market ? <>
+        <div className="cc-level"><strong>{market.index.level.toFixed(2)}</strong><span>{count(market.index.n_quotes)} quotes · {count(market.index.n_providers)} providers · {count(market.index.n_models)} models</span></div>
+        <ul className="cc-models" aria-label="Most-sold models">{top.map(m => <li key={m.id}>
+          <span className="cc-name">{m.name}</span><RangeStrip model={m} scale={scale!} quotes={false} /><b>{perMillion(m.median)}</b>
+        </li>)}</ul>
+        {wide && <p className="cc-note">{wide.name} costs {perMillion(wide.min)} to {perMillion(wide.max)} per 1M tokens depending on the seller: {times(wide.min, wide.max)}.</p>}
+      </> : <div className="cc-loading" aria-busy="true"><span className="sk" /><span className="sk" /><span className="sk" /></div>}
+    </div>
+    <div className="cc-block cc-perp">
+      <div className="market-header"><div><div className="market-name">Qwen3.8-27B perp</div><div className="market-subtitle">Settlement price · Solana devnet, test tokens</div></div></div>
+      <div className="market-price">{mark === null ? "—" : usd4(mark)}<span className="cc-unit"> / 1M tokens</span></div>
+      <div className="cc-note">{sellers ? `${sellersUp} of ${sellers} full-precision sellers up` : "Waiting for the feed"}{markAgo && ` · pushed ${markAgo}`}</div>
+    </div>
+    <Link className="button-link" to={site.paths.compute}>Open the compute index <Arrow /></Link>
+  </div>;
+}
+
+export default function Home({ client, indexer, indexerBase, computeFeed = null }: { client: MarketClient; indexer: IndexerClient | null; indexerBase: string | null; computeFeed?: ComputeFeedClient | null }) {
+  const compute = useComputeFeed(computeFeed, { history: false });
   const { mark } = useSnapshot(client);
   const price = Number.isFinite(mark.price) ? mark.price.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
   const command = site.mcp.final ? site.mcp.install : null;
@@ -80,11 +110,22 @@ export default function Home({ client, indexer, indexerBase }: { client: MarketC
       <svg className="growth-line" aria-hidden="true" viewBox="0 0 1280 420" preserveAspectRatio="none"><path d="M0 360 C 160 350, 230 300, 330 318 S 480 370, 560 320 S 700 210, 780 236 S 900 300, 960 220 S 1080 90, 1180 70 L 1280 40" fill="none" stroke="var(--site-accent)" strokeOpacity="0.35" strokeWidth="2.5" /><circle cx="1180" cy="70" r="16" fill="var(--site-glow)" fillOpacity="0.18" /><circle cx="1180" cy="70" r="7" fill="var(--site-glow)" /></svg>
       <div className="hero-layout">
         <div className="hero-copy">
-          <h1 id="hero-title"><span>The House of</span><span className="accent">Percolator</span><span>Perps.</span></h1>
-          <p className="hero-description">Give agents a wallet, leverage and a live SOL-PERP market.</p>
-          <div className="hero-actions"><Link className="button-link hero-primary" to="/trade">Trade SOL-PERP <Arrow /></Link><Link className="button-link outline" to="/arena">Watch agents trade</Link></div>
+          <p className="eyebrow">COMPUTE MARKETS</p>
+          <h1 id="hero-title"><span>Price and</span><span className="accent">hedge AI</span><span>compute.</span></h1>
+          <p className="hero-description">{compute.market
+            ? <>A live price index for open-model inference, built from {count(compute.market.index.n_quotes)} seller quotes across {count(compute.market.index.n_providers)} providers, and a perpetual future on that price.</>
+            : <>A live price index for open-model inference, built from every seller's quote, and a perpetual future on that price.</>}</p>
+          <div className="hero-actions"><Link className="button-link hero-primary" to={site.paths.compute}>See the compute index <Arrow /></Link><Link className="button-link outline" to="/trade">Trade SOL-PERP</Link></div>
+          <p className="hero-credit">Perps run on Percolator, the open-source engine by Anatoly Yakovenko.</p>
         </div>
-        <div id="markets" className="market-card">
+        <ComputeCard market={compute.market} mark={compute.latest?.mark_usd ?? null} markAgo={compute.latest ? agoMs(compute.latest.landed_ms, compute.now) : null}
+          sellersUp={compute.latest?.pricing_set.filter(r => r.up).length ?? 0} sellers={compute.latest?.pricing_set.length ?? 0} />
+      </div>
+    </section>
+    <section id="markets" className="home-sol home-container" aria-labelledby="sol-title"><div className="home-split">
+      <div className="sol-copy"><p className="eyebrow">SOL-PERP · AGENT ARENA</p><h2 id="sol-title">Agents trade <span className="accent nowrap">SOL-PERP.</span></h2><p className="section-description">Give agents a wallet, leverage and a live SOL-PERP market. Season 0 ranks them by PnL from on-chain fills.</p>
+        <div className="hero-actions sol-actions"><Link className="button-link" to="/arena">Watch agents trade</Link></div></div>
+      <div className="market-card">
           <div className="market-header"><div><div className="market-name">SOL-PERP</div><div className="market-subtitle">Percolator v16 · devnet</div></div></div>
           <div className="market-price-label">Mark price</div><div className="market-price">{price}</div>
           <div className="recent-trades"><h3>Recent trades</h3><div className="trades-scroll">{fills.length ? <ul>{fills.slice(0, 5).map(fill => {
@@ -98,9 +139,8 @@ export default function Home({ client, indexer, indexerBase }: { client: MarketC
           })}</ul> : <p>No agent trades yet. <Link to="/tools">Be the first.</Link></p>}</div></div>
           <div className="market-stats">{[["Mark lag", site.markLag.value], ["Fee", `${site.feeBps} bps`], ["Max fill", site.maxFill]].map(([label, value]) => <div key={label}><div>{label}</div><strong>{value}</strong></div>)}</div>
           <div className="market-actions"><Link className="button-link" to="/trade?side=long">Long</Link><Link className="button-link short" to="/trade?side=short">Short</Link></div>
-        </div>
       </div>
-    </section>
+    </div></section>
     <section className="home-facts home-container" aria-label="Season 0"><div className="facts-grid">{tiles.map(([label, value]) => <div key={label}><div className="fact-label">{label}</div><div className="fact-value">{value}</div></div>)}</div><p className="fact-note">Season 0 · devnet · since {since}</p></section>
     <section className="home-why home-container" aria-labelledby="why-title"><h2 id="why-title">Why Percolator</h2><ul className="home-steps">
       <li><h3>Built by Anatoly Yakovenko</h3><p>Solana's co-founder wrote Percolator as an open-source perps engine.</p></li>

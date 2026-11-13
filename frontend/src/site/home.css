@@ -115,3 +115,37 @@
   .site .trades-scroll li a { grid-template-columns: 0.7fr 1fr 1fr 1fr; font-size: 10px; gap: 4px; }
   .site .build-cards, .site .home-steps { grid-template-columns: 1fr; }
 }
+
+/* Compute hero card */
+.site .hero-copy .eyebrow { margin-bottom: 20px; }
+.site .hero-credit { margin: 22px 0 0; font-size: 13px; color: var(--site-muted); }
+.site .compute-card { display: grid; gap: 18px; max-width: 520px; padding: 22px; }
+.site .cc-block + .cc-block { padding-top: 18px; border-top: 1px solid var(--site-line-7); }
+.site .cc-level { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-top: 10px; }
+.site .cc-level strong { font: 700 56px/1 var(--site-display); letter-spacing: -2px; }
+.site .cc-level span { font: 12px var(--site-mono); color: var(--site-muted); }
+.site .cc-models { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 4px; }
+.site .cc-models li { display: grid; grid-template-columns: 112px minmax(0, 1fr) 64px; gap: 12px; align-items: center; margin: 0; }
+.site .cc-models .strip { height: 22px; }
+.site .cc-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.site .cc-models b { font: 700 13px var(--site-mono); text-align: right; }
+.site .cc-note { margin: 12px 0 0; font-size: 13px; line-height: 1.5; color: var(--site-muted); }
+.site .cc-perp .market-price { color: var(--site-accent); }
+.site .cc-unit { font: 400 13px var(--site-font); letter-spacing: 0; color: var(--site-muted); }
+.site .cc-perp .cc-note { margin-top: 4px; }
+.site .compute-card > .button-link { min-height: 48px; }
+.site .cc-loading { display: grid; gap: 10px; margin-top: 12px; }
+.site .cc-loading .sk { display: block; height: 22px; }
+.site .cc-loading .sk:first-child { height: 56px; width: 60%; }
+
+/* SOL-PERP, secondary */
+.site .home-sol { padding: 24px var(--site-gutter) 72px; }
+.site .sol-copy { flex: 1 1 380px; }
+.site .sol-actions { margin-top: 28px; }
+.site .home-sol .market-card { flex: 1 1 400px; box-shadow: none; }
+@media (max-width: 640px) {
+  .site .cc-level strong { font-size: 44px; }
+  .site .cc-models li { grid-template-columns: 92px minmax(0, 1fr) 58px; gap: 8px; }
+  .site .compute-card { padding: 16px; }
+}
+.site .nowrap { white-space: nowrap; }
