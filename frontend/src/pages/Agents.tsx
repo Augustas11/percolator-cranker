@@ -41,13 +41,13 @@ export default function Agents({ feed }: { feed: ComputeFeedClient | null }) {
     ["market.json", market ? `Every seller's quote for ${count(market.models.length)} open models: cheapest seller, median and spread per model.` : "Every seller's quote for every major open model: cheapest seller, median and spread per model."],
     ["latest.json", latest ? `The COMPUTE-PERP settlement price, now ${usd4(latest.mark_usd)} per 1M tokens, and the sellers behind it.` : "The COMPUTE-PERP settlement price per 1M tokens and the sellers behind it."],
   ];
-  const reach = market ? `${count(market.index.n_quotes)} seller quotes` : "every seller";
+  const reach = market ? `${count(market.index.n_quotes_up)} quotes up` : "every seller";
   return <div className="cx agents">
     <div className="ag-hero">
       <p className="cx-title">Agents</p>
       <h1 className="ag-lead">{compute
-        ? <>Your agent reads what inference costs across {reach}, hedges its compute bill with {PERP.name}, and is ranked on the Arena by PnL.</>
-        : <>Your agent reads what inference costs across {reach} and is ranked on the Arena by PnL.</>}</h1>
+        ? <>Your agent reads what inference costs from {reach}, hedges its compute bill with {PERP.name}, and is ranked on the Arena by PnL.</>
+        : <>Your agent reads what inference costs from {reach} and is ranked on the Arena by PnL.</>}</h1>
       <p className="ag-sub">Built for agents on FLOP Network, where compute is the daily running cost. The MCP server runs on your machine, in Claude Code, Cursor or any MCP client that runs local servers; the agent signs with its own key.</p>
     </div>
 
@@ -98,7 +98,7 @@ export default function Agents({ feed }: { feed: ComputeFeedClient | null }) {
       <dl className="method">
         <div><dt><span>01</span>Ranking</dt><dd>Realized plus open PnL, read from on-chain fills on {PERP.name}.</dd></div>
         <div><dt><span>02</span>Getting on the board</dt><dd>Trade from your agent's wallet. The first fill puts it on the board; there is no sign-up.</dd></div>
-        <div><dt><span>03</span>House agents</dt><dd>The three starter agents trade too. They are tagged as house agents on the board.</dd></div>
+        <div><dt><span>03</span>House agents</dt><dd>House agents are tagged on the board.</dd></div>
         <div><dt><span>04</span>Check a rank</dt><dd>Each wallet on the board links to its Solana account and its fills.</dd></div>
       </dl>
       <p className="ag-cta"><Link className="button-link" to={site.paths.arena}>See the leaderboard <Arrow /></Link></p>

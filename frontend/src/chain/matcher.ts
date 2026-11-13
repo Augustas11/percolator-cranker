@@ -29,9 +29,13 @@ export function sideLimits(maxFill: number, inventory: number, cap: number) {
   return { long, short };
 }
 
-export function liquidityFrom(state: ReturnType<typeof parseMatcher>): Liquidity {
+export function liquidityFrom(state: ReturnType<typeof parseMatcher>, slot?: number): Liquidity {
   const units = (q: bigint) => Number(q) / 1e6;
   const maxFill = units(state.maxFill), inventory = units(state.inventory), cap = units(state.inventoryCap);
   const { long, short } = sideLimits(maxFill, inventory, cap);
-  return { spreadBps: 0, maxFill, maxLong: long, maxShort: short, paused: state.paused, deviationBps: state.deviationBps };
+  // The program refuses a fill unless ref_slot != 0 and slot - ref_slot <= max age (lib.rs, tag 0).
+  const refSlot = Number(state.refSlot);
+  const refAgeSlots = slot === undefined ? undefined : refSlot === 0 || slot < refSlot ? null : slot - refSlot;
+  return { spreadBps: 0, maxFill, maxLong: long, maxShort: short, paused: state.paused, deviationBps: state.deviationBps,
+    refPrice: Number(state.refPrice) / 1e6, maxAgeSlots: Number(state.maxAgeSlots), ...(refAgeSlots === undefined ? {} : { refAgeSlots }) };
 }

@@ -1,6 +1,7 @@
 import type { ComputeMarket, MarketModel, MixKey, Point } from "./client";
 import { quantile } from "./fixture";
 import { day, times, usd } from "./format";
+import { PERP } from "../market/types";
 
 /** Below this many points a time series is too short to draw as a line. */
 export const MIN_SERIES_POINTS = 12;
@@ -185,5 +186,21 @@ export function typicalPrice(market: ComputeMarket, mix: MixKey = DEFAULT_MIX) {
     median: mix !== DEFAULT_MIX && typeof top === "number" && Number.isFinite(top) ? top : quantile(byMedian.map(at), 0.5),
     cheapest: byMedian[0], dearest: byMedian[byMedian.length - 1], models: pool.length, at,
     quotes: sets.reduce((n, s) => n + s.size, 0) + held, held, providers: new Set(sets.flatMap(s => [...s])).size,
+  };
+}
+
+const num = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+
+/** The benchmark model and what a request pays for it now: its routed price, 1 h change and series. Every part may be absent. */
+export function benchmarkRouted(market: ComputeMarket) {
+  const id = market.routed?.benchmark ?? PERP.benchmarkId;
+  const model = market.models.find(m => m.id === id) ?? null;
+  const routed = model?.routed ?? null;
+  const price = num(routed?.price) ? routed!.price : num(market.routed?.price) ? market.routed!.price : null;
+  return {
+    id, model, name: model?.name ?? PERP.benchmark, routed, price,
+    series: routed?.series ?? market.routed?.series ?? [],
+    change1h: routed?.change_1h_pct ?? null,
+    median: model && num(model.median) ? model.median : null,
   };
 }

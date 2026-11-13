@@ -7,7 +7,9 @@ export function usd(n: number | null | undefined) {
   return "$" + n.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 /** Like usd, but keeps 3 significant digits under one cent (FLOP prices, dollars per bn G_n). */
-export const usdSmall = (n: number | null | undefined) => n == null || !Number.isFinite(n) ? "—" : n > 0 && n < 0.01 ? "$" + Number(n.toPrecision(3)).toString() : usd(n);
+export const usdSmall = (n: number | null | undefined) => n == null || !Number.isFinite(n) ? "—" : n > 0 && n < 0.01 ? "$" + plain(Number(n.toPrecision(3))) : usd(n);
+/** A small number written out in full, never in exponent form ($0.00000128, not $1.28e-6). */
+const plain = (n: number) => /e/.test(String(n)) ? n.toFixed(Math.min(20, 2 - Math.floor(Math.log10(n)))) : String(n);
 /** The perp mark, always 4 decimals as written on chain. */
 export const usd4 = (n: number | null | undefined) => n == null || !Number.isFinite(n) ? "—"
   : n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 4, maximumFractionDigits: 4 });

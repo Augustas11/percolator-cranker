@@ -4,9 +4,49 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "rewrites": [
-    { "source": "/indexer/:path*", "destination": "http://159.223.165.194:8091/:path*" },
-    { "source": "/faucet/:path*", "destination": "http://159.223.165.194:8092/:path*" },
-    { "source": "/compute-feed/:path*", "destination": "http://159.223.165.194:8091/compute-feed/:path*" },
-    { "source": "/((?!indexer/|faucet/|compute-feed/).*)", "destination": "/index.html" }
+    {
+      "source": "/indexer/:path*",
+      "destination": "http://159.223.165.194:8091/:path*"
+    },
+    {
+      "source": "/faucet/:path*",
+      "destination": "http://159.223.165.194:8092/:path*"
+    },
+    {
+      "source": "/compute-feed/:path*",
+      "destination": "http://159.223.165.194:8091/compute-feed/:path*"
+    },
+    {
+      "source": "/compute",
+      "destination": "/compute.html"
+    },
+    {
+      "source": "/trade",
+      "destination": "/trade.html"
+    },
+    {
+      "source": "/arena",
+      "destination": "/arena.html"
+    },
+    {
+      "source": "/agents",
+      "destination": "/agents.html"
+    },
+    {
+      "source": "/docs",
+      "destination": "/docs.html"
+    },
+    {
+      "source": "/tools",
+      "destination": "/agents.html"
+    },
+    {
+      "source": "/build",
+      "destination": "/agents.html"
+    },
+    {
+      "source": "/((?!indexer/|faucet/|compute-feed/).*)",
+      "destination": "/index.html"
+    }
   ]
 }

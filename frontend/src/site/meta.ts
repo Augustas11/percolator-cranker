@@ -1,23 +1,20 @@
 import { site } from "./config";
+import routes from "./routes.json";
 
 export interface PageMeta { title: string; description: string }
 
-const HOME: PageMeta = {
-  title: "Drip · the price of AI compute",
-  description: "What open-model inference costs right now, from every seller, and COMPUTE-PERP, a perpetual in USD per 1M tokens on Solana devnet.",
-};
+const HOME: PageMeta = routes.home;
+const routeMeta = routes.routes as Record<string, PageMeta & { gated?: boolean }>;
+const pick = ({ title, description }: PageMeta): PageMeta => ({ title, description });
 
-/** Title and description per route. Unknown paths get the 404 entry. */
+/**
+ * Title and description per route, from routes.json, which the build also turns into one static HTML shell per route
+ * (scripts/route-shells.ts) so link previews show the route's own tags. Unknown paths get the 404 entry.
+ */
 export const pageMeta: Record<string, PageMeta> = {
   [site.paths.home]: HOME,
-  [site.paths.compute]: { title: "Compute index · Drip", description: "Every seller's price for every major open model, per 1M tokens: cheapest, median and spread, read every 5 minutes." },
-  [site.paths.trade]: { title: "Trade COMPUTE-PERP · Drip", description: "Long or short the price of 1M tokens of Qwen3.8-27B on Solana devnet with test USDC." },
-  [site.paths.arena]: { title: "Arena · Drip", description: "Every wallet trading COMPUTE-PERP, ranked by realized plus open PnL from on-chain fills." },
-  [site.paths.agents]: { title: "Agents · Drip", description: "An MCP server that lets your agent read inference prices and hedge its compute bill with COMPUTE-PERP." },
-  [site.paths.tools]: { title: "Agents · Drip", description: "An MCP server that lets your agent read inference prices and hedge its compute bill with COMPUTE-PERP." },
-  [site.paths.build]: { title: "Agents · Drip", description: "An MCP server that lets your agent read inference prices and hedge its compute bill with COMPUTE-PERP." },
-  [site.paths.docs]: { title: "Docs · Drip", description: "How the compute index and the COMPUTE-PERP settlement price are computed, and how to check them." },
-  [site.paths.challenge]: { title: "Compute Price Challenge · Drip", description: "Write the rule that turns every seller's quote into one price. The best rule sets the price COMPUTE-PERP settles on." },
+  ...Object.fromEntries(Object.entries(routeMeta).map(([path, m]) => [path, pick(m)])),
+  ...Object.fromEntries(Object.entries(routes.aliases as Record<string, string>).map(([path, to]) => [path, pick(routeMeta[to])])),
 };
 export const notFoundMeta: PageMeta = { title: "Page not found · Drip", description: HOME.description };
 
@@ -32,8 +29,9 @@ function setMeta(attr: "name" | "property", key: string, content: string) {
 }
 
 /** Write the page's title, description, Open Graph and Twitter tags. */
-export function applyMeta({ title, description }: PageMeta) {
+export function applyMeta({ title, description }: PageMeta, path = window.location.pathname) {
   document.title = title;
+  setMeta("property", "og:url", routes.origin + (path === "/" ? "/" : path.replace(/\/$/, "")));
   setMeta("name", "description", description);
   setMeta("property", "og:title", title);
   setMeta("property", "og:description", description);

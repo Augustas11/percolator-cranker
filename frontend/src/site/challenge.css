@@ -1,4 +1,4 @@
-/* /challenge: the Compute Price Challenge. Shares the compute page's sections and the arena's tables. */
+/* /challenge: the Compute Oracle Challenge. Shares the compute page's sections and the arena's tables. */
 .site .challenge { display: grid; gap: 8px; }
 .site .ch-hero { display: grid; gap: 14px; padding: 8px 0 12px; }
 .site .ch-title { margin: 0; max-width: 820px; font: 700 clamp(32px, 4.4vw, 56px)/1.05 var(--site-display, var(--site-font)); letter-spacing: -0.5px; color: var(--site-text); }
@@ -49,3 +49,5 @@
   .site .ch-lines li { font-size: 16px; grid-template-columns: 34px minmax(0, 1fr); }
   .site .ch-dates > div { flex: 1 1 140px; min-width: 0; }
 }
+
+.site .ch-score-line { margin: 0; max-width: 680px; font-size: 17px; line-height: 1.45; color: var(--site-secondary); }

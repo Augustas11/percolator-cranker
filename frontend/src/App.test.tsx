@@ -55,18 +55,23 @@ test("connects, deposits, opens a long, and keeps rendering after a tick", async
     ]);
     expect(container.textContent!.match(/Test tokens/gi)).toHaveLength(1);
     expect(container.textContent).not.toMatch(/SOL-PERP|\bSOL\b/);
-    expect(container.textContent).toContain("No open position");
+    // Before a wallet: prompts only, no balances, no health badge.
+    expect(container.querySelector(".tx-account")!.textContent).toBe("Connect a wallet to see your balance and deposit test USDC.");
+    expect(container.querySelector('[aria-labelledby="position-heading"]')!.textContent).toBe("Your positionConnect a wallet to see your position.");
+    expect(container.querySelector(".badge")).toBeNull();
     // Summary: entry at the ask (spread 0, so the mark), the market's fee, the engine's initial margin. No leverage control: the order sends none.
     const summary = () => Array.from(container.querySelectorAll(".tx-summary dt, .tx-summary dd"), el => el.textContent);
-    expect(summary()).toEqual(["Entry price", "$0.3036", "Fee (15 bps)", "$0.05", "Initial margin (50%)", "$15.18", "Max this side", "100 Mtok"]);
-    expect(container.querySelector("#leverage")).toBeNull();
-    expect(container.textContent).not.toMatch(/leverage/i);
+    expect(summary()).toEqual(["Entry price", "$0.3036", "Fee (15 bps)", "$0.05", "Margin required (50%)", "$15.18", "Max leverage", "2x", "Max this side", "100 Mtok"]);
+    expect(container.querySelector("#leverage, input[type=range]")).toBeNull();
 
     await ui.click("Connect wallet");
     expect(ui.button("Connect wallet")).toBeUndefined();
+    expect(container.textContent).toContain("No open position");
     await ui.input("amount", "1000");
     await ui.click("Deposit");
     expect(client.getSnapshot().portfolio.collateral).toBe(1000);
+    expect(Array.from(container.querySelectorAll(".tx-account dt, .tx-account dd"), d => d.textContent)).toEqual([
+      "Collateral", "$1,000.00", "Equity", "$1,000.00", "Free collateral", "$1,000.00", "Health", "healthy", "In your wallet", "9,000 test USDC"]);
     // Free collateral over margin plus fee per unit: 1000 / (mark × (0.5 + 0.0015)).
     const most = Math.floor(1000 / (client.getSnapshot().mark.price * 0.5015) * 100) / 100;
     expect(summary().slice(-2)).toEqual(["Max for your collateral", `${most.toLocaleString("en-US", { maximumFractionDigits: 2 })} Mtok`]);
@@ -76,7 +81,7 @@ test("connects, deposits, opens a long, and keeps rendering after a tick", async
     await ui.input("size", "150");
     expect(container.querySelector("#size-help")!.className).toContain("is-over");
     await ui.click("Open long");
-    expect(container.querySelector(".error")!.textContent).toBe("The matcher fills up to 100 units (100 × 1M tokens) per trade. Split a larger order into several trades.");
+    expect(container.querySelector(".error")!.textContent).toBe("The liquidity account fills up to 100 units (100 × 1M tokens) per trade. Split a larger order into several trades.");
     expect(client.getSnapshot().portfolio.legs).toHaveLength(0);
     await ui.click("25");
     expect(container.querySelector<HTMLInputElement>("#size")!.value).toBe("25");
@@ -107,7 +112,7 @@ test("shows unknown prices honestly and disables trading while the matcher is pe
   await client.deposit(1000);
   await client.openPosition("long", 50, 2);
   const snapshot = client.getSnapshot();
-  const unknown = { ...snapshot, portfolio: { ...snapshot.portfolio,
+  const unknown = { ...snapshot, portfolio: { ...snapshot.portfolio, realizedPnl: NaN,
     legs: snapshot.portfolio.legs.map(leg => ({ ...leg, entryPrice: NaN, unrealizedPnl: NaN })),
     health: { equity: NaN, initialMarginUsed: NaN, maintenanceMargin: NaN, freeCollateral: NaN, ratio: NaN, status: "unknown" as const },
   } };
@@ -116,10 +121,14 @@ test("shows unknown prices honestly and disables trading while the matcher is pe
   try {
     expect(ui.container.textContent).toContain("Trading is off in this build: no matcher is set for COMPUTE-PERP.");
     expect(ui.container.querySelector(".tx-quotes")!.textContent).toContain("No matcher is set for COMPUTE-PERP in this build.");
+    // Unknown values are left out, not shown as dashes; no "unknown" health badge.
     const health = ui.container.querySelector('[aria-labelledby="health-heading"]')!;
-    expect(Array.from(health.querySelectorAll("dd")).map(dd => dd.textContent)).toEqual(["$1,000.00", "—", "—", "—", "—", "—", "unknown"]);
-    expect(health.querySelector(".badge.unknown")).not.toBeNull();
-    expect(Array.from(ui.container.querySelectorAll('[aria-labelledby="position-heading"] tbody td'), td => td.textContent).slice(3, 6)).toEqual(["—", "$0.3036", "—"]);
+    expect(Array.from(health.querySelectorAll("dt, dd")).map(dd => dd.textContent)).toEqual(["Collateral", "$1,000.00"]);
+    expect(ui.container.querySelector(".badge")).toBeNull();
+    const position = ui.container.querySelector('[aria-labelledby="position-heading"]')!;
+    expect(Array.from(position.querySelectorAll("th"), th => th.textContent)).toEqual(["Market", "Side", "Size", "Mark", "Action"]);
+    expect(Array.from(position.querySelectorAll("tbody td"), td => td.textContent).slice(0, 4)).toEqual(["COMPUTE-PERP", "long", "50 × 1M tokens", "$0.3036"]);
+    expect(position.textContent).not.toMatch(/—|Realized/);
     for (const label of ["Open long", "Close position"]) expect(ui.button(label)!.disabled).toBe(true);
   } finally {
     await ui.unmount();
@@ -133,11 +142,14 @@ test("renders infinite health values as unavailable", async () => {
   const unknown = { ...snapshot, portfolio: { ...snapshot.portfolio, collateral: Infinity,
     health: { equity: Infinity, initialMarginUsed: -Infinity, maintenanceMargin: Infinity, freeCollateral: -Infinity, ratio: Infinity, status: "healthy" as const },
   } };
-  client.getSnapshot = () => unknown;
+  await client.connect();
+  const owner = client.getSnapshot().portfolio.owner;
+  const connected = { ...unknown, portfolio: { ...unknown.portfolio, owner } };
+  client.getSnapshot = () => connected;
   const ui = await mount(client);
   try {
     const health = ui.container.querySelector('[aria-labelledby="health-heading"]')!;
-    expect(Array.from(health.querySelectorAll("dd")).map(dd => dd.textContent)).toEqual(["—", "—", "—", "—", "—", "—", "healthy"]);
+    expect(Array.from(health.querySelectorAll("dt, dd")).map(dd => dd.textContent)).toEqual(["Status", "healthy"]);
   } finally {
     await ui.unmount();
     client.dispose();
@@ -174,23 +186,32 @@ test("a malformed benchmark model in market.json does not take the page down", a
 });
 
 test("market bar: each stat only when its source has a value", async () => {
-  // No feed, no indexer, a client without a funding source: only the mark.
-  const devnetLike = Object.assign(new MockMarketClient({ autoTick: false }), { fundingKnown: false });
-  let ui = await mount(devnetLike);
+  // No feed, no indexer: only the mark. Funding has no source anywhere, so it never shows.
+  const bare = new MockMarketClient({ autoTick: false });
+  let ui = await mount(bare);
   try {
     expect(ui.stats()).toEqual([["Mark", "$0.3036"]]);
     expect(ui.container.querySelector("#bottom-tab-funding")).toBeNull();
-    expect(ui.container.textContent).not.toMatch(/per hour/);
-  } finally { await ui.unmount(); devnetLike.dispose(); }
+    expect(ui.container.textContent).not.toMatch(/funding|per hour/i);
+  } finally { await ui.unmount(); bare.dispose(); }
 
-  // Every source: the feed adds the index and 24 h change, the indexer volume and open interest, the client funding.
+  // Every source: the feed adds the index and 24 h change, the indexer 24 h volume, 24 h fills and open interest.
   const client = new MockMarketClient({ autoTick: false });
   ui = await mount(client, { indexer: new MockIndexerClient(), computeFeed: new MockComputeFeedClient() });
   try {
-    expect(ui.stats().map(s => s[0])).toEqual(["Mark", "Index (all sellers)", "24 h change", "Volume (all time)", "Open interest", "Funding / next"]);
-    expect(Object.fromEntries(ui.stats())["Volume (all time)"]).toBe("$18,640.00");
+    expect(ui.stats().map(s => s[0])).toEqual(["Mark", "Index (all sellers)", "Paid now (all sellers)", "24 h change", "24 h volume", "24 h fills", "Open interest"]);
+    expect(Object.fromEntries(ui.stats())["24 h volume"]).toBe("$45.54");
+    expect(Object.fromEntries(ui.stats())["24 h fills"]).toBe("3");
     expect(Object.fromEntries(ui.stats())["Open interest"]).toBe("$157.90 · 250 Mtok");
   } finally { await ui.unmount(); client.dispose(); }
+
+  // An older indexer without the 24 h fields: all-time volume instead, no 24 h fills.
+  const c1 = new MockMarketClient({ autoTick: false });
+  ui = await mount(c1, { indexer: new MockIndexerClient({ legacy: true }) });
+  try {
+    expect(ui.stats().map(s => s[0])).toEqual(["Mark", "Volume (all time)", "Open interest"]);
+    expect(Object.fromEntries(ui.stats())["Volume (all time)"]).toBe("$18,640.00");
+  } finally { await ui.unmount(); c1.dispose(); }
 
   // An indexer serving another market: its numbers are not shown as COMPUTE-PERP's.
   const other = new MockIndexerClient();
@@ -199,7 +220,7 @@ test("market bar: each stat only when its source has a value", async () => {
   const c2 = new MockMarketClient({ autoTick: false });
   ui = await mount(c2, { indexer: other });
   try {
-    expect(ui.stats().map(s => s[0])).toEqual(["Mark", "Funding / next"]);
+    expect(ui.stats().map(s => s[0])).toEqual(["Mark"]);
     await ui.click("Trades");
     expect(ui.container.querySelector("#book-panel-trades")!.textContent).toContain("The indexer reads a different market, not COMPUTE-PERP.");
   } finally { await ui.unmount(); c2.dispose(); vi.restoreAllMocks(); }
@@ -235,8 +256,9 @@ test("tabs switch panels in the book and the bottom panel, with arrow keys", asy
     await ui.click("Trades");
     expect(shown("book")).toEqual(["book-panel-trades"]);
     const trades = Array.from(ui.container.querySelectorAll("#book-panel-trades tbody tr"), tr => Array.from(tr.querySelectorAll("td"), td => td.textContent).slice(1));
-    expect(trades[0]).toEqual(["long", "50", "$0.3036", "7cVf…kxXy"]);
-    expect(trades[1]).toEqual(["short", "150", "$0.3036", "J4DM…22S4"]);
+    // Market-wide executed fills from /trades; a fill with no price shows its size and an empty price.
+    expect(trades).toEqual([["Long", "50", "$0.3036", "7cVf…kxXy"], ["Short", "150", "$0.3036", "J4DM…22S4"], ["Long", "25", "", "9xQe…VFin"]]);
+    expect(ui.container.querySelector<HTMLAnchorElement>("#book-panel-trades tbody td:last-child a")!.href).toBe("https://explorer.solana.com/address/7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy?cluster=devnet");
     expect(shown("bottom")).toEqual(["bottom-panel-positions"]);
     const tab = ui.container.querySelector<HTMLButtonElement>("#bottom-tab-positions")!;
     await act(async () => { tab.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })); });
@@ -244,8 +266,7 @@ test("tabs switch panels in the book and the bottom panel, with arrow keys", asy
     expect(ui.container.querySelector("#bottom-tab-fills")!.getAttribute("aria-selected")).toBe("true");
     await ui.click("Account");
     expect(shown("bottom")).toEqual(["bottom-panel-account"]);
-    await ui.click("Funding");
-    expect(ui.container.querySelector("#bottom-panel-funding")!.textContent).toContain("per hour");
+    expect(Array.from(ui.container.querySelectorAll("#bottom-tab-positions ~ [role=tab], #bottom-tab-positions"), t => t.textContent)).toEqual(["Positions", "Fills", "Account"]);
   } finally { await ui.unmount(); client.dispose(); }
 });
 
@@ -266,4 +287,45 @@ test("mobile tabs pick the section on screen", async () => {
     expect(main.getAttribute("data-mobile")).toBe("positions");
     expect(ui.container.querySelector(".tx-bottom")!.classList.contains("m-positions")).toBe(true);
   } finally { await ui.unmount(); client.dispose(); }
+});
+
+test("the routed price: a market-bar stat and a chart line, both hidden without the feed field; legend toggles lines", async () => {
+  const feed = new MockComputeFeedClient();
+  const market = await feed.market();
+  const bench = market.models.find(m => m.id === "qwen/qwen3.8-27b")!;
+  // 13 index reads over the last 2 h, enough for the index line.
+  const now = Date.now();
+  const withIndex = { ...market, models: market.models.map(m => m === bench ? { ...m, series: Array.from({ length: 13 }, (_, i) => [now - (12 - i) * 600_000, m.median] as [number, number]) } : m) };
+  vi.spyOn(feed, "market").mockResolvedValue(withIndex);
+  const client = new MockMarketClient({ autoTick: false });
+  let ui = await mount(client, { computeFeed: feed });
+  try {
+    expect(Object.fromEntries(ui.stats())["Paid now (all sellers)"]).toBe("$" + bench.routed!.price.toFixed(4));
+    const legend = () => Array.from(ui.container.querySelectorAll(".tx-legend button"), b => [b.textContent, b.getAttribute("aria-pressed")]);
+    // Default on: Mark and Paid now; the list-price index is off until clicked.
+    expect(legend()).toEqual([["Mark", "true"], ["Paid now (all sellers)", "true"], ["Index (all sellers)", "false"]]);
+    expect(ui.container.querySelector(".tx-routed-line")).not.toBeNull();
+    expect(ui.container.querySelector(".tx-index-line")).toBeNull();
+    await ui.click("Index (all sellers)");
+    expect(ui.container.querySelector(".tx-index-line")).not.toBeNull();
+    await ui.click("Paid now (all sellers)");
+    expect(ui.container.querySelector(".tx-routed-line")).toBeNull();
+    expect(legend()[1]).toEqual(["Paid now (all sellers)", "false"]);
+    await ui.click("Mark");
+    expect(ui.container.querySelector(".tx-mark-line")).toBeNull();
+    await ui.click("Index (all sellers)");
+    expect(ui.container.querySelector(".tx-chart-frame")!.textContent).toContain("Every line is off. Turn one on in the legend.");
+  } finally { await ui.unmount(); client.dispose(); }
+
+  // Absent: no stat, no line, no legend entry.
+  const f2 = new MockComputeFeedClient();
+  vi.restoreAllMocks();
+  vi.spyOn(f2, "market").mockResolvedValue({ ...market, routed: undefined, models: market.models.map(m => ({ ...m, routed: undefined })) });
+  const c2 = new MockMarketClient({ autoTick: false });
+  ui = await mount(c2, { computeFeed: f2 });
+  try {
+    expect(ui.stats().map(s => s[0])).not.toContain("Paid now (all sellers)");
+    expect(ui.container.querySelector(".tx-routed-line")).toBeNull();
+    expect(Array.from(ui.container.querySelectorAll(".tx-legend button"), b => b.textContent)).toEqual(["Mark"]);
+  } finally { await ui.unmount(); c2.dispose(); vi.restoreAllMocks(); }
 });

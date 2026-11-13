@@ -7,7 +7,7 @@ import type { ComputeFeedClient, ComputeMarket } from "./client";
 import { MockComputeFeedClient } from "./mock";
 import { marketFixture } from "./fixture";
 import { logScale, typicalPrice, upPriced } from "./charts";
-import { day, usd } from "./format";
+import { day, usd, usdSmall } from "./format";
 import { site } from "../site/config";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -43,7 +43,7 @@ test("renders the index, its scale and every section from the fixture", async ()
   expect(container.querySelector(".cx-label")?.textContent).toBe("Median price to run an open model");
   expect(container.querySelector(".cx-price")?.textContent).toBe(`${usd(typical.median)}per 1M tokens`);
   expect(container.querySelector(".cx-range")?.textContent).toBe(`Cheapest model ${typical.cheapest.name} ${usd(typical.cheapest.median)} · dearest ${typical.dearest.name} ${usd(typical.dearest.median)}`);
-  expect(container.querySelector(".cx-proof")?.textContent).toBe(`Across ${typical.models} models with 3 or more sellers: ${typical.quotes} quotes from ${typical.providers} providers. Input and output tokens mixed 15:1.`);
+  expect(container.querySelector(".cx-proof")?.textContent).toBe(`${market.index.n_quotes_up} quotes up from ${market.index.n_providers} providers. Median of the ${typical.models} models with 3 or more sellers. Input and output tokens mixed 15:1.`);
   expect(typical.quotes).toBe(market.models.filter(m => !m.thin).reduce((n, m) => n + upPriced(m).length, 0));
   expect(container.querySelector(".cx-indexstat")?.textContent).toBe(`Index ${market.index.level!.toFixed(2)} · 100 = ${day(market.index.base_ms!)}`);
   expect(container.querySelector(".cx-spread-line")?.textContent).toBe("The same model costs up to 21\u00d7 more depending on the seller.");
@@ -170,10 +170,10 @@ test("the perp and FLOP panels show the settlement price, its sellers and FLOP's
   expect(perp.querySelector('.panel-actions a[href="/trade"]')?.textContent?.trim()).toBe("Trade COMPUTE-PERP");
   expect(perp.querySelector(".perp-hist figcaption")?.textContent).toBe("7 d · low $0.3036 · high $0.3112");
   const flop = container.querySelector('[aria-labelledby="compute-flop-heading"]')!;
-  expect(flop.querySelector(".perp-price strong")?.textContent).toBe("0.00291");
+  expect(Array.from(flop.querySelectorAll(".flop-parity .flop-facts dd"), v => v.textContent)).toEqual([usd(marketFixture().flop!.parity!.market_usd_per_bn_gn), "0.00291"]);
   expect(flop.querySelector(".flop-window")?.textContent).toBe("Last 6 hours");
-  expect(Array.from(flop.querySelectorAll(".flop-facts dt")).map(v => v.textContent)).toEqual(["Buyer accounts", "Miners", "Jobs settled", "Gateway share of compute"]);
-  expect(Array.from(flop.querySelectorAll(".flop-facts dd")).map(v => v.textContent)).toEqual(["3", "34", "185", "50%"]);
+  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dt")).map(v => v.textContent)).toEqual(["Buyer accounts", "Miners", "Jobs settled", "Gateway share of compute"]);
+  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dd")).map(v => v.textContent)).toEqual(["3", "34", "185", "50%"]);
   expect(flop.textContent).toContain("FLOP's gateway buys on behalf of all its customers, so it counts as one buyer.");
   expect(flop.textContent).toContain("The perp settles on seller prices, not on this rate.");
 });
@@ -278,10 +278,7 @@ test("no models: a plain empty state, not a hung tab", async () => {
 
 test("held quotes are counted and said", async () => {
   const container = await render(liveFeed(Date.now(), m => ({ ...m, models: m.models.map((x, i) => i === 0 ? { ...x, quotes_held: 2 } : x) })));
-  const market = marketFixture();
-  const live = market.models.filter(m => !m.thin).reduce((n, m) => n + upPriced(m).length, 0);
-  expect(container.querySelector(".cx-proof")?.textContent).toContain(`: ${live + 2} quotes from`);
-  expect(container.querySelector(".cx-proof")?.textContent).toContain("2 of them held at their last price while the seller is offline");
+  expect(container.querySelector(".cx-proof")?.textContent).toContain("counting 2 quotes held at their last price while the seller is offline");
 });
 
 test("latest.json from the future or a stopped feed is stale", async () => {
@@ -338,12 +335,14 @@ test("docs explain how the index is made, with live values from the feed", async
   const container = await renderDocs(liveFeed());
   const how = container.querySelector("#compute-index")!;
   expect(how.querySelector("h2")?.textContent).toBe("How the compute index is made");
-  expect(Array.from(how.querySelectorAll("dt")).map(d => d.textContent)).toEqual(["01Quote", "02Price", "03Up", "04Model price", "05Reads", "06Index", "07Stale", "08Settlement price", "09Check it"]);
+  expect(Array.from(how.querySelectorAll("dt")).map(d => d.textContent)).toEqual(["01Quote", "02Price", "03Up", "04Model price", "05Reads", "06Index", "07Routed price", "08Stale", "09Settlement price", "10Check it"]);
   expect(how.textContent).toContain("every model every 5 minutes");
   expect(how.textContent).toContain("listed and up");
   expect(how.textContent).toContain(`Geometric mean of the ${marketFixture().index.n_models} model medians`);
   expect(how.textContent).toContain("Clamp now: off (n<3).");
-  expect(how.textContent).toContain("Each settlement price is written to Solana (latest transaction) and logged as a signed line");
+  expect(how.textContent).toContain("Each settlement price is written to Solana (latest transaction).");
+  expect(how.textContent).not.toContain("signed line");
+  expect(how.textContent).toContain("cheaper sellers get more (1 ÷ price²), weighted by each seller's recent uptime, with no seller above half the weight");
   expect(how.textContent).not.toMatch(/verify-push-log|stand-in/);
   expect(how.textContent).toContain("Independent of Flop Labs and OpenRouter.");
 });
@@ -396,14 +395,14 @@ test("mix switch: hidden without per-mix data, then moves the headline, the medi
 test("$ per bn G_n column: formula, nulls as dashes, cheapest first when sorted", async () => {
   let container = await render(liveFeed());
   expect(container.querySelector(".c-gn")).toBeNull();
-  expect(Array.from(container.querySelectorAll("#board .cx-sort button")).map(b => b.textContent)).not.toContain("$ per bn G_n");
+  expect(Array.from(container.querySelectorAll("#board .cx-sort button")).map(b => b.textContent)).not.toContain("Per unit of compute");
   await cleanup?.();
   container = await render(liveFeed(Date.now(), m => ({
     ...m, compute_price: { median_usd_per_bn_gn: 0.0021, p25: 0.0012, p75: 0.0045, n_models: 19 },
     models: m.models.map((x, i) => ({ ...x, usd_per_bn_gn: i === 0 ? null : 0.001 * (i + 1), compute: i === 1 ? { params: 27e9, gn_per_token: 54, source: "2 × parameters" } : i === 2 ? { params: 30e9, gn_per_token: 6.6, source: "2x_active_params_est", basis: "2x_active_params_est" } : null })),
   })));
   const head = container.querySelector(".board-cols .c-gn")!;
-  expect(head.textContent).toBe("$ / bn G_n");
+  expect(head.textContent).toBe("Per unit of compute$ per bn G_n (FLOP's unit)");
   expect(head.getAttribute("title")).toContain("Price per 1M tokens ÷ compute per token");
   expect(head.getAttribute("title")).toContain("FLOP's registry value where it lists the model, otherwise 2 × active parameters, taken from the model id or estimated from its expert counts (marked est.); — when unknown.");
   expect(container.querySelector(".cx-gn-note")?.textContent).toContain("Across 19 models the median is $0.0021, middle half $0.0012 to $0.0045");
@@ -416,25 +415,135 @@ test("$ per bn G_n column: formula, nulls as dashes, cheapest first when sorted"
   expect(rows[2].querySelector(".c-gn b + .gn-est")?.textContent).toBe(" est.");
   await click(rows[1].querySelector(".board-head")!);
   expect(rows[1].querySelector(".panel-meta")?.textContent).toContain("54 G_n per token (2 × parameters)");
-  await click(Array.from(container.querySelectorAll("#board .cx-sort button")).find(b => b.textContent === "$ per bn G_n")!);
+  await click(Array.from(container.querySelectorAll("#board .cx-sort button")).find(b => b.textContent === "Per unit of compute")!);
   const sorted = Array.from(container.querySelectorAll(".board-row .c-gn b"), b => b.textContent);
   expect(sorted[0]).toBe("$0.002");
   expect(sorted[sorted.length - 1]).toBe("—");
 });
 
-test("FLOP panel: implied FLOP price, labelled derived, only when the feed has it", async () => {
-  let container = await render(liveFeed());
-  expect(container.querySelector(".flop-implied")).toBeNull();
+const stripRouted = (m: ComputeMarket): ComputeMarket => {
+  const { routed: _r, ...rest } = m;
+  return { ...rest, models: m.models.map(({ routed: _x, routed_usd_per_bn_gn: _y, ...x }) => x), flop: m.flop ? { ...m.flop, implied_flop_usd_routed: undefined, parity: undefined } : m.flop };
+};
+const panel = (container: HTMLElement, id: string) => container.querySelector(`[aria-labelledby="${id}"]`)!;
+
+test("hero: three labelled numbers for the benchmark model, each hidden when absent", async () => {
+  const now = Date.now(), market = marketFixture(now);
+  const bench = market.models.find(m => m.id === "qwen/qwen3.8-27b")!;
+  let container = await render(liveFeed(now));
+  const block = container.querySelector(".cx-bench")!;
+  expect(block.querySelector(".cx-k")?.textContent).toBe("Qwen3.8-27B · per 1M tokens");
+  expect(Array.from(block.querySelectorAll("dt"), d => d.textContent)).toEqual(["What a request pays now", "Median list price", "Perp mark"]);
+  const dds = Array.from(block.querySelectorAll("dd"), d => d.querySelector("strong")?.textContent);
+  expect(dds).toEqual([usd(bench.routed!.price), usd(bench.median), "$0.3036"]);
+  expect(block.querySelector(".is-main dd")?.textContent).toContain("1 h ");
+  expect(block.querySelector(".is-main svg.spark")).not.toBeNull();
+  expect(block.textContent).toContain("List prices are what sellers post. The routed price is what you pay when your request goes to the sellers that are up, mostly the cheapest.");
+  // The headline above it stays the cross-model median, under its own label.
+  expect(container.querySelector(".cx-label")?.textContent).toBe("Median price to run an open model");
   await cleanup?.();
-  const basis = marketFixture().models.find(m => m.name === "Qwen3.8-27B")!;
-  container = await render(liveFeed(Date.now(), m => ({ ...m, flop: { gn_price_flop: 0.0029, implied_flop_usd: 0.0123, basis_model: basis.id } })));
-  const implied = container.querySelector(".flop-implied")!;
+  container = await render(liveFeed(now, stripRouted));
+  expect(Array.from(container.querySelectorAll(".cx-bench dt"), d => d.textContent)).toEqual(["Median list price", "Perp mark"]);
+  expect(container.querySelector(".cx-bench .spark")).toBeNull();
+  await cleanup?.();
+  container = await render(liveFeed(now, m => ({ ...stripRouted(m), models: [] })));
+  expect(container.querySelector(".cx-bench dt")?.textContent).toBe("Perp mark");
+  await cleanup?.();
+  const feed = liveFeed(now, m => m);
+  vi.spyOn(feed, "latest").mockRejectedValue(new Error("down"));
+  container = await render(feed);
+  expect(Array.from(container.querySelectorAll(".cx-bench dt"), d => d.textContent)).toEqual(["What a request pays now", "Median list price"]);
+  // A null 1 h change is not shown.
+  await cleanup?.();
+  container = await render(liveFeed(now, m => ({ ...m, models: m.models.map(x => x.routed ? { ...x, routed: { ...x.routed, change_1h_pct: null } } : x) })));
+  expect(container.querySelector(".cx-bench .cx-bench-chg")).toBeNull();
+});
+
+test("board: Paid now column, sortable, with where the money goes and a capped mark", async () => {
+  const now = Date.now(), market = marketFixture(now);
+  const container = await render(liveFeed(now, m => ({ ...m, models: m.models.map((x, i) => i === 1 && x.routed ? { ...x, routed: { ...x.routed, capped: true } } : x) })));
+  expect(container.querySelector(".board-cols .c-paid")?.textContent).toBe("Paid now");
+  const rows = Array.from(container.querySelectorAll(".board-row"));
+  const glm = rows.find(r => r.querySelector(".m-name")?.textContent === "GLM 5.3")!;
+  expect(glm.querySelector(".c-paid")?.textContent).toBe(`paid now ${usd(market.models[0].routed!.price)}`);
+  expect(glm.querySelector(".paid-cap")).toBeNull();
+  const capped = rows.find(r => r.querySelector(".m-name")?.textContent === "DeepSeek V4")!;
+  expect(capped.querySelector(".paid-cap")?.textContent).toBe("capped");
+  expect(capped.querySelector(".paid-cap")?.getAttribute("title")).toBe("No seller counts for more than half.");
+  await click(glm.querySelector(".board-head")!);
+  const top = glm.querySelector(".paid-top")!;
+  expect(top.querySelector("h3")?.textContent).toBe("Where the money goes");
+  const first = market.models[0].routed!.top[0];
+  const cells = Array.from(top.querySelectorAll("tbody tr")[0].children, c => c.textContent);
+  expect(cells[0]).toContain(first.provider);
+  expect(cells.slice(2)).toEqual([usd(first.price), `${(first.share * 100).toFixed(first.share < 0.1 ? 1 : 0)}%`]);
+  expect(top.querySelectorAll("tbody tr")).toHaveLength(market.models[0].routed!.top.length);
+  await click(Array.from(container.querySelectorAll("#board .cx-sort button")).find(b => b.textContent === "Paid now")!);
+  const paid = Array.from(container.querySelectorAll(".board-row .c-paid"), el => Number(el.textContent!.replace(/[^\d.]/g, "")));
+  expect(paid).toEqual([...paid].sort((a, b) => b - a));
+});
+
+test("board: no routed prices, no Paid now column or sort", async () => {
+  const container = await render(liveFeed(Date.now(), stripRouted));
+  expect(container.querySelector(".c-paid")).toBeNull();
+  expect(Array.from(container.querySelectorAll("#board .cx-sort button"), b => b.textContent)).not.toContain("Paid now");
+  expect(container.querySelector(".board.has-paid")).toBeNull();
+  await click(container.querySelector(".board-head")!);
+  expect(container.querySelector(".paid-top")).toBeNull();
+});
+
+test("FLOP parity: headline is the routed implied price, list price beside it, arithmetic from the feed", async () => {
+  const now = Date.now(), market = marketFixture(now);
+  const container = await render(liveFeed(now));
+  const flop = panel(container, "compute-flop-heading");
+  const p = market.flop!.parity!;
+  expect(flop.querySelector("h2")?.textContent).toBe("FLOP parity");
+  expect(flop.querySelector(".flop-parity .perp-price strong")?.textContent).toBe(usdSmall(p.implied_flop_usd_routed));
+  expect(flop.querySelector(".flop-parity .perp-price span")?.textContent).toBe("per FLOP, from what requests pay");
+  expect(flop.querySelector(".flop-list")?.textContent).toBe(`${usdSmall(p.implied_flop_usd)} per FLOP, from list prices`);
+  expect(flop.querySelector(".flop-parity .perp-why")?.textContent).toBe("The FLOP price at which FLOP's rate equals what the open market pays for the same compute.");
+  const facts = Array.from(flop.querySelectorAll(".flop-parity .flop-facts > div"), d => [d.querySelector("dt")?.textContent, d.querySelector("dd")?.textContent]);
+  expect(facts).toEqual([["Market price of compute", usdSmall(p.market_usd_per_bn_gn)], ["FLOP's rate", "0.00291"]]);
+  // implied FLOP price = USD per bn G_n / 1e9 / FLOP per G_n.
+  expect(p.implied_flop_usd_routed!).toBeCloseTo(p.market_usd_per_bn_gn! / 1e9 / p.flop_rate_flop_per_gn!, 6);
+  expect(flop.querySelector(".flop-window")?.textContent).toBe("Last 6 hours");
+});
+
+test("FLOP panel without parity falls back to the implied price; without flop it is hidden", async () => {
+  const now = Date.now();
+  const basis = marketFixture(now).models.find(m => m.name === "Qwen3.8-27B")!;
+  let container = await render(liveFeed(now, m => ({ ...m, flop: { gn_price_flop: 0.0029, implied_flop_usd: 0.0123, basis_model: basis.id } })));
+  let flop = panel(container, "compute-flop-heading");
+  expect(flop.querySelector(".flop-parity")).toBeNull();
+  const implied = flop.querySelector(".flop-implied")!;
   expect(implied.querySelector(".cx-k")?.textContent).toBe("Implied FLOP price · derived");
   expect(implied.querySelector("strong")?.textContent).toBe("$0.0123");
   expect(implied.querySelector(".perp-why")?.textContent).toBe("The FLOP price at which FLOP's rate equals what the open market pays for the same compute on Qwen3.8-27B.");
   await cleanup?.();
-  container = await render(liveFeed(Date.now(), m => ({ ...m, flop: { gn_price_flop: null, implied_flop_usd: null, basis_model: null } })));
-  expect(container.querySelector(".flop-implied")).toBeNull();
+  container = await render(liveFeed(now, m => ({ ...m, flop: { gn_price_flop: null, implied_flop_usd: null, basis_model: null } })));
+  flop = panel(container, "compute-flop-heading");
+  expect(flop.querySelector(".flop-implied")).toBeNull();
+  expect(flop.querySelector(".flop-parity")).toBeNull();
+  await cleanup?.();
+  container = await render(liveFeed(now, stripRouted));
+  flop = panel(container, "compute-flop-heading");
+  expect(flop.querySelector(".flop-parity")).toBeNull();
+  expect(flop.querySelector(".flop-implied strong")?.textContent).toBe(usdSmall(marketFixture(now).flop!.implied_flop_usd));
+});
+
+test("the perp panel names its weighting and counts the sellers it lists", async () => {
+  const container = await render(liveFeed());
+  const perp = panel(container, "compute-perp-heading");
+  expect(perp.querySelector(".perp-why")?.textContent).toContain("Cheaper sellers weigh more (1 ÷ price²).");
+  expect(perp.textContent).toContain("2 of 2 full-precision sellers up");
+  expect(perp.querySelectorAll(".perp-sellers li")).toHaveLength(2);
+});
+
+test("one quote count on /compute: quotes up from the index", async () => {
+  const market = marketFixture();
+  const container = await render(liveFeed());
+  expect(container.querySelector(".cx-proof b")?.textContent).toBe(String(market.index.n_quotes_up));
+  expect(container.querySelector(".cx-proof")?.textContent).toMatch(/^\d+ quotes up from/);
 });
 
 test("the FLOP window label reads the feed's window, else six hours", () => {

@@ -56,15 +56,22 @@ test("flag on with every value: nav, footer, the full page and the rules in Docs
   Object.assign(site.challenge, FULL);
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-12-08T12:00:00Z"));
   const container = await render("/challenge");
-  expect(Array.from(container.querySelectorAll(".nav-links a"), a => a.textContent)).toEqual(["Index", "Trade", "Arena", "Challenge", "Agents", "Docs"]);
+  expect(Array.from(container.querySelectorAll(".nav-links a"), a => a.textContent)).toEqual(["Index", "Arena", "Challenge", "Agents", "Docs"]);
   expect(container.querySelector('footer a[href="/challenge"]')?.textContent).toBe("Challenge");
-  expect(document.title).toBe("Compute Price Challenge · Drip");
-  expect(container.querySelector("h1")?.textContent).toBe("Design the price of AI compute.");
-  expect(container.querySelector(".ch-pitch")?.textContent).toBe("Write the rule that turns every seller's quote into one price. The best rule sets the price COMPUTE-PERP settles on.");
-  expect(Array.from(container.querySelectorAll("main h2"), h => h.textContent)).toEqual(["The problem", "What you submit", "How it is scored", "What you win", "Agents and swarms welcome", "Leaderboard"]);
+  expect(document.title).toBe("Compute Oracle Challenge · Drip");
+  expect(container.querySelector("h1")?.textContent).toBe("Build the compute price oracle.");
+  expect(Array.from(container.querySelectorAll("main h2"), h => h.textContent)).toEqual(["Why an oracle", "What you submit", "How it is scored", "What you win", "Agents and swarms welcome", "Leaderboard"]);
   // Live numbers from market.json: the benchmark model's sellers up and its spread.
   const bench = (await new MockComputeFeedClient().market()).models.find(m => m.id === "qwen/qwen3.8-27b")!;
-  expect(container.querySelector(".ch-lines li")?.textContent).toMatch(new RegExp(`^Qwen3.8-27B is sold by ${bench.sellers_up} sellers right now, at prices up to [\\d.]+× apart\\.$`));
+  expect(container.querySelector(".ch-pitch")?.textContent).toMatch(new RegExp(`^${bench.sellers_up} sellers list the same AI model at prices up to [\\d.]+× apart\\. Your code turns their quotes into one price\\.$`));
+  expect(container.querySelector(".ch-score-line")?.textContent).toBe("Follow real price changes, ignore fake ones. Tested on next week's market and attacked with fake listings.");
+  expect(container.querySelector('[aria-labelledby="ch-win"] p')?.textContent).toBe("The best oracle runs the live market, with your name on it.");
+  expect(Array.from(container.querySelectorAll('[aria-labelledby="ch-why"] li'), l => l.textContent)).toEqual([
+    "On-chain markets settle on whatever their oracle reports.",
+    "An oracle that can be faked or that lags gets traders liquidated.",
+    "Nobody has built a tested one for the price of AI compute.",
+  ]);
+  expect(container.querySelector("main")?.textContent).not.toMatch(/Price Challenge|settlement rule|sets the settlement price|!/);
   expect(Array.from(container.querySelectorAll(".ch-dates dt"), d => d.textContent)).toEqual(["Opens", "First close", "Next close in"]);
   expect(container.querySelector(".ch-next dd")?.textContent).toBe("4d 12:00:00");
   expect(container.querySelector(".ch-prizes")?.textContent).toBe("Prizes: 1,000 USDC to the top three");
@@ -84,14 +91,15 @@ test("flag on with every value: nav, footer, the full page and the rules in Docs
   expect(Array.from(round.querySelectorAll("tr.is-ref .ch-handle"), h => h.textContent)).toEqual(["median of all sellers", "live rule"]);
   await cleanup?.(); cleanup = undefined;
   const docs = await render("/docs");
-  expect(docs.querySelector("#challenge h2")?.textContent).toBe("Compute Price Challenge rules");
+  expect(docs.querySelector("#challenge h2")?.textContent).toBe("Compute Oracle Challenge rules");
+  expect(docs.querySelector("#challenge p")?.textContent).toBe("An oracle is the code that reports a price to a market; this one reports the price COMPUTE-PERP settles on.");
   expect(docs.querySelector("#challenge")?.textContent).toContain("Prizes: 1,000 USDC to the top three.");
 });
 
 test("flag on with partial config renders only the configured blocks", async () => {
   Object.assign(site.challenge, { enabled: true });
   const container = await render("/challenge");
-  expect(container.querySelector("h1")?.textContent).toBe("Design the price of AI compute.");
+  expect(container.querySelector("h1")?.textContent).toBe("Build the compute price oracle.");
   expect(container.querySelector(".ch-dates")).toBeNull();
   expect(container.querySelector(".ch-prizes")).toBeNull();
   expect(container.querySelector("#ch-board")).toBeNull();
@@ -110,7 +118,7 @@ test("the swarm paths redirect to the challenge when it is on", async () => {
   for (const path of ["/swarm", "/swarm-markets"]) {
     const container = await render(path);
     expect(window.location.pathname).toBe("/challenge");
-    expect(container.querySelector("h1")?.textContent).toBe("Design the price of AI compute.");
+    expect(container.querySelector("h1")?.textContent).toBe("Build the compute price oracle.");
     await cleanup?.(); cleanup = undefined;
   }
 });
@@ -132,7 +140,7 @@ test("board: a malformed entry shows the unreachable note, not a blank page", as
     { ...MOCK_BOARD, season: { entries: [{ ...MOCK_BOARD.entries[0], terms: { ...MOCK_BOARD.entries[0].terms, jump: "x" } }] } },
   ]) {
     const container = await render("/challenge", async () => bad as never);
-    expect(container.querySelector("h1")?.textContent).toBe("Design the price of AI compute.");
+    expect(container.querySelector("h1")?.textContent).toBe("Build the compute price oracle.");
     expect(container.querySelector('[aria-labelledby="ch-board"] [role="status"]')?.textContent).toBe("The board is unreachable right now (board.json: unexpected shape). Try again in a minute.");
     expect(container.querySelector(".ch-board")).toBeNull();
     await cleanup?.(); cleanup = undefined;

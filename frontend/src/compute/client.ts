@@ -51,6 +51,31 @@ export type MixKey = "chat_3_1" | "avg_15_1" | "agent_150_1";
 export type Mixes = Partial<Record<MixKey, number | null>>;
 
 export interface MarketQuote { provider: string; quantization: string; price: number | null; up: boolean; uptime_24h_pct: number | null }
+/**
+ * What a request pays right now when it is spread across the sellers that are up, the way OpenRouter's default routing
+ * spreads traffic: cheaper sellers get more (1 / price squared), weighted by recent uptime, no seller above half.
+ */
+export interface Routed {
+  price: number;
+  sellers: number;
+  /** Where the money goes: the largest shares, share as a fraction of 1. */
+  top: { provider: string; quantization: string; price: number; share: number }[];
+  change_1h_pct: number | null;
+  change_24h_pct: number | null;
+  series: Point[];
+  /** True when uptime was missing and equal weights were used instead. */
+  uptime_fallback?: boolean;
+  /** True when one seller hit the half-weight cap. */
+  capped?: boolean;
+}
+export interface FlopParity {
+  market_usd_per_bn_gn: number | null;
+  flop_rate_flop_per_gn: number | null;
+  implied_flop_usd: number | null;
+  implied_flop_usd_routed: number | null;
+  as_of_ms: number | null;
+}
+
 export interface MarketModel {
   id: string;
   name: string;
@@ -84,6 +109,9 @@ export interface MarketModel {
   change_24h_pct: number | null;
   series: Point[];
   quotes: MarketQuote[];
+  /** Optional (newer feeds): the routed price and its USD per billion G_n. */
+  routed?: Routed | null;
+  routed_usd_per_bn_gn?: number | null;
 }
 export interface MarketProvider { name: string; models: number; quotes: number; uptime_24h_pct: number | null; cheapest_in: number }
 export interface MarketChange { at_ms: number; model: string; provider: string; quantization: string; from: number; to: number }
@@ -114,7 +142,9 @@ export interface ComputeMarket {
   mixes?: Mixes | null;
   out_in_ratio_median?: number | null;
   /** FLOP's on-chain rate set against the open market for the same compute. */
-  flop?: { gn_price_flop: number | null; implied_flop_usd: number | null; basis_model: string | null } | null;
+  flop?: { gn_price_flop: number | null; implied_flop_usd: number | null; basis_model: string | null; implied_flop_usd_routed?: number | null; parity?: FlopParity | null } | null;
+  /** Optional (newer feeds): the benchmark model's routed price. */
+  routed?: { benchmark: string; price: number | null; usd_per_bn_gn: number | null; series: Point[] } | null;
   providers: MarketProvider[];
   changes: MarketChange[];
   dynamic: MarketDynamic[];

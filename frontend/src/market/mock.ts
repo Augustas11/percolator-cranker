@@ -5,10 +5,10 @@ const EPS = 1e-9;
 // Wallets that trade against the local market client.
 const TRADERS = ["7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy", "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", "3Kq7m1dYpJ9cZr8bW4XfTnS2vHgE6uLkQaN5oPzR1tMs"];
 
-interface MockOptions { tickMs?: number; seed?: number; startPrice?: number; autoTick?: boolean }
+interface MockOptions { tickMs?: number; seed?: number; startPrice?: number; autoTick?: boolean; sol?: number; usdc?: number | null }
 
 function positive(value: number, name: string) {
-  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be positive and finite`);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`Enter ${name} above zero.`);
 }
 
 // Small deterministic mulberry32 generator.
@@ -30,14 +30,17 @@ function freeze<T extends object>(value: T): T {
 }
 
 export class MockMarketClient implements MarketClient {
-  readonly fundingKnown = true;
   private snapshot: MarketSnapshot;
   private listeners = new Set<(s: MarketSnapshot) => void>();
   private timer?: ReturnType<typeof setInterval>;
   private random: () => number;
   private fillId = 0;
 
-  constructor({ tickMs = 1000, seed = 1, startPrice = 0.3036, autoTick = true }: MockOptions = {}) {
+  /** The mock wallet's own balances: SOL, and test USDC (null = no token account yet). */
+  private wallet: { sol: number; usdc: number | null };
+
+  constructor({ tickMs = 1000, seed = 1, startPrice = 0.3036, autoTick = true, sol = 1, usdc = 10_000 }: MockOptions = {}) {
+    this.wallet = { sol, usdc };
     positive(tickMs, "tickMs");
     positive(startPrice, "startPrice");
     if (!Number.isFinite(seed)) throw new Error("seed must be finite");
@@ -65,7 +68,7 @@ export class MockMarketClient implements MarketClient {
   };
 
   private connected() {
-    if (!this.snapshot.portfolio.owner) throw new Error("connect wallet first");
+    if (!this.snapshot.portfolio.owner) throw new Error("Connect a wallet first.");
   }
 
   private publish(next: MarketSnapshot) {
@@ -119,23 +122,27 @@ export class MockMarketClient implements MarketClient {
 
   async deposit(amount: number) {
     this.connected();
-    positive(amount, "amount");
+    positive(amount, "an amount");
+    if (!this.wallet.usdc) throw new Error("You have no test USDC yet: get some from the faucet.");
+    if (amount > this.wallet.usdc) throw new Error(`You have ${this.wallet.usdc.toLocaleString("en-US", { maximumFractionDigits: 6 })} test USDC: deposit that much or less.`);
+    this.wallet.usdc -= amount;
     const s = this.snapshot;
     this.publish({ ...s, portfolio: { ...s.portfolio, collateral: s.portfolio.collateral + amount } });
   }
 
   async withdraw(amount: number) {
     this.connected();
-    positive(amount, "amount");
+    positive(amount, "an amount");
     const s = this.snapshot;
     // EPS absorbs float residue so "withdraw everything" works after decimal deposits.
     if (amount > s.portfolio.health.freeCollateral + EPS || amount > s.portfolio.collateral + EPS) throw new Error("insufficient free collateral");
+    this.wallet.usdc = (this.wallet.usdc ?? 0) + amount;
     this.publish({ ...s, portfolio: { ...s.portfolio, collateral: Math.max(0, s.portfolio.collateral - amount) } });
   }
 
   async openPosition(side: Side, size: number, leverage: number) {
     this.connected();
-    positive(size, "size");
+    positive(size, "a size");
     if (side !== "long" && side !== "short") throw new Error("invalid side");
     const s = this.snapshot;
     if (!Number.isFinite(leverage) || leverage < 1 || leverage > s.market.maxLeverage) throw new Error(`leverage must be between 1 and ${s.market.maxLeverage}`);
@@ -157,6 +164,20 @@ export class MockMarketClient implements MarketClient {
       fills: [this.fill(side, size, true), ...s.fills],
     });
   }
+
+  async walletBalances() {
+    this.connected();
+    return { ...this.wallet };
+  }
+
+  async createTokenAccount() {
+    this.connected();
+    if (this.wallet.sol <= 0) throw new Error("The wallet needs a little SOL to pay the fee.");
+    this.wallet.usdc ??= 0;
+  }
+
+  /** Mock mode only: what the faucet's claim does to the wallet. */
+  credit(usdc: number) { this.wallet.usdc = (this.wallet.usdc ?? 0) + usdc; }
 
   async closePosition() {
     this.connected();

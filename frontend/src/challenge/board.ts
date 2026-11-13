@@ -1,4 +1,4 @@
-// The Compute Price Challenge board: GET ${apiBase}/board.json.
+// The Compute Oracle Challenge board: GET ${apiBase}/board.json.
 
 export type TermKey = "jump" | "spoof" | "promo" | "down" | "relist" | "follow" | "reference";
 export const TERMS: TermKey[] = ["jump", "spoof", "promo", "down", "relist", "follow", "reference"];

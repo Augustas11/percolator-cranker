@@ -4,7 +4,7 @@ import { PERP } from "./types";
 import type { Fill, MarketClient, MarketSnapshot, Side } from "./types";
 import type { DevnetConfig } from "../chain/config";
 import { effectiveAbsQ, parseMarket, parsePortfolio } from "../chain/accounts";
-import { createAtaIdempotentIx } from "../chain/pda";
+import { ata, createAtaIdempotentIx } from "../chain/pda";
 import { buildClose, buildCreatePortfolio, buildDeposit, buildTrade, buildWithdraw, findPortfolio } from "../chain/tx";
 import { getWallet } from "../chain/wallet";
 import { liquidityFrom, parseMatcher } from "../chain/matcher";
@@ -13,7 +13,7 @@ import type { Wallet } from "../chain/wallet";
 function atoms(value: number, name: string) {
   const rounded = Math.round(value * 1e6);
   if (!Number.isFinite(value) || value <= 0 || !Number.isSafeInteger(rounded) || rounded <= 0) {
-    throw new Error(`${name} must be positive and representable in millionths`);
+    throw new Error(`Enter ${name} above zero, with at most 6 decimals.`);
   }
   return BigInt(rounded);
 }
@@ -21,7 +21,6 @@ function atoms(value: number, name: string) {
 export class DevnetMarketClient implements MarketClient {
   readonly tradingReady: boolean;
   /** The engine's funding is not read; the snapshot's funding fields are placeholders. */
-  readonly fundingKnown = false;
   private matcherReadAt = 0;
   private conn: Connection;
   private wallet?: Wallet;
@@ -57,9 +56,9 @@ export class DevnetMarketClient implements MarketClient {
     if (!this.cfg.matcherContext || Date.now() - this.matcherReadAt < 10_000) return;
     this.matcherReadAt = Date.now();
     try {
-      const account = await this.conn.getAccountInfo(this.cfg.matcherContext);
+      const [account, slot] = await Promise.all([this.conn.getAccountInfo(this.cfg.matcherContext), this.conn.getSlot("confirmed").catch(() => undefined)]);
       if (!account || this.disposed) return;
-      this.snapshot = { ...this.snapshot, liquidity: liquidityFrom(parseMatcher(account.data)) };
+      this.snapshot = { ...this.snapshot, liquidity: liquidityFrom(parseMatcher(account.data), slot) };
       for (const listener of this.listeners) listener(this.snapshot);
     } catch { /* keep the last read; the Quotes panel says when it has none */ }
   }
@@ -120,12 +119,12 @@ export class DevnetMarketClient implements MarketClient {
   }
 
   private connected() {
-    if (!this.wallet) throw new Error("connect wallet first");
+    if (!this.wallet) throw new Error("Connect a wallet first.");
     return this.wallet;
   }
 
   private requirePortfolio() {
-    if (!this.portfolio) throw new Error("deposit collateral first");
+    if (!this.portfolio) throw new Error("Deposit test USDC first.");
     return this.portfolio;
   }
 
@@ -159,9 +158,27 @@ export class DevnetMarketClient implements MarketClient {
     return signature;
   }
 
+  async walletBalances() {
+    const wallet = this.connected();
+    const [lamports, token] = await Promise.all([
+      this.conn.getBalance(wallet.publicKey, "confirmed"),
+      this.conn.getTokenAccountBalance(ata(wallet.publicKey, this.cfg.mint), "confirmed").then(r => Number(r.value.amount) / 1e6, () => null),
+    ]);
+    return { sol: lamports / 1e9, usdc: token };
+  }
+
+  async createTokenAccount() {
+    const wallet = this.connected();
+    await this.send([createAtaIdempotentIx(wallet.publicKey, wallet.publicKey, this.cfg.mint)]);
+  }
+
   async deposit(usd: number) {
     const wallet = this.connected();
-    const amount = atoms(usd, "amount");
+    const amount = atoms(usd, "an amount");
+    // Say plainly when the wallet has no test USDC, before the wallet is asked to sign a transfer that would fail.
+    const held = await this.conn.getTokenAccountBalance(ata(wallet.publicKey, this.cfg.mint), "confirmed").then(r => BigInt(r.value.amount), () => null);
+    if (held === null || held === 0n) throw new Error("You have no test USDC yet: get some from the faucet.");
+    if (held < amount) throw new Error(`You have ${(Number(held) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 6 })} test USDC: deposit that much or less.`);
     if (!this.portfolio) {
       const created = await buildCreatePortfolio(this.cfg, wallet.publicKey);
       await this.send(created.ixs, [created.portfolio], undefined, () => { this.portfolio = created.portfolio.publicKey; });
@@ -172,13 +189,13 @@ export class DevnetMarketClient implements MarketClient {
 
   async withdraw(usd: number) {
     const wallet = this.connected();
-    const amount = atoms(usd, "amount");
+    const amount = atoms(usd, "an amount");
     const ixs = await buildWithdraw(this.conn, this.cfg, wallet.publicKey, this.requirePortfolio(), amount);
     await this.send([createAtaIdempotentIx(wallet.publicKey, wallet.publicKey, this.cfg.mint), ...ixs]);
   }
 
   private limit(side: Side) {
-    return atoms(this.snapshot.mark.price * (side === "long" ? 1.005 : 0.995), "limit price");
+    return atoms(this.snapshot.mark.price * (side === "long" ? 1.005 : 0.995), "a limit price");
   }
 
   private async trade(sizeQ: bigint) {
@@ -191,7 +208,7 @@ export class DevnetMarketClient implements MarketClient {
   async openPosition(side: Side, size: number, leverage: number) {
     this.connected();
     if (side !== "long" && side !== "short") throw new Error("invalid side");
-    const q = atoms(size, "size");
+    const q = atoms(size, "a size");
     await this.refresh();
     const max = this.snapshot.market.maxLeverage;
     if (!Number.isFinite(leverage) || leverage < 1 || leverage > max) throw new Error(`leverage must be between 1 and ${max}`);

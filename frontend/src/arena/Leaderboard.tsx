@@ -12,7 +12,8 @@ const atomsToNumber = (atoms: string) => {
 };
 export const usdAtoms = (atoms: string) => {
   const n = atomsToNumber(atoms);
-  return Number.isFinite(n) ? usdFormatter.format(n) : "—";
+  // Round to cents first so a sub-cent loss reads $0.00, never -$0.00.
+  return Number.isFinite(n) ? usdFormatter.format(Math.round(n * 100) === 0 ? 0 : n) : "—";
 };
 const short = (wallet: string) => wallet.length > 8 ? `${wallet.slice(0, 4)}…${wallet.slice(-4)}` : wallet;
 const explorer = (wallet: string) => `https://explorer.solana.com/address/${encodeURIComponent(wallet)}?cluster=devnet`;
@@ -20,7 +21,8 @@ const pctOf = (pnl: string, deposits: string) => {
   const p = atomsToNumber(pnl), d = atomsToNumber(deposits);
   if (!Number.isFinite(p) || !Number.isFinite(d) || d <= 0) return "—";
   const v = p / d * 100;
-  return `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)}%`;
+  const text = Math.abs(v).toFixed(1);
+  return `${text !== "0.0" && v > 0 ? "+" : text !== "0.0" && v < 0 ? "−" : ""}${text}%`;
 };
 
 type Open = { side: "long" | "short"; units: number };
@@ -33,11 +35,11 @@ export function Unreachable({ error }: { error?: string }) {
 export function NoFills() {
   return <div className="arena-state">
     <p>No fills yet. The first trade puts a wallet on the board.</p>
-    <div className="arena-actions"><Link className="button-link" to="/trade">Trade by hand</Link><Link className="button-link outline" to="/agents">Connect an agent</Link></div>
+    <div className="arena-actions"><Link className="button-link" to="/trade">Trade</Link><Link className="button-link outline" to="/agents">Connect an agent</Link></div>
   </div>;
 }
 
-export default function Leaderboard({ indexer, owner = null, limit }: { indexer: IndexerClient | null; owner?: string | null; limit?: number }) {
+export default function Leaderboard({ indexer, owner = null, limit, onCount }: { indexer: IndexerClient | null; owner?: string | null; limit?: number; onCount?: (traders: number | null) => void }) {
   const [board, setBoard] = useState<Board | null>(null);
   const [open, setOpen] = useState<Map<string, Open | null>>(new Map());
   const [error, setError] = useState("");
@@ -72,11 +74,14 @@ export default function Leaderboard({ indexer, owner = null, limit }: { indexer:
     return () => { active = false; clearInterval(timer); };
   }, [indexer]);
 
+  // A wallet is on the board after its first fill: rows with no trades are neither ranked nor shown.
+  const traded = board ? board.entries.filter(e => e.trades > 0) : null;
+  useEffect(() => { onCount?.(traded ? traded.length : null); }, [traded?.length]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!indexer) return <Unreachable />;
   if (error && !board) return <Unreachable error={error} />;
   if (!board) return <p className="arena-state" aria-busy="true">Loading the leaderboard.</p>;
-  if (board.entries.length === 0) return <NoFills />;
-  const rows = [...board.entries].sort((a, b) => atomsToNumber(b.pnl) - atomsToNumber(a.pnl)).slice(0, limit);
+  if (traded!.length === 0) return <NoFills />;
+  const rows = [...traded!].sort((a, b) => atomsToNumber(b.pnl) - atomsToNumber(a.pnl)).slice(0, limit);
   return <div className="arena-board">
     <div className="table-scroll"><table>
       <caption className="sr-only">{PERP.name} leaderboard, highest PnL first</caption>

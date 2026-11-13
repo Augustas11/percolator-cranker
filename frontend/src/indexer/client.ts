@@ -4,7 +4,11 @@ export interface Stats {
   as_of_slot: number | null;
   as_of: number | null;
   cranks: { total: number; success_rate: number | null };
+  /** Indexed fills, executed matcher fills included. */
   fills?: number;
+  /** Optional (newer indexers): executed fills and USD volume over the last 24 h; volume is a USD decimal string like season.volume_usd. */
+  fills_24h?: number;
+  volume_24h?: string;
   uptime: { uptime_pct: number | null };
   liquidations_observed: number;
   liquidations_since_slot: number | null;
@@ -41,6 +45,9 @@ export interface Fills {
     status: "executed" | "requested";
     side: "buy" | "sell";
     price_note: string;
+    /** Optional (newer indexers): the size the engine applied, signed from this portfolio's view, base units; and its price, e6. */
+    executed_size?: string | null;
+    applied_price?: number | null;
   }[];
   next_before: string | null;
 }
@@ -55,6 +62,27 @@ export interface RecentFills {
   fills: { signature: string; ix_index: number; leg: number; slot: number; block_time: number | null; side: "buy" | "sell"; size_q: string; mark_price: number | null; wallet: string | null; taker_portfolio: string; status: "executed" | "requested" }[];
 }
 
+/** GET /trades: market-wide executed fills, newest first (newer indexers only). */
+export interface Trades {
+  trades: {
+    signature: string; ix_index: number; leg: number; slot: number; block_time: number | null;
+    /** Taker view. */
+    side: "buy" | "sell";
+    /** Unsigned base units, 1e6 per unit of PERP.unit (same scale as /fills size_q). */
+    size: string;
+    price: number | null;
+    price_source: "reported" | "matcher_oracle" | "last_mark" | null;
+    wallet: string | null; taker_portfolio: string; maker_portfolio: string; asset_index: number;
+  }[];
+  next_before: string | null;
+  price_note?: string;
+}
+
+/** An HTTP error from the indexer; status 404 on an endpoint means the indexer predates it. */
+export class IndexerHttpError extends Error {
+  constructor(public status: number, message: string) { super(message); }
+}
+
 export interface Season {
   season: number;
   since: number | null;
@@ -67,6 +95,7 @@ export interface Season {
 export interface IndexerClient {
   readonly mock?: boolean;
   recentFills?(limit: number): Promise<RecentFills>;
+  trades?(limit: number, before?: string): Promise<Trades>;
   season?(): Promise<Season>;
   stats(): Promise<Stats>;
   leaderboard(): Promise<Leaderboard>;
@@ -84,7 +113,7 @@ export class HttpIndexerClient implements IndexerClient {
     const response = await fetch(this.baseUrl.replace(/\/$/, "") + path, { signal: AbortSignal.timeout(10_000) });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
-      throw new Error(body?.error || `indexer ${response.status}`);
+      throw new IndexerHttpError(response.status, body?.error || `indexer ${response.status}`);
     }
     return response.json();
   }
@@ -106,6 +135,10 @@ export class HttpIndexerClient implements IndexerClient {
   }
 
   async recentFills(limit: number) { await this.check(); return this.get<RecentFills>(`/fills/recent?limit=${limit}`); }
+  async trades(limit: number, before?: string) {
+    await this.check();
+    return this.get<Trades>(`/trades?limit=${Math.min(500, Math.max(1, Math.floor(limit)))}${before ? `&before=${encodeURIComponent(before)}` : ""}`);
+  }
   async season() { await this.check(); return this.get<Season>("/season"); }
   async leaderboard() { await this.check(); return this.get<Leaderboard>("/leaderboard"); }
   async positions(owner: string) { await this.check(); return this.get<Positions>(`/positions?owner=${encodeURIComponent(owner)}`); }

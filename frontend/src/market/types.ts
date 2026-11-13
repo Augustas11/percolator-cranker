@@ -41,6 +41,19 @@ export interface Liquidity {
   paused: boolean;
   /** How far the mark may sit from the matcher's reference price before fills are refused. */
   deviationBps: number;
+  /** The matcher's reference price (USD per unit) and its age in slots; fills are refused once it is older than maxAgeSlots. */
+  refPrice?: number;
+  refAgeSlots?: number | null;
+  maxAgeSlots?: number;
+}
+
+/** Why the matcher would refuse a fill right now, or null when it would fill. Unknown inputs never pause. */
+export function fillsPaused(liq: Liquidity | null | undefined, mark: number): "paused" | "stale" | "deviates" | null {
+  if (!liq) return null;
+  if (liq.paused) return "paused";
+  if (liq.refAgeSlots !== undefined && liq.maxAgeSlots !== undefined && (liq.refAgeSlots === null || liq.refAgeSlots > liq.maxAgeSlots)) return "stale";
+  if (liq.refPrice !== undefined && liq.refPrice > 0 && Number.isFinite(mark) && Math.abs(mark - liq.refPrice) * 10_000 > liq.deviationBps * liq.refPrice) return "deviates";
+  return null;
 }
 export interface MarkPrice { price: number; ts: number }
 export interface Funding { rate: number /* per hour, fraction */; nextFundingTs: number }
@@ -72,8 +85,6 @@ export interface MarketSnapshot {
 }
 export interface MarketClient {
   readonly tradingReady?: boolean;
-  /** False when the client has no funding source and the funding fields are placeholders. */
-  readonly fundingKnown?: boolean;
   getSnapshot(): MarketSnapshot;
   subscribe(listener: (s: MarketSnapshot) => void): () => void;
   connect(): Promise<string>;
@@ -81,5 +92,9 @@ export interface MarketClient {
   withdraw(amount: number): Promise<void>;
   openPosition(side: Side, size: number, leverage: number): Promise<void>;
   closePosition(): Promise<void>;
+  /** The connected wallet's SOL and test-USDC balances; usdc is null when its token account does not exist. */
+  walletBalances?(): Promise<{ sol: number; usdc: number | null }>;
+  /** Creates the wallet's test-USDC token account (one transaction, paid in SOL by the wallet). */
+  createTokenAccount?(): Promise<void>;
   dispose(): void;
 }

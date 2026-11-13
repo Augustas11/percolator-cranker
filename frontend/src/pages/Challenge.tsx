@@ -120,7 +120,8 @@ export function ChallengeRules() {
     ["Reward", `The season's best rule becomes the rule ${PERP.name} settles on, after an independent review (no scorer exploit, readable source disclosed), with its author credited.${site.challenge.prizes ? ` Prizes: ${site.challenge.prizes}.` : ""}`],
   ];
   return <section id="challenge" className="cx-section" aria-labelledby="challenge-rules-heading">
-    <h2 id="challenge-rules-heading">Compute Price Challenge rules</h2>
+    <h2 id="challenge-rules-heading">Compute Oracle Challenge rules</h2>
+    <p>An oracle is the code that reports a price to a market; this one reports the price {PERP.name} settles on.</p>
     <dl className="method">{rows.map(([k, v], i) => <div key={k}><dt><span>{String(i + 1).padStart(2, "0")}</span>{k}</dt><dd>{v}</dd></div>)}</dl>
   </section>;
 }
@@ -137,9 +138,10 @@ export default function Challenge({ feed, board = null }: { feed: ComputeFeedCli
 
   return <div className="cx challenge">
     <header className="ch-hero">
-      <p className="cx-title">Compute Price Challenge</p>
-      <h1 className="ch-title">Design the price of AI compute.</h1>
-      <p className="ch-pitch">Write the rule that turns every seller's quote into one price. The best rule sets the price {PERP.name} settles on.</p>
+      <p className="cx-title">Compute Oracle Challenge</p>
+      <h1 className="ch-title">Build the compute price oracle.</h1>
+      {bench && spread && <p className="ch-pitch">{bench.sellers_up} sellers list the same AI model at prices up to {spread} apart. Your code turns their quotes into one price.</p>}
+      <p className="ch-score-line">Follow real price changes, ignore fake ones. Tested on next week's market and attacked with fake listings.</p>
       <div className="hero-actions">
         <Link className="button-link" to={`${site.paths.docs}#challenge`}>Read the rules <Arrow /></Link>
         {cfg.repoPath && <a className="button-link outline" href={cfg.repoPath}>Get the template</a>}
@@ -152,14 +154,12 @@ export default function Challenge({ feed, board = null }: { feed: ComputeFeedCli
       {next !== null && <div className="ch-next"><dt>Next close in</dt><dd><time dateTime={new Date(next).toISOString()}>{countdown(next - now)}</time></dd></div>}
     </dl>}
 
-    <section className="cx-section" aria-labelledby="ch-problem">
-      <h2 id="ch-problem">The problem</h2>
+    <section className="cx-section" aria-labelledby="ch-why">
+      <h2 id="ch-why">Why an oracle</h2>
       <ol className="ch-lines">
-        <li>{bench && spread
-          ? <>{PERP.benchmark} is sold by {bench.sellers_up} sellers right now, at prices up to {spread} apart.</>
-          : <>The same model is sold by many sellers at very different prices.</>}</li>
-        <li>Sellers go offline and reprice without notice.</li>
-        <li>One number has to stand for all of it, and no seller should be able to fake it.</li>
+        <li>On-chain markets settle on whatever their oracle reports.</li>
+        <li>An oracle that can be faked or that lags gets traders liquidated.</li>
+        <li>Nobody has built a tested one for the price of AI compute.</li>
       </ol>
     </section>
 
@@ -180,7 +180,7 @@ export default function Challenge({ feed, board = null }: { feed: ComputeFeedCli
       </section>
       <section className="cx-section" aria-labelledby="ch-win">
         <h2 id="ch-win">What you win</h2>
-        <p>The season's best rule becomes the live settlement rule for {PERP.name} after review, with its author credited.</p>
+        <p>The best oracle runs the live market, with your name on it.</p>
         {cfg.prizes && <p className="ch-prizes">Prizes: {cfg.prizes}</p>}
       </section>
       <section className="cx-section" aria-labelledby="ch-agents">

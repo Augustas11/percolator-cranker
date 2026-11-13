@@ -69,6 +69,6 @@ export function marketStale(market: ComputeMarket | null, now: number) {
 }
 
 /** A model whose quotes are not fresh: flagged by the feed, or its newest read is over 30 minutes old. */
-export function modelStale(model: MarketModel, now: number) {
+export function modelStale(model: Pick<MarketModel, "stale" | "data_ms">, now: number) {
   return model.stale === true || (typeof model.data_ms === "number" && now - model.data_ms > STALE_MS) || model.data_ms === null;
 }

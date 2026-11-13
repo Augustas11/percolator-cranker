@@ -10,7 +10,7 @@ import type { IndexerClient } from "../indexer/client";
 import { MockComputeFeedClient } from "../compute/mock";
 import { marketFixture } from "../compute/fixture";
 import { typicalPrice } from "../compute/charts";
-import { usd } from "../compute/format";
+import { day, pct, usd } from "../compute/format";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -39,8 +39,8 @@ async function render(path: string, indexer: IndexerClient | null = new MockInde
 
 test.each([
   [site.paths.home, "Price andhedge AIcompute.", "From agent to a COMPUTE-PERP position.", "Drip · the price of AI compute"],
-  [site.paths.agents, "Your agent reads what inference costs across every seller, hedges its compute bill with COMPUTE-PERP, and is ranked on the Arena by PnL.", "Install the MCP", "Agents · Drip"],
-  [site.paths.arena, "Arena", "How ranking works", "Arena · Drip"],
+  [site.paths.agents, "Your agent reads what inference costs from every seller, hedges its compute bill with COMPUTE-PERP, and is ranked on the Arena by PnL.", "Install the MCP", "Agents · Drip"],
+  [site.paths.arena, "Arena", "Leaderboard", "Arena · Drip"],
   [site.paths.compute, "Compute index", "The compute index is unreachable right now.", "Compute index · Drip"],
   [site.paths.trade, "COMPUTE-PERP", "Connect wallet", "Trade COMPUTE-PERP · Drip"],
   [site.paths.docs, "Docs", "How the compute index is made", "Docs · Drip"],
@@ -70,7 +70,8 @@ test("home shows its live mark, recent trades and honest unpublished tools", asy
   expect(container.textContent).toContain("Mark price on chain");
   expect(container.querySelector('.hero-actions a[href="/trade"]')?.textContent?.trim()).toBe("Trade COMPUTE-PERP");
   expect(container.querySelector('.hero-actions a[href="/agents#install"]')?.textContent).toBe("Connect an agent");
-  expect(container.querySelector(".hero-trade .trade-note")?.textContent).toBe("Test tokens");
+  expect(container.querySelector(".home-hero")?.textContent).not.toMatch(/test tokens/i);
+  expect(container.querySelector(".home-hero .trade-note")).toBeNull();
   expect(container.textContent).not.toMatch(/Percolator/);
   expect(container.querySelector('.sol-actions a[href="/arena"]')?.textContent).toBe("See the leaderboard");
   expect(container.querySelector('.sol-actions a[href="/trade"]')?.textContent).toBe("Trade COMPUTE-PERP");
@@ -302,7 +303,8 @@ test.each(["rejects", "missing", "none", "empty"])("home handles unavailable dat
   indexer.recentFills = mode === "missing" ? undefined : mode === "empty" ? vi.fn().mockResolvedValue({ fills: [] }) : vi.fn().mockRejectedValue(new Error("indexer 404"));
   indexer.season = mode === "missing" ? undefined : vi.fn().mockRejectedValue(new Error("indexer 404"));
   const container = await render(site.paths.home, mode === "none" ? null : indexer);
-  expect(container.querySelector(".recent-trades")?.textContent).toBe("Recent fillsNo fills yet. Trade by hand or connect an agent.");
+  expect(container.querySelector(".recent-trades")?.textContent).toBe("Recent fillsNo fills yet. Trade or connect an agent.");
+  expect(container.querySelector('.recent-trades a[href="/trade"]')?.textContent).toBe("Trade");
   expect(container.querySelector('.recent-trades a[href="/agents"]')?.textContent).toBe("connect an agent");
   expect(Array.from(container.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["—", "—", "—", "—"]);
   expect(container.querySelector(".fact-note")?.textContent).toBe("devnet");
@@ -347,13 +349,43 @@ test("home explains why Drip with the feed's numbers", async () => {
   expect(why.querySelector("h2")?.textContent).toBe("Why Drip");
   expect(Array.from(why.querySelectorAll("h3"), el => el.textContent)).toEqual(["Every seller, not one", "Quoted in what you pay", "Settlement on chain", "An agent can hedge its own bill"]);
   const market = marketFixture(now);
-  expect(why.querySelector("p")?.textContent).toBe(`${typicalPrice(market)!.quotes} quotes from ${typicalPrice(market)!.providers} providers, read every 5 minutes. You see the cheapest and the dearest, not a list price.`);
-  expect(why.textContent).toContain("Each settlement price is written to Solana (latest transaction) and logged as a signed line.");
+  expect(why.querySelector("p")?.textContent).toBe(`${market.index.n_quotes_up} quotes up from ${market.index.n_providers} providers, read every 5 minutes. You see the cheapest and the dearest, not a list price.`);
+  expect(why.textContent).toContain("Each settlement price is written to Solana (latest transaction). Each fill is a Solana transaction.");
+  expect(why.textContent).not.toContain("signed line");
   expect(why.querySelector('a[href^="https://explorer.solana.com/tx/"]')).not.toBeNull();
   expect(why.textContent).not.toMatch(/verify-push-log|staging/);
   expect(container.querySelector(".build-cards")?.textContent).not.toMatch(/keeper/i);
   expect(container.querySelector(".home-arena dl")).toBeNull();
   expect(container.textContent).not.toMatch(/Season 0|Your key, your agent|Connect once|PnL decides|From agent to leaderboard/);
+});
+
+test("home card: routed price absent falls back to the median, and a null 1 h change is hidden", async () => {
+  const feed = new MockComputeFeedClient();
+  const base = await feed.market();
+  vi.spyOn(feed, "market").mockResolvedValue({ ...base, routed: null, models: base.models.map(({ routed: _r, routed_usd_per_bn_gn: _g, ...m }) => m) });
+  let container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), feed);
+  expect(container.querySelector(".compute-card .cc-label")?.textContent).toBe("Median price to run an open model");
+  expect(container.querySelector(".compute-card .cc-meta")?.textContent).not.toContain("Median across open models");
+  await cleanup?.();
+  const nulled = new MockComputeFeedClient();
+  vi.spyOn(nulled, "market").mockResolvedValue({ ...base, models: base.models.map(m => m.routed ? { ...m, routed: { ...m.routed, change_1h_pct: null } } : m) });
+  container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), nulled);
+  expect(container.querySelector(".compute-card .cc-label")?.textContent).toBe("What a request pays now, Qwen3.8-27B");
+  expect(container.querySelector(".compute-card .cc-chg")).toBeNull();
+});
+
+test("one quote count on Home, /compute and /agents", async () => {
+  const now = Date.now(), n = marketFixture(now).index.n_quotes_up;
+  const home = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient(now));
+  expect(home.querySelector(".compute-card .cc-meta")?.textContent).toContain(`${n} quotes up`);
+  expect(home.querySelector(".hero-description")?.textContent).toContain(`${n} quotes up`);
+  expect(home.querySelector('[aria-labelledby="why-title"] p')?.textContent).toContain(`${n} quotes up`);
+  await cleanup?.();
+  const compute = await render(site.paths.compute, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient(now));
+  expect(compute.querySelector(".cx-proof")?.textContent).toContain(`${n} quotes up`);
+  await cleanup?.();
+  const agents = await render(site.paths.agents, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient(now));
+  expect(agents.querySelector("h1.ag-lead")?.textContent).toContain(`${n} quotes up`);
 });
 
 test("home card survives a feed with no index base and no cheapest seller", async () => {
@@ -362,7 +394,7 @@ test("home card survives a feed with no index base and no cheapest seller", asyn
   vi.spyOn(feed, "market").mockResolvedValue({ ...base, index: { ...base.index, level: null, base_ms: null }, models: base.models.map(m => ({ ...m, cheapest: null })) });
   const container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), feed);
   const meta = container.querySelector(".compute-card .cc-meta")?.textContent ?? "";
-  expect(meta).toMatch(/quotes · \d+ providers · \d+ models$/);
+  expect(meta).toMatch(/quotes up · \d+ providers · \d+ models$/);
   expect(container.querySelector(".compute-card .cc-level")).not.toBeNull();
   expect(container.textContent).not.toMatch(/ChatGPT/);
 });
@@ -372,18 +404,20 @@ test("home leads with the compute index, then the perp", async () => {
   const container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient(now));
   const market = marketFixture(now);
   const card = container.querySelector(".compute-card")!;
-  expect(card.querySelector(".cc-level")?.textContent).toBe(`Median price to run an open model${usd(typicalPrice(market)!.median)}per 1M tokens`);
-  expect(card.querySelector(".cc-meta")?.textContent).toBe(`${typicalPrice(market)!.quotes} quotes · ${typicalPrice(market)!.providers} providers · ${typicalPrice(market)!.models} models · index ${market.index.level!.toFixed(2)}`);
+  const routed = market.models.find(m => m.id === "qwen/qwen3.8-27b")!.routed!;
+  expect(card.querySelector(".cc-level")?.textContent).toBe(`What a request pays now, Qwen3.8-27B${usd(routed.price)}per 1M tokens1 h ${pct(routed.change_1h_pct)}`);
+  expect(card.querySelector(".cc-meta")?.textContent).toBe(`Median across open models ${usd(typicalPrice(market)!.median)} · ${market.index.n_quotes_up} quotes up · ${market.index.n_providers} providers · ${typicalPrice(market)!.models} models`);
+  expect(card.querySelector(".cc-index")?.textContent).toBe(`Index ${market.index.level!.toFixed(2)} · 100 = ${day(market.index.base_ms!)}`);
   expect(container.querySelector(".announcement")).toBeNull();
   expect(card.querySelectorAll(".cc-models .strip")).toHaveLength(4);
   expect(card.querySelector(".cc-perp .market-price")?.textContent).toBe("$0.3036 / 1M tokens");
-  expect(card.textContent).toContain("Settlement price, pushed 3 min ago. 2 of 2 full-precision sellers up.");
-  expect(container.querySelector(".hero-description")?.textContent).toContain(`What open-model inference costs right now: ${typicalPrice(market)!.quotes} quotes from ${typicalPrice(market)!.providers} providers on ${typicalPrice(market)!.models} models with 3 or more sellers.`);
+  expect(card.textContent).toContain("Settlement price, pushed 3 min ago. 2 of 2 full-precision sellers up, cheaper sellers weigh more (1 ÷ price²).");
+  expect(container.querySelector(".hero-description")?.textContent).toContain(`What open-model inference costs right now: ${market.index.n_quotes_up} quotes up from ${market.index.n_providers} providers on ${typicalPrice(market)!.models} models with 3 or more sellers.`);
   expect(container.querySelector('.home-hero .hero-primary')?.getAttribute("href")).toBe("/compute");
   expect(container.querySelector(".hero-credit")?.textContent).toBe("Built for perp traders and for agents on FLOP Network.");
   const sections = Array.from(container.querySelectorAll("main > section")).map(s => s.className);
   expect(sections.indexOf("home-sol home-container")).toBe(1);
-  expect(Array.from(container.querySelectorAll(".nav-links a")).map(a => [a.textContent, a.getAttribute("href")])).toEqual([["Index", "/compute"], ["Trade", "/trade"], ["Arena", "/arena"], ["Agents", "/agents"], ["Docs", "/docs"]]);
+  expect(Array.from(container.querySelectorAll(".nav-links a")).map(a => [a.textContent, a.getAttribute("href")])).toEqual([["Index", "/compute"], ["Arena", "/arena"], ["Agents", "/agents"], ["Docs", "/docs"]]);
   expect(Array.from(container.querySelectorAll(".nav-actions a"), a => [a.textContent, a.getAttribute("href")])).toEqual([["Trade", "/trade"]]);
   expect(container.querySelector(".nav-links")?.textContent).not.toContain("SOL-PERP");
   expect(card.querySelector(".cc-perp .market-name")?.textContent).toBe("COMPUTE-PERP");
@@ -425,8 +459,8 @@ test("no page says TBD or SOL-PERP, and SOL only means fee SOL", async () => {
 test("arena: live stats, a populated board sorted by PnL with house tags, fills and ranking rules", async () => {
   const container = await render(site.paths.arena);
   expect(container.querySelector(".arena-season")).toBeNull();
-  expect(Array.from(container.querySelectorAll(".arena-stats dt"), d => d.textContent)).toEqual(["Traders", "Fills", "Volume", "Open interest"]);
-  expect(Array.from(container.querySelectorAll(".arena-stats dd"), d => d.textContent)).toEqual(["7", "214", "$18,640.00", "$157.90"]);
+  expect(Array.from(container.querySelectorAll(".arena-stats dt"), d => d.textContent)).toEqual(["Traders", "Fills", "24 h volume", "24 h fills", "Volume", "Open interest"]);
+  expect(Array.from(container.querySelectorAll(".arena-stats dd"), d => d.textContent)).toEqual(["7", "214", "$45.54", "3", "$18,640.00", "$157.90"]);
   const rows = Array.from(container.querySelectorAll(".arena-board tbody tr"));
   expect(rows).toHaveLength(7);
   expect(Array.from(rows[0].querySelectorAll("td"), td => td.textContent)).toEqual(["1", "7cVf…kxXy", "$41.87", "+4.2%", "38", "long 180 Mtok"]);
@@ -434,8 +468,10 @@ test("arena: live stats, a populated board sorted by PnL with house tags, fills 
   expect(Array.from(rows[2].querySelectorAll("td"), td => td.textContent)[5]).toBe("short 60 Mtok");
   expect(rows.map(r => r.querySelector("td:nth-child(3)")!.textContent)).toEqual(["$41.87", "$18.42", "$12.05", "$4.31", "-$2.64", "-$6.98", "-$15.20"]);
   expect(container.querySelectorAll(".arena-fills tbody tr")).toHaveLength(3);
-  expect(Array.from(container.querySelectorAll(".arena-rules b"), b => b.textContent)).toEqual(["Market", "Score", "Joining", "House agents"]);
-  expect(Array.from(container.querySelectorAll(".arena-cta a"), a => [a.textContent, a.getAttribute("href")]).map(([t, h]) => [t!.trim(), h])).toEqual([["Trade by hand", "/trade"], ["Connect an agent", "/agents"]]);
+  expect(container.querySelector(".arena-rules")).toBeNull();
+  expect(container.textContent).not.toContain("Joining");
+  expect(Array.from(container.querySelectorAll("a")).find(a => a.textContent === "How ranking works")?.getAttribute("href")).toBe("/docs#arena");
+  expect(Array.from(container.querySelectorAll(".arena-cta a"), a => [a.textContent, a.getAttribute("href")]).map(([t, h]) => [t!.trim(), h])).toEqual([["Trade", "/trade"], ["Connect an agent", "/agents"]]);
   await cleanup?.(); cleanup = undefined;
   const arena = { ...site.arena };
   site.arena.season = 1; site.arena.startsAt = "1 Dec 2026";
@@ -445,18 +481,27 @@ test("arena: live stats, a populated board sorted by PnL with house tags, fills 
   } finally { Object.assign(site.arena, arena); }
 });
 
+test("docs: the Arena ranking facts live under #arena", async () => {
+  const container = await render(site.paths.docs);
+  const section = container.querySelector("section#arena")!;
+  expect(section.querySelector("h2")?.textContent).toBe("How the Arena ranks");
+  expect(Array.from(section.querySelectorAll("li b"), b => b.textContent)).toEqual(["Market", "Score", "Joining", "House agents"]);
+  expect(section.textContent).toContain("A wallet appears after its first fill. There is no sign-up.");
+});
+
 test("arena: empty board and an unreachable indexer", async () => {
   const empty = new MockIndexerClient();
   vi.spyOn(empty, "leaderboard").mockResolvedValue({ as_of_slot: 1, note: "", entries: [] });
   vi.spyOn(empty, "recentFills").mockResolvedValue({ fills: [] });
+  vi.spyOn(empty, "trades").mockResolvedValue({ trades: [], next_before: null });
   let container = await render(site.paths.arena, empty);
   expect(container.textContent).toContain("No fills yet. The first trade puts a wallet on the board.");
   expect(container.querySelector(".arena-fills")).toBeNull();
+  expect(container.textContent).toContain("No fills yet.");
   await cleanup?.(); cleanup = undefined;
   container = await render(site.paths.arena, null);
   expect(container.textContent).toContain("The leaderboard is unreachable right now");
   expect(container.querySelector(".arena-stats")).toBeNull();
-  expect(container.querySelector(".arena-rules")).not.toBeNull();
 });
 
 test("footer blurb positions Drip and every GitHub link goes to drip-markets", async () => {
@@ -480,8 +525,8 @@ test("agents page: one flow from install to the Arena, compute examples only onc
   expect(Array.from(container.querySelectorAll(".ag-files a"), a => a.getAttribute("href"))).toEqual([`${site.officialSite}/compute-feed/market.json`, `${site.officialSite}/compute-feed/latest.json`]);
   expect(container.textContent).toContain("rewrites both every minute");
   // The MCP trades the configured market, COMPUTE-PERP.
-  const quotes = (await new MockComputeFeedClient().market()).index.n_quotes;
-  expect(container.querySelector("h1.ag-lead")?.textContent).toBe(`Your agent reads what inference costs across ${quotes} seller quotes, hedges its compute bill with COMPUTE-PERP, and is ranked on the Arena by PnL.`);
+  const quotes = (await new MockComputeFeedClient().market()).index.n_quotes_up;
+  expect(container.querySelector("h1.ag-lead")?.textContent).toBe(`Your agent reads what inference costs from ${quotes} quotes up, hedges its compute bill with COMPUTE-PERP, and is ranked on the Arena by PnL.`);
   expect(container.querySelector("#install pre")?.textContent).toBe("claude mcp add drip -- npx -y @driptech/mcp");
   expect(Array.from(container.querySelectorAll("#install pre"), p => p.textContent)).toContain("Claim test funds, deposit 500 USDC and open a 100-unit long on COMPUTE-PERP. Then show my position.");
   expect(container.textContent).toContain("Long COMPUTE-PERP");
@@ -489,7 +534,7 @@ test("agents page: one flow from install to the Arena, compute examples only onc
   expect(container.textContent).not.toMatch(/size_sol|keeper|prize|30 seconds/i);
   expect(container.textContent).toContain('size counts units of 1M tokens, up to 100 per fill: { side: "long", size: 100 }.');
   expect(container.textContent).toContain("Mark price, fills and open interest.");
-  expect(container.textContent).toContain("They are tagged as house agents on the board.");
+  expect(container.textContent).toContain("House agents are tagged on the board.");
   const prompts = Array.from(container.querySelectorAll("#install pre"), p => p.textContent);
   expect(prompts).toContain("Open a 50-unit long on COMPUTE-PERP to hedge my inference bill, then show my position.");
   expect(prompts.join(" ")).not.toContain("Read the compute index");

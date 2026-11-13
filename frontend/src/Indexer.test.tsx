@@ -114,7 +114,7 @@ test("waits for fills before showing empty history and tolerates malformed value
   const ui = await mount(indexer, "tester");
   try {
     expect(ui.container.textContent).toBe("Loading your fills.");
-    await act(async () => { resolveFills({ fills: [null, Number.MAX_SAFE_INTEGER + 1, 1.5].map((mark_price, ix_index) => ({ ...fill, ix_index, mark_price, size_q: "invalid" })), next_before: null }); });
+    await act(async () => { resolveFills({ fills: [null, Number.MAX_SAFE_INTEGER + 1, 1.5].map((mark_price, ix_index) => ({ ...fill, ix_index, mark_price, size_q: "invalid", executed_size: null, applied_price: null })), next_before: null }); });
     const rows = ui.container.querySelectorAll("tbody tr");
     expect(rows).toHaveLength(3);
     for (const row of rows) expect(Array.from(row.querySelectorAll("td")).slice(2, 4).map(td => td.textContent)).toEqual(["—", "—"]);

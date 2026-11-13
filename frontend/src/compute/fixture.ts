@@ -1,4 +1,4 @@
-import type { ComputeMarket, MarketChange, MarketDynamic, MarketModel, MarketProvider, MarketQuote, Point } from "./client";
+import type { ComputeMarket, MarketChange, MarketDynamic, MarketModel, MarketProvider, MarketQuote, Point, Routed } from "./client";
 
 // A typed market.json for tests and `npm run dev` without the devnet feed.
 // Deterministic: the same `now` always gives the same file.
@@ -55,6 +55,32 @@ export function quantile(sorted: number[], q: number) {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo);
 }
 
+/** The routed price by the feed's rule: up sellers weighted 1 / price² times uptime, no seller above half the weight. */
+export function routedFrom(quotes: MarketQuote[]): Omit<Routed, "change_1h_pct" | "change_24h_pct" | "series"> | null {
+  const up = quotes.filter((q): q is MarketQuote & { price: number } => q.up && q.price !== null && q.price > 0);
+  if (!up.length) return null;
+  let w = up.map(q => (q.uptime_24h_pct ?? 100) / 100 / (q.price * q.price));
+  let capped = false;
+  // Cap at half and hand the excess to the rest, until nobody is over (one seller alone keeps everything).
+  for (let k = 0; k < up.length && up.length > 1; k++) {
+    const total = w.reduce((a, b) => a + b, 0), over = w.findIndex(x => x / total > 0.5 + 1e-12);
+    if (over < 0) break;
+    capped = true;
+    const rest = total - w[over];
+    w = w.map((x, i) => i === over ? rest : x);
+  }
+  const total = w.reduce((a, b) => a + b, 0);
+  const shares = w.map(x => x / total);
+  const price = up.reduce((a, q, i) => a + q.price * shares[i], 0);
+  const top = up.map((q, i) => ({ provider: q.provider, quantization: q.quantization, price: q.price, share: round(shares[i]) }))
+    .sort((a, b) => b.share - a.share).slice(0, 5);
+  return { price: round(price), sellers: up.length, top, capped, uptime_fallback: false };
+}
+
+/** USD per billion G_n per USD per 1M tokens for the benchmark model (the live feed's ratio for Qwen3.8-27B). */
+export const BENCH_GN_FACTOR = 19.2309;
+export const FLOP_RATE = 0.00291;
+
 export function marketFixture(now = Date.now()): ComputeMarket {
   const rand = rng(11);
   const base = now - 20 * HOUR;
@@ -86,6 +112,17 @@ export function marketFixture(now = Date.now()): ComputeMarket {
       quotes,
     };
   });
+  // Routed price per model, with a 4 h series at 15 min steps ending at the current value.
+  for (const model of models) {
+    const r = routedFrom(model.quotes);
+    if (!r) continue;
+    const series: Point[] = Array.from({ length: 17 }, (_, i) => [now - (16 - i) * 15 * 60_000, i === 16 ? r.price : round(r.price * (1 + Math.sin(i * 1.3 + model.median) * 0.012))]);
+    const hourAgo = series[12][1];
+    model.routed = { ...r, change_1h_pct: round((r.price / hourAgo - 1) * 100), change_24h_pct: null, series };
+    if (model.id === "qwen/qwen3.8-27b") model.routed_usd_per_bn_gn = round(r.price * BENCH_GN_FACTOR);
+  }
+  const bench = models.find(m => m.id === "qwen/qwen3.8-27b")!;
+  const listGn = bench.median * BENCH_GN_FACTOR, routedGn = bench.routed!.price * BENCH_GN_FACTOR;
 
   const byProvider = new Map<string, { models: Set<string>; quotes: number; uptime: number[]; cheapest: number }>();
   for (const model of models) for (const q of model.quotes) {
@@ -120,5 +157,11 @@ export function marketFixture(now = Date.now()): ComputeMarket {
       series: [[base, 100], [now, 100.42]],
     },
     models, providers, changes, dynamic,
+    routed: { benchmark: bench.id, price: bench.routed!.price, usd_per_bn_gn: round(routedGn), series: bench.routed!.series },
+    flop: {
+      basis_model: bench.id, gn_price_flop: FLOP_RATE,
+      implied_flop_usd: listGn / 1e9 / FLOP_RATE, implied_flop_usd_routed: routedGn / 1e9 / FLOP_RATE,
+      parity: { market_usd_per_bn_gn: round(routedGn), flop_rate_flop_per_gn: FLOP_RATE, implied_flop_usd: listGn / 1e9 / FLOP_RATE, implied_flop_usd_routed: routedGn / 1e9 / FLOP_RATE, as_of_ms: now - 60_000 },
+    },
   };
 }

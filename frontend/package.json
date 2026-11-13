@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && node scripts/route-shells.ts",
     "test": "vitest run",
     "preview": "vite preview",
     "roundtrip": "vite build --ssr scripts/devnet-roundtrip.ts --outDir .roundtrip --emptyOutDir && node .roundtrip/devnet-roundtrip.js"

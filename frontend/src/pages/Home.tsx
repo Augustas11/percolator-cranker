@@ -12,8 +12,8 @@ import CopyButton from "../site/CopyButton";
 import type { ComputeFeedClient, ComputeMarket } from "../compute/client";
 import { marketDataTime, modelStale, useComputeFeed } from "../compute/useFeed";
 import FeedBoundary from "../compute/FeedBoundary";
-import { RangeStrip, marketScale, typicalPrice, widest } from "../compute/charts";
-import { ago as agoMs, count, times, usd as perMillion, usd4 } from "../compute/format";
+import { RangeStrip, benchmarkRouted, marketScale, typicalPrice, widest } from "../compute/charts";
+import { ago as agoMs, count, day, pct, direction, times, usd as perMillion, usd4 } from "../compute/format";
 import "../site/home.css";
 import "../site/compute.css";
 
@@ -53,12 +53,16 @@ function ComputeCard({ market, mark, markAgo, sellersUp, sellers }: { market: Co
   const wide = market ? widest(market) : null;
   const typical = market ? typicalPrice(market) : null;
   const read = market ? marketDataTime(market) : null;
+  const bench = market ? benchmarkRouted(market) : null;
+  const index = market?.index;
   return <div className="market-card compute-card">
     <div className="cc-block">
       <div className="market-header"><div><div className="market-name">Open-model inference</div><div className="market-subtitle">Compute index{read != null && <>, updated {agoMs(read, Date.now())}</>}</div></div></div>
       {market ? <>
-        {typical && <div className="cc-level"><span className="cc-label">Median price to run an open model</span><strong>{perMillion(typical.median)}</strong><span className="cc-unit">per 1M tokens</span></div>}
-        <div className="cc-meta">{typical ? `${count(typical.quotes)} quotes · ${count(typical.providers)} providers · ${count(typical.models)} models` : "No prices right now"}{market.index.level !== null && ` · index ${market.index.level.toFixed(2)}`}</div>
+        {bench?.price != null ? <div className="cc-level"><span className="cc-label">What a request pays now, {bench.name}</span><strong>{perMillion(bench.price)}</strong><span className="cc-unit">per 1M tokens</span>{bench.change1h !== null && <span className="cc-chg">1 h <span className={`chg is-${direction(bench.change1h)}`}>{pct(bench.change1h)}</span></span>}</div>
+          : typical && <div className="cc-level"><span className="cc-label">Median price to run an open model</span><strong>{perMillion(typical.median)}</strong><span className="cc-unit">per 1M tokens</span></div>}
+        <div className="cc-meta">{typical ? `${bench?.price != null ? `Median across open models ${perMillion(typical.median)} · ` : ""}${count(market.index.n_quotes_up)} quotes up · ${count(market.index.n_providers)} providers · ${count(typical.models)} models` : "No prices right now"}</div>
+        {index?.level != null && <div className="cc-meta cc-index">Index {index.level.toFixed(2)}{index.base_ms !== null && ` · 100 = ${day(index.base_ms)}`}</div>}
         <ul className="cc-models" aria-label="Most-sold models">{top.map(m => <li key={m.id}>
           <span className="cc-name">{m.name}</span><RangeStrip model={m} scale={scale!} quotes={false} stale={modelStale(m, Date.now())} /><b>{perMillion(m.median)}</b>
         </li>)}</ul>
@@ -68,7 +72,7 @@ function ComputeCard({ market, mark, markAgo, sellersUp, sellers }: { market: Co
     <div className="cc-block cc-perp">
       <div className="market-header"><div><div className="market-name">{PERP.name}</div><div className="market-subtitle">{perpSubtitle}</div></div></div>
       <div className="market-price">{mark === null ? "—" : usd4(mark)}<span className="cc-unit"> / {PERP.unit}</span></div>
-      <div className="cc-note">Settlement price{markAgo && `, pushed ${markAgo}`}. {sellers ? `${sellersUp} of ${sellers} full-precision sellers up.` : ""}</div>
+      <div className="cc-note">Settlement price{markAgo && `, pushed ${markAgo}`}. {sellers ? `${sellersUp} of ${sellers} full-precision sellers up, cheaper sellers weigh more (1 ÷ price²).` : ""}</div>
     </div>
     <Link className="button-link" to={site.paths.compute}>Open the compute index <Arrow /></Link>
   </div>;
@@ -119,9 +123,9 @@ export default function Home({ client, indexer, computeFeed = null }: { client: 
           <p className="eyebrow">COMPUTE MARKETS</p>
           <h1 id="hero-title"><span>Price and</span><span className="accent">hedge AI</span><span>compute.</span></h1>
           <p className="hero-description">{typical
-            ? <>What open-model inference costs right now: {count(typical.quotes)} quotes from {count(typical.providers)} providers on {count(typical.models)} models with 3 or more sellers. See who is cheapest and by how much, and trade the price with a perpetual.</>
+            ? <>What open-model inference costs right now: {count(compute.market!.index.n_quotes_up)} quotes up from {count(compute.market!.index.n_providers)} providers on {count(typical.models)} models with 3 or more sellers. See who is cheapest and by how much, and trade the price with a perpetual.</>
             : <>What open-model inference costs right now, from every seller of every major open model. See who is cheapest and by how much, and trade the price with a perpetual.</>}</p>
-          <div className="hero-actions"><Link className="button-link hero-primary" to={site.paths.compute}>See the compute index <Arrow /></Link><span className="hero-trade"><Link className="button-link outline" to="/trade">Trade {PERP.name}</Link><span className="trade-note">Test tokens</span></span><Link className="button-link outline" to={`${site.paths.agents}#install`}>Connect an agent</Link></div>
+          <div className="hero-actions"><Link className="button-link hero-primary" to={site.paths.compute}>See the compute index <Arrow /></Link><Link className="button-link outline" to="/trade">Trade {PERP.name}</Link><Link className="button-link outline" to={`${site.paths.agents}#install`}>Connect an agent</Link></div>
           <p className="hero-credit">Built for perp traders and for agents on FLOP Network.</p>
         </div>
         <FeedBoundary data={compute.market}><ComputeCard market={compute.market} mark={compute.latest?.mark_usd ?? null} markAgo={compute.latest ? agoMs(compute.latest.landed_ms, compute.now) : null}
@@ -142,16 +146,16 @@ export default function Home({ client, indexer, computeFeed = null }: { client: 
               <span>{fill.mark_price === null ? "—" : perpPrice(fill.mark_price / 1e6)}</span>
               <span>{ago(fill.block_time)}</span><span className="trade-wallet">{wallet.length > 8 ? `${wallet.slice(0, 4)}…${wallet.slice(-4)}` : wallet}</span>
             </a></li>;
-          })}</ul> : <p>No fills yet. <Link to="/trade">Trade by hand</Link> or <Link to={site.paths.agents}>connect an agent</Link>.</p>}</div></div>
+          })}</ul> : <p>No fills yet. <Link to="/trade">Trade</Link> or <Link to={site.paths.agents}>connect an agent</Link>.</p>}</div></div>
           <div className="market-stats">{[["Mark pushed", compute.latest ? agoMs(compute.latest.landed_ms, compute.now) : "—"], ["Fee", `${site.feeBps} bps`], ["Max fill", `${PERP.maxFillUnits} ${PERP.unitShort}`]].map(([label, value]) => <div key={label}><div>{label}</div><strong>{value}</strong></div>)}</div>
           <div className="market-actions"><Link className="button-link" to="/trade?side=long">Long</Link><Link className="button-link short" to="/trade?side=short">Short</Link></div>
       </div>
     </div></section>
     <section className="home-facts home-container" aria-label="Arena stats"><div className="facts-grid">{tiles.map(([label, value]) => <div key={label}><div className="fact-label">{label}</div><div className="fact-value">{value}</div></div>)}</div><p className="fact-note">{site.arena.season !== null ? `Season ${site.arena.season} · ` : ""}devnet{season?.since != null ? ` · since ${since}` : ""}</p></section>
     <section className="home-why home-container" aria-labelledby="why-title"><h2 id="why-title">Why Drip</h2><ul className="home-steps">
-      <li><h3>Every seller, not one</h3><p>{typical ? `${count(typical.quotes)} quotes from ${count(typical.providers)} providers, read every 5 minutes.` : "Every seller of every major open model, read every 5 minutes."} You see the cheapest and the dearest, not a list price.</p></li>
+      <li><h3>Every seller, not one</h3><p>{compute.market ? `${count(compute.market.index.n_quotes_up)} quotes up from ${count(compute.market.index.n_providers)} providers, read every 5 minutes.` : "Every seller of every major open model, read every 5 minutes."} You see the cheapest and the dearest, not a list price.</p></li>
       <li><h3>Quoted in what you pay</h3><p>COMPUTE-PERP is priced in USD per 1M tokens, the unit on an inference bill.</p></li>
-      <li><h3>Settlement on chain</h3><p>Each settlement price is written to Solana{compute.latest?.sig ? <> (<a href={`https://explorer.solana.com/tx/${encodeURIComponent(compute.latest.sig)}?cluster=devnet`} target="_blank" rel="noreferrer">latest transaction</a>)</> : null} and logged as a signed line. Each fill is a Solana transaction.</p></li>
+      <li><h3>Settlement on chain</h3><p>Each settlement price is written to Solana{compute.latest?.sig ? <> (<a href={`https://explorer.solana.com/tx/${encodeURIComponent(compute.latest.sig)}?cluster=devnet`} target="_blank" rel="noreferrer">latest transaction</a>)</> : null}. Each fill is a Solana transaction.</p></li>
       <li><h3>An agent can hedge its own bill</h3><p>The MCP server runs on your machine and signs {PERP.name} trades with your agent's own key.</p></li>
     </ul></section>
     <section className="home-how home-container" aria-labelledby="how-title"><p className="eyebrow">HOW IT WORKS</p><h2 id="how-title">From agent to a <span className="accent">{PERP.name} position</span>.</h2>

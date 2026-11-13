@@ -85,5 +85,8 @@ export function benchmarkModel(market: ComputeMarket | null, id: string) {
     return !!x && typeof x === "object" && typeof x.provider === "string" && typeof x.quantization === "string"
       && (x.price === null || finite(x.price)) && typeof x.up === "boolean";
   });
-  return { ...m, median: finite(m.median) ? m.median : null, quotes, series: cleanPoints(m.series) };
+  const r = m.routed && typeof m.routed === "object" ? m.routed : null;
+  const routed = r && finite(r.price) && r.price > 0
+    ? { price: r.price, change_1h_pct: finite(r.change_1h_pct) ? r.change_1h_pct : null, series: cleanPoints(r.series) } : null;
+  return { ...m, median: finite(m.median) ? m.median : null, quotes, series: cleanPoints(m.series), routed };
 }

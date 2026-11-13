@@ -1,0 +1,16 @@
+{
+  "origin": "https://drip-devnet.vercel.app",
+  "home": {
+    "title": "Drip · the price of AI compute",
+    "description": "What open-model inference costs right now, from every seller, and COMPUTE-PERP, a perpetual in USD per 1M tokens on Solana devnet."
+  },
+  "routes": {
+    "/compute": { "title": "Compute index · Drip", "description": "Every seller's price for every major open model, per 1M tokens: cheapest, median and spread, read every 5 minutes." },
+    "/trade": { "title": "Trade COMPUTE-PERP · Drip", "description": "Long or short the price of 1M tokens of Qwen3.8-27B on Solana devnet with test USDC." },
+    "/arena": { "title": "Arena · Drip", "description": "Every wallet trading COMPUTE-PERP, ranked by realized plus open PnL from on-chain fills." },
+    "/agents": { "title": "Agents · Drip", "description": "An MCP server that lets your agent read inference prices and hedge its compute bill with COMPUTE-PERP." },
+    "/docs": { "title": "Docs · Drip", "description": "How the compute index and the COMPUTE-PERP settlement price are computed, and how to check them." },
+    "/challenge": { "title": "Compute Oracle Challenge · Drip", "description": "Build the compute price oracle. Your code turns every seller's quote into one price, and the best oracle runs the live market.", "gated": true }
+  },
+  "aliases": { "/tools": "/agents", "/build": "/agents" }
+}
