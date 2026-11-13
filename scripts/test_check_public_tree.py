@@ -16,11 +16,14 @@
 * CLI: argparse, --help, flag-like targets, --release; the gates and the
   denylist are read from HEAD, not the working copy.
 * Strict gate (check_public_strict.py): one test per pattern.
+* Binaries: pinned by sha256 in the manifest; fixtures are data files only.
 """
 
 import base64
+import hashlib
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -759,7 +762,7 @@ class StrictGate(unittest.TestCase):
         self.assertHit("notes.txt", "export DRIP_API_KEY=sk_live_abcdef\n", "env-style secret")
         self.assertHit("run.md", "WALLET_PRIVATE_KEY=3x9QabcDEF\n", "env-style secret")
         self.put("ok.md", "API_KEY=\nAUTH_TOKEN=<token>\nDRIP_KEYPAIR=~/k.json npm start\n"
-                          "SEED=${SEED}\nSECRET=your-secret\n")
+                          "SEED=\nSECRET=your-secret\n")
         rc, out = self.gate()
         self.assertEqual(rc, 0, out)
 
@@ -788,6 +791,161 @@ class StrictGate(unittest.TestCase):
                      "flop-markets"):
             with self.subTest(word=word):
                 self.assertIn(word, deny)
+
+
+class MarketsPins(unittest.TestCase):
+    """drip-markets: binaries pinned by sha256; fixtures are data files only."""
+
+    setUp, tearDown, write, commit = Exporter.setUp, Exporter.tearDown, Exporter.write, Exporter.commit
+    leftovers, exported = Exporter.leftovers, Exporter.exported
+    commit_markets, export_markets = MarketsProfile.commit_markets, MarketsProfile.export_markets
+
+    BLOB = b"\0asm\1\0\0\0" + bytes(range(16))
+
+    def put_blob(self, data=None):
+        with open(os.path.join(self.repo, "m.wasm"), "wb") as fh:
+            fh.write(self.BLOB if data is None else data)
+
+    def test_pinned_binary_passes(self):
+        self.put_blob()
+        h = hashlib.sha256(self.BLOB).hexdigest()
+        self.commit_markets(f"m.wasm flop-index/testdata/m.wasm\nsha256: {h} flop-index/testdata/m.wasm\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.exported(), ["flop-index/testdata/m.wasm"])
+
+    def test_unpinned_changed_and_unused_pins_fail(self):
+        h = hashlib.sha256(self.BLOB).hexdigest()
+        ip = bytes([198, 18, 7, 9])  # an address as 4 raw bytes: only the pin catches it
+        cases = (
+            (self.BLOB, "m.wasm flop-index/testdata/m.wasm\n", "without a sha256: pin"),
+            (self.BLOB + ip, f"m.wasm flop-index/testdata/m.wasm\nsha256: {h} flop-index/testdata/m.wasm\n",
+             "sha256 differs"),
+            (self.BLOB, f"m.wasm flop-index/testdata/m.wasm\nsha256: {h} flop-index/testdata/m.wasm\n"
+                        f"sha256: {h} flop-index/testdata/gone.wasm\n", "does not contain"),
+            (self.BLOB, f"a.md README.md\nsha256: {h} README.md\nm.wasm x/m.wasm\n"
+                        f"sha256: {h} x/m.wasm\n", "names a text file"),
+            (self.BLOB, f"m.wasm x/m.wasm\nsha256: {h[:-1]} x/m.wasm\n", "bad manifest line"),
+        )
+        for data, manifest, why in cases:
+            with self.subTest(why=why):
+                self.put_blob(data)
+                self.commit_markets(manifest)
+                rc, out = self.export_markets()
+                self.assertEqual(rc, 1, out)
+                self.assertIn(why, out)
+                self.assertEqual(self.leftovers(), [])
+
+    def test_fixtures_are_data_files_only(self):
+        prof = runpy.run_path(os.path.join(HERE, "export_public.py"), run_name="probe")["PROFILES"]
+        for g in prof["drip-markets"]["strict"]["fixture"]:
+            with self.subTest(glob=g):
+                self.assertTrue(g.endswith((".json", "/MANIFEST")), g)
+
+    def test_secret_appended_to_live_source_fails(self):
+        key = "4" + "Zq" * 43  # 87 base58 chars
+        for body in ('const RPC: &str = "https://github.com/rpc?api-key=abc";\n',
+                     f'const K: &str = "{key}";\n'):
+            with self.subTest(body=body[:30]):
+                self.write("submit.rs", "// submit\n" + body)
+                self.commit_markets("submit.rs cranker/src/submit.rs\n")
+                rc, out = self.export_markets()
+                self.assertEqual(rc, 1, out)
+                self.assertIn("strict leak gate", out)
+                self.assertEqual(self.leftovers(), [])
+
+
+class StrictTokens(StrictGate):
+    """check_public_strict.py, token shapes added after the second review."""
+
+    def test_clean_tree_passes(self):  # inherited setUp tree, plus code that must stay clean
+        self.put("ok.ts", 'const apiKey = process.env.KEY;\nconst token = "";\n'
+                          'const secret = "<secret>";\nonKeyDown={e => go(e)}\nseed = (seed + 1) | 0;\n'
+                          "[profile.dev]\n")
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_base64_keypair(self):
+        b = base64.b64encode(bytes(range(64))).decode()
+        self.assertHit("k.ts", f'const k = "{b}";\n', "base64 of 64 bytes")
+        self.assertHit("k.ts", f'const k = "{b.rstrip("=")}";\n', "base64 of 64 bytes")
+        u = base64.urlsafe_b64encode(bytes(range(190, 254))).decode()
+        self.assertHit("k.ts", f"k={u}\n", "base64 of 64 bytes")
+
+    def test_separated_hex_and_byte_lists(self):
+        self.assertHit("h.txt", ":".join(f"{i:02x}" for i in range(32)) + "\n", "separated hex")
+        self.assertHit("h.txt", " ".join(f"{i:02X}" for i in range(64)) + "\n", "separated hex")
+        lst = ",\n    ".join(f"0x{i:02x}" for i in range(32))
+        self.assertHit("b.rs", f"const K: [u8; 32] = [\n    {lst}\n];\n", "0x byte list")
+        flat = "".join(f"{i:02x}" for i in range(32))
+        self.put("b.rs", f"const K: [u8; 32] = [\n    {lst}\n];\n")
+        rc, out = self.gate("--allow-token", flat)
+        self.assertEqual(rc, 0, out)
+        self.put("b.rs", "[" + ", ".join(f"0x{i:02x}" for i in range(31)) + "]\n")
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_token_prefixes(self):
+        for t in ("ghp_" + "a1B2" * 9, "gho_" + "Zz09" * 9, "github_pat_" + "11AB_" * 8,
+                  "sk-" + "proj-" + "x7Y" * 10, "xoxb-" + "1234-5678-abcdEFGH",
+                  "AKIA" + "Q3XZ7KW2M4N6P8RT", "123456789:" + "AAF" + "q1w2e3r4" * 4):
+            with self.subTest(t=t[:8]):
+                self.assertHit("t.md", f"use {t} here\n", "token prefix")
+
+    def test_uuid_assigned_to_secret_names(self):
+        u = "3f2c9a1e-7b4d-4c8e-9f01-2a3b4c5d6e7f"
+        for line in (f"API_KEY={u}", f'token: "{u}"', f"clientSecret = '{u}'", f"Password={u}"):
+            with self.subTest(line=line):
+                self.assertHit("u.txt", line + "\n", "UUID assigned")
+        self.put("ok.txt", f"request_id = {u}\n")
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_secret_assignments_in_code(self):
+        for line in ('const apiKey = "a8f9c2d1";', "api_key: 'q9w8e7'", 'TOKEN = "t0k3n-v4lue"',
+                     'let password = "hunter2";', "client.secret = `s3cr3t`;"):
+            with self.subTest(line=line):
+                self.assertHit("c.ts", line + "\n", "secret-named assignment")
+        self.put("c.ts", 'const apiKey = "a8f9c2d1";\n')
+        rc, out = self.gate("--allow-value", "a8f9c2d1")
+        self.assertEqual(rc, 0, out)
+
+    def test_root_paths_ssh_forms_and_tailnet(self):
+        self.assertHit("r.sh", "cp x /root/.config/solana/id.json\n", "/root/ path")
+        self.assertHit("d.sh", "ssh -p 22 deploy@box.internal-host.io uptime\n", "user@host form")
+        self.assertHit("d.md", "scp out.tar admin@10.1.2.3:/srv/\n", "user@host form")
+        self.assertHit("d.md", "rsync -a dist/ ops@bastion:~/site\n", "user@host form")
+        self.assertHit("t.md", "reach it at box-1.tail1234.ts.net\n", "tailnet name")
+        self.put("ok.md", "git clone git@github.com:org/repo.git\n")
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_bare_host_names(self):
+        self.assertHit("n.md", "the feed lives on metrics.private-co.io now\n", "host name not on the allow list")
+        self.assertHit("n.toml", 'host = "rpc.somevendor.com"\n', "host name not on the allow list")
+        self.put("ok.md", "see docs.github.com, api.example.com and build.sh, lib.rs, index.ts\n")
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_env_values_starting_with_slash_or_dollar_need_allow(self):
+        for line in ("FAUCET_KEYPAIR=/srv/keys/faucet.json", "API_TOKEN=$PROD_TOKEN",
+                     "db_password=/etc/pw", 'SECRET="$X"'):
+            with self.subTest(line=line):
+                self.assertHit("e.env.md", line + "\n", "env-style secret")
+        self.put("e.md", "FAUCET_KEYPAIR=/srv/keys/faucet.json npm start\n")
+        rc, out = self.gate("--allow-value", "/srv/keys/faucet.json")
+        self.assertEqual(rc, 0, out)
+        self.put("e.md", "DRIP_KEYPAIR=~/.config/drip/k.json\nAPI_KEY=<key>\nSEED=\n")
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_hex_equal_to_a_shipped_file_hash_passes(self):
+        self.put("data.bin.txt", "payload\n")
+        h = hashlib.sha256(b"payload\n").hexdigest()
+        self.put("HASHES.md", f"{h}  data.bin.txt\n")
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+        self.assertHit("K.md", f"{hashlib.sha256(b'other').hexdigest()}  gone.txt\n", "hex run")
 
 
 if __name__ == "__main__":

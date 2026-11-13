@@ -16,7 +16,8 @@ fn hostile(name: &str) -> Result<WasmRule> {
     WasmRule::load(&Path::new(DIR).join("testdata/wasm/hostile").join(format!("{name}.wasm")))
 }
 
-/// Real OpenRouter recorder data: 4 h of qwen3.8-27b across a UTC midnight
+/// Synthetic recorder data shaped like a real recording (providers renamed,
+/// prices scaled): 4 h of qwen3.8-27b across a UTC midnight
 /// (2026-11-11 22:00 to 11-12 02:00), with endpoints going down.
 fn real() -> Vec<Series> {
     data::load(&Path::new(DIR).join("testdata/recorder-excerpt")).unwrap().0

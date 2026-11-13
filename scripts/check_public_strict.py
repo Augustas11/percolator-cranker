@@ -19,7 +19,8 @@ any hit, 2 on bad usage. Checks, on every file (binaries included):
 Text files only:
 * base58 runs of 80+ characters (a 64-byte secret key or a signature), and
   hex runs of 64+ characters, outside lock files and --fixture GLOB files,
-  unless listed with --allow-token;
+  unless listed with --allow-token (byte lists: as plain lower-case hex) or,
+  for hex, equal to the sha256 of a file in the tree;
 * URLs: a key-bearing query parameter (api-key, dkey, token, secret, ...)
   unless the host is reserved or single-label; any dRPC, Helius, QuickNode
   or Alchemy URL; a host outside --allow-domain (and outside reserved,
@@ -30,13 +31,24 @@ Text files only:
 * IPv4 other than loopback, private, unspecified and documentation ranges,
   each address judged alone; IPv6 other than loopback and unspecified;
 * JSON: any array of exactly 64 integers 0-255 (a keypair), however laid out;
-* env-style lines (NAME=value) whose name looks secret and whose value is
-  not a placeholder, whatever the file is called.
+* env-style lines (NAME=value) whose name looks secret (any case) and whose
+  value is not a placeholder, whatever the file is called; a value starting
+  with / or $ counts only when listed with --allow-value;
+* token shapes: base64 that decodes to 64 bytes (a keypair), hex with : or
+  space separators and 0x.. byte lists of 32+ bytes, known token prefixes
+  (ghp_, gho_, github_pat_, sk-, xox?-, AKIA, Telegram bot tokens), UUIDs
+  assigned to key/token/secret/password names, and quoted values assigned
+  to apiKey/token/secret/password names in code (placeholders and
+  --allow-value values pass);
+* /root/ paths, user@host SSH forms and *.ts.net names; bare host names
+  (no scheme) outside --allow-domain.
+The token-shape and bare-host checks skip lock files and --fixture files.
 """
 
 import argparse
 import base64
 import fnmatch
+import hashlib
 import ipaddress
 import json
 import os
@@ -61,11 +73,30 @@ SECRET_PARAM = re.compile(r"[?&;](?:api[-_]?key|dkey|token|secret|access[-_]?tok
 RPC_VENDOR = re.compile(r"drpc|helius|quiknode|quicknode|alchemy", re.I)
 IPV4 = re.compile(r"\d+\.\d+\.\d+\.\d+")
 IPV6 = re.compile(r"(?<![0-9A-Za-z_:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![0-9A-Za-z_:])")
-ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*)$")
-SECRET_NAME = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|PASSWD|MNEMONIC|SEED|PRIVATE")
+ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+SECRET_NAME = re.compile(r"(?i:KEY|SECRET|TOKEN|PASSWORD)|PASSWD|MNEMONIC|SEED|PRIVATE")
 PLACEHOLDER = re.compile(r"""^(|["']{2}|\$.*|<.*>|\.\.\.|.*\.\.\.|your.*|changeme|none|null|x+|example.*|[~.]?/\S*)$""", re.I)
 RESERVED = re.compile(r"(^|\.)(example(\.(com|org|net))?|invalid|test|localhost)$", re.I)
 LOCKS = {"Cargo.lock", "package-lock.json"}
+B64_64 = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{86}(?:==)?(?![A-Za-z0-9+/_=-])")
+HEX_SEP = re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{2}[: ]){31,}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:])")
+BYTE_LIST = re.compile(r"(?:0x[0-9A-Fa-f]{1,2}\s*,\s*){31,}0x[0-9A-Fa-f]{1,2}(?![0-9A-Fa-f])")
+TOKEN_PREFIX = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})"
+    r"|(?<![\w:])\d{8,10}:[A-Za-z0-9_-]{35}(?![\w-])")
+UUID = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+UUID_ASSIGN = re.compile(r"(?i)(?:key|token|secret|password)[\w-]*[\"'`]?\s*[:=]\s*[\"'`]?" + UUID)
+SECRET_ASSIGN = re.compile(
+    r"(?i)\b([\w-]*(?:api[_-]?key|token|secret|passw(?:or)?d)[\w-]*)[\"']?\s*[:=]\s*([\"'`])([^\"'`\n]*)\2")
+CODE_PLACEHOLDER = re.compile(r"(?i)^(|<.*>|\$\{.*\}|\{\{.*\}\}|your[-_ ].*|x{3,}|\*+|\.\.\.|changeme|example.*|test|none|null|redacted)$")
+ROOT_PATH = re.compile(r"(?<![\w.~-])/root/")
+SSH_CMD = re.compile(r"\b(?:ssh|scp|sftp|rsync)\s[^\n]*?[\w.-]+@([\w.-]+)")
+SSH_PATH = re.compile(r"(?<![\w.+/@-])[\w.-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*):[\w~/]")
+TS_NET = re.compile(r"(?i)\b[\w-]+(?:\.[\w-]+)*\.ts\.net\b")
+BARE_HOST = re.compile(
+    r"(?<![\w.@/:\[-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|ai|xyz|cloud|tech|pro|gg|info))"
+    r"(?![\w-]|\.[A-Za-z0-9])", re.I)
 
 
 def fold(text):
@@ -154,6 +185,7 @@ def main(argv):
     ap.add_argument("--allow-token", action="append", default=[])
     ap.add_argument("--fixture", action="append", default=[])
     ap.add_argument("--allow-binary", action="append", default=[])
+    ap.add_argument("--allow-value", action="append", default=[])
     ap.add_argument("--binary-cap", type=int, default=256 * 1024)
     a = ap.parse_args(argv)
     if not os.path.isdir(a.root) or not os.path.isfile(a.denylist):
@@ -170,8 +202,25 @@ def main(argv):
     phrases = [fold(p) for p in a.allow_phrase]
     domains = [d.lower().lstrip(".") for d in a.allow_domain]
     tokens = set(a.allow_token)
+    values = set(a.allow_value)
+
+    def allowed_host(host):
+        host = host.lower().rstrip(".")
+        return bool(RESERVED.search(host)) or any(host == d or host.endswith("." + d) for d in domains)
 
     hits = []
+    cache = []
+
+    def tree_hashes():
+        """sha256 of every file in the tree: a hash list of shipped files is not a secret."""
+        if not cache:
+            got = set()
+            for d, _, fs in os.walk(a.root):
+                for f in fs:
+                    with open(os.path.join(d, f), "rb") as fh:
+                        got.add(hashlib.sha256(fh.read()).hexdigest())
+            cache.append(got)
+        return cache[0]
 
     def hit(rel, what):
         hits.append(f"  {what}: {rel}")
@@ -211,7 +260,7 @@ def main(argv):
                     if m not in tokens:
                         hit(rel, f"base58 run of {len(m)} chars: {m[:12]}...")
                 for m in HEX.findall(text):
-                    if m not in tokens:
+                    if m not in tokens and m.lower() not in tree_hashes():
                         hit(rel, f"hex run of {len(m)} chars: {m[:12]}...")
             for url in URL.findall(text):
                 host = host_of(url).lower()
@@ -256,8 +305,49 @@ def main(argv):
                 if m and SECRET_NAME.search(m.group(1)):
                     words = m.group(2).split()  # NAME=value command ...: judge value
                     v = words[0] if words else ""
-                    if not PLACEHOLDER.match(v):
+                    if v in values:
+                        continue
+                    if not m.group(1).isupper() and (v[:1] in "{([" or v.replace("_", "").isdigit()):
+                        continue  # code (onKeyDown={...}, seed = (...)), or a number
+                    if v.startswith(("/", "$", '"/', '"$', "'/", "'$")) or not PLACEHOLDER.match(v):
                         hit(rel, f"env-style secret: {m.group(1)}=")
+            for m in ROOT_PATH.finditer(text):
+                hit(rel, "/root/ path")
+                break
+            for m in TS_NET.finditer(text):
+                hit(rel, f"tailnet name: {m.group()}")
+            for rx in (SSH_CMD, SSH_PATH):
+                for m in rx.finditer(text):
+                    if not allowed_host(m.group(1)):
+                        hit(rel, f"user@host form: {m.group()}")
+            for m in UUID_ASSIGN.finditer(text):
+                hit(rel, f"UUID assigned to a secret name: {m.group()[:40]}")
+            for m in (SECRET_ASSIGN.finditer(text) if fn not in LOCKS else ()):
+                v = m.group(3)
+                if v not in values and not CODE_PLACEHOLDER.match(v.strip()):
+                    hit(rel, f"secret-named assignment: {m.group(1)} = {v[:12]!r}")
+            if fn not in LOCKS and not fixture:
+                for m in TOKEN_PREFIX.finditer(text):
+                    if m.group() not in tokens:
+                        hit(rel, f"token prefix: {m.group()[:12]}...")
+                for m in B64_64.finditer(text):
+                    t = m.group()
+                    if t in tokens:
+                        continue
+                    try:
+                        raw = base64.b64decode(t.replace("-", "+").replace("_", "/") + "=" * (-len(t) % 4))
+                    except ValueError:
+                        continue
+                    if len(raw) == 64:
+                        hit(rel, f"base64 of 64 bytes (keypair shape): {t[:12]}...")
+                for rx, what in ((HEX_SEP, "separated hex"), (BYTE_LIST, "0x byte list")):
+                    for m in rx.finditer(text):
+                        flat = "".join(b[-2:].rjust(2, "0") for b in re.findall(r"(?:0x)?[0-9A-Fa-f]{1,2}", m.group()))
+                        if flat.lower() not in tokens:
+                            hit(rel, f"{what} of 32+ bytes: {m.group()[:20]}...")
+                for m in BARE_HOST.finditer(text):
+                    if not allowed_host(m.group(1)):
+                        hit(rel, f"host name not on the allow list: {m.group(1)}")
     print(f"== check_public_strict: {a.root}")
     for h in hits:
         print(h)

@@ -697,7 +697,7 @@ mod tests {
         assert!(quiet_txs >= 5 * 2, "quiet got {quiet_txs} txs over 5 cycles");
     }
 
-    /// Re-audit finding: a deadline hit before the send used to fall through
+    /// A deadline hit before the send used to fall through
     /// to Idle (clearing history, bumping the idle streak, losing its place).
     /// Deferred touches no streak and keeps the account first next cycle;
     /// Unconfirmed is reported, never Idle or Failed.
@@ -728,7 +728,7 @@ mod tests {
         assert_eq!(order, vec![1, 1, 2]);
     }
 
-    /// Re-audit finding: a standalone Unconfirmed outcome (no budget note)
+    /// A standalone Unconfirmed outcome (no budget note)
     /// must still be reported once, and must not touch account health.
     #[test]
     fn standalone_unconfirmed_is_reported_and_neutral() {
@@ -751,7 +751,7 @@ mod tests {
         assert_eq!((s.idle, s.failed, s.idle_pending_stuck), (0, 0, 0));
     }
 
-    /// Re-audit finding: an unconfirmed tail after earlier drain progress
+    /// An unconfirmed tail after earlier drain progress
     /// must still be reported, alongside the Progress.
     #[test]
     fn unconfirmed_tail_is_reported_even_after_progress() {

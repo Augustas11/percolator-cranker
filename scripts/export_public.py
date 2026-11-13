@@ -43,6 +43,10 @@ Manifest lines (`#` starts a comment):
                                      matches nothing, or a match is caught by
                                      the exclude rules (excluded()) or names
                                      a denylisted string
+    sha256: <hex> <public path>      pins a binary file; the export holds no
+                                     other binaries (drip-markets, or any
+                                     manifest with a pin) and fails on a
+                                     changed hash or an unused pin
     skip: <private path>             a committed file under a checked dir
                                      that deliberately stays private
     allow-phrase: <words>            the leak gates ignore this phrase
@@ -57,6 +61,7 @@ says so); with --release a missing SECURITY_CONTACT fails the export.
 
 import argparse
 import fnmatch
+import hashlib
 import os
 import posixpath
 import re
@@ -193,6 +198,22 @@ MARKETS_DOMAINS = [
     "openapi.vercel.sh", "apache.org", "w3.org", "googleapis.com", "gstatic.com",
     "x.com", "openrouter.ai", "flop.network", "binance.com", "binance.us",
     "kraken.com", "coinbase.com",
+    "z.ai",            # an OpenRouter provider's name (frontend/src/compute/fixture.ts)
+    "127.0.0.1.evil",  # a URL-parsing test host (cranker/tests/common/mod.rs)
+]
+
+# Exact strings in source files that the strict gate would otherwise refuse.
+STRICT_TOKENS = [
+    # The first matcher fill's transaction signature (matcher/README.md).
+    "4biJBxUbhkEXpr1Zb43CYmEFU74rqBH12p6qjeGM7JfuWNy4Vf4wLMkLEtPHLiQNoq7xgjjSi9iAvKjHJnhemaZt",
+    # A public Pyth price-feed id (launch/*.toml); an all-ones test cursor (indexer/src/api.rs).
+    "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d", "1" * 64,
+    # Pyth receiver program id as a byte array (cranker/src/observation.rs).
+    "0cb7fabb52f7a648bb5b317d9a018b9057cb024774fafe01e6c4df98cc385881",
+]
+STRICT_VALUES = [
+    # Example key paths in agents/README.md; a rejected test key (mcp/src/drip.test.ts).
+    "/path/basis.json", "/path/hedge-long.json", "/path/trend.json", "invalid",
 ]
 
 PROFILES = {
@@ -216,19 +237,17 @@ PROFILES = {
         "subs": {"@SITE_URL@": "https://drip-devnet.vercel.app"},
         # Placeholders the public tree keeps on purpose (a deployer fills them).
         "keep": ["DEPLOY_HOST"],
-        "dot_ok": DOT_OK | {".dockerignore"},
-        # scripts/check_public_strict.py options (public paths).
+        "dot_ok": DOT_OK | {".dockerignore", ".cargo"},
+        # scripts/check_public_strict.py options (public paths). Binaries are
+        # allowed only by the manifest's sha256: pins.
         "strict": {
             "allow_domain": MARKETS_DOMAINS,
-            # Recorded transactions, account dumps, data hashes, URL-parsing tests.
+            # Pure data files only (recorded transactions, account dumps, data
+            # hashes); never source. Strings in source are allowed by value below.
             "fixture": ["indexer/tests/fixtures/*.json", "frontend/src/chain/fixtures/*.json",
-                        "flop-index/pins/*/MANIFEST", "cranker/tests/common/mod.rs",
-                        "cranker/src/submit.rs", "mcp/src/drip.test.ts"],
-            # The first matcher fill's transaction signature (matcher/README.md).
-            # A public Pyth price-feed id (launch/*.toml); an all-ones test cursor (indexer/src/api.rs).
-            "allow_token": ["ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d", "1" * 64,
-                            "4biJBxUbhkEXpr1Zb43CYmEFU74rqBH12p6qjeGM7JfuWNy4Vf4wLMkLEtPHLiQNoq7xgjjSi9iAvKjHJnhemaZt"],
-            "allow_binary": ["frontend/public/og.png", "frontend/src/chain/fixtures/*.bin"],
+                        "flop-index/pins/*/MANIFEST", "flop-index/testdata/*/MANIFEST"],
+            "allow_token": STRICT_TOKENS,
+            "allow_value": STRICT_VALUES,
             "binary_cap": 256 * 1024,
         },
         # Private docs and scripts the public tree must not point at.
@@ -315,6 +334,10 @@ def glob_regex(pattern):
     return re.compile(out + r"\Z")
 
 
+def glob_escape(path):
+    return re.sub(r"([*?\[])", r"[\1]", path)
+
+
 def denylist_patterns(text):
     out = []
     for raw in text.splitlines():
@@ -358,7 +381,7 @@ def main(argv):
     manifest_path = prof["manifest"]
     manifest = git("cat-file", "blob", f"{head}:{manifest_path}")
     deny = denylist_patterns(git("cat-file", "blob", f"{head}:scripts/public_denylist.txt"))
-    entries, listed, dests, globs, skips, phrases = [], set(), set(), [], set(), []
+    entries, listed, dests, globs, skips, phrases, pins = [], set(), set(), [], set(), [], {}
 
     def add(src, to):
         if any(part in forbidden for part in posixpath.normpath(src).split("/")):
@@ -381,6 +404,12 @@ def main(argv):
             phrases.append(phrase)
             continue
         parts = line.split()
+        if parts[0] == "sha256:":
+            if (len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{64}", parts[1])
+                    or parts[2] in pins):
+                die(f"bad manifest line: {raw!r}")
+            pins[parts[2]] = parts[1]
+            continue
         if parts[0] == "dir:":
             die(f"dir: entries are gone; list files or use glob: ({raw!r})")
         if parts[0] == "glob:":
@@ -523,6 +552,30 @@ def main(argv):
                             die(f"export still refers to private {bad}: "
                                 f"{os.path.relpath(os.path.join(dirpath, name), tmp)}")
 
+        # Binaries: each one pinned by sha256 in the manifest, every pin used.
+        if prof["strict"] is not None or pins:
+            seen = set()
+            for dirpath, _, files in os.walk(tmp):
+                for fn in files:
+                    p = os.path.join(dirpath, fn)
+                    rel = os.path.relpath(p, tmp).replace(os.sep, "/")
+                    data = open(p, "rb").read()
+                    try:
+                        binary = "\0" in data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        binary = True
+                    if not binary:
+                        if rel in pins:
+                            die(f"sha256: pin names a text file: {rel}")
+                        continue
+                    if rel not in pins:
+                        die(f"binary file without a sha256: pin in {manifest_path}: {rel}")
+                    if hashlib.sha256(data).hexdigest() != pins[rel]:
+                        die(f"binary file changed (sha256 differs from its pin): {rel}")
+                    seen.add(rel)
+            for rel in sorted(set(pins) - seen):
+                die(f"sha256: pin for a file the export does not contain: {rel}")
+
         # The gates as committed at HEAD, never the working copy.
         for g in GATE_FILES:
             if g.endswith(".py") and prof["strict"] is None:
@@ -557,9 +610,11 @@ def main(argv):
                       "--binary-cap", str(st["binary_cap"])]
             for ph in phrases:
                 strict += ["--allow-phrase", ph]
-            for key in ("allow_domain", "fixture", "allow_token", "allow_binary"):
+            for key in ("allow_domain", "fixture", "allow_token", "allow_value"):
                 for v in st[key]:
                     strict += ["--" + key.replace("_", "-"), v]
+            for rel in sorted(pins):
+                strict += ["--allow-binary", glob_escape(rel)]
             if subprocess.run(strict).returncode != 0:
                 die("strict leak gate found hits (see above)")
         # No-replace publication: mkdir is atomic and fails if anything now
