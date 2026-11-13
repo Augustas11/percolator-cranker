@@ -6,6 +6,7 @@ use crate::feed::{day, MAX_FUTURE_MS};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -43,7 +44,7 @@ struct Row {
     up: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Snap {
     at_ms: u64,
     rows: Vec<Row>,
@@ -92,16 +93,49 @@ fn read_day(path: &Path, quotes: &mut Quotes) -> Result<Vec<Snap>> {
             .filter_map(|r| {
                 let provider = r["provider"].as_str()?;
                 let quant = r["quantization"].as_str().unwrap_or("unknown");
-                let key = r["tag"].as_str().map(String::from).unwrap_or_else(|| format!("{provider}/{quant}"));
+                let key = format!("{provider}\u{0}{quant}");
                 // A missing status reads as 0 (up), as in the pusher.
                 let up = r["status"].is_null() || r["status"].as_i64() == Some(0);
                 Some(Row { quote: quotes.id(key, provider, quant), price: blend(r["prompt"].as_f64(), r["completion"].as_f64()), up })
             })
             .collect();
-        out.push(Snap { at_ms, rows });
+        out.push(Snap { at_ms, rows: dedup(rows) });
     }
     out.sort_by_key(|s| s.at_ms);
     Ok(out)
+}
+
+/// One row per quote (provider, quantization): the usable one with the
+/// lowest price, else an up one, else any.
+fn dedup(rows: Vec<Row>) -> Vec<Row> {
+    let rank = |r: &Row| (if r.up && r.price.is_some() { 0 } else if r.up { 1 } else { 2 }, r.price.unwrap_or(f64::INFINITY));
+    let mut best: BTreeMap<u32, Row> = BTreeMap::new();
+    for r in rows {
+        let e = best.entry(r.quote).or_insert(r);
+        let (a, b) = (rank(&r), rank(e));
+        if a.0 < b.0 || (a.0 == b.0 && a.1 < b.1) {
+            *e = r;
+        }
+    }
+    best.into_values().collect()
+}
+
+/// The group key of a model: its Hugging Face id (else its own id),
+/// lowercased, without a trailing date snapshot (`-0731`, `-20261017`).
+pub fn alias_key(id: &str) -> String {
+    let id = id.to_lowercase();
+    match id.rsplit_once('-') {
+        Some((stem, tail)) if [4, 6, 8].contains(&tail.len()) && tail.bytes().all(|b| b.is_ascii_digit()) && !stem.is_empty() => stem.to_owned(),
+        _ => id,
+    }
+}
+
+/// One demand line: Hugging Face downloads (30 days) and likes.
+#[derive(Clone, Debug)]
+struct Demand {
+    at_ms: u64,
+    downloads: Option<u64>,
+    likes: Option<u64>,
 }
 
 /// Keep the first snapshot of each hour.
@@ -122,6 +156,10 @@ pub struct Wide {
     quotes: Quotes,
     /// Model id → its day files.
     models: BTreeMap<String, HashMap<PathBuf, DayFile>>,
+    /// Model id → Hugging Face id, from `hf-map.tsv`.
+    hf: HashMap<String, String>,
+    /// Demand day files: size and (model id, line).
+    demand: HashMap<PathBuf, (u64, Vec<(String, Demand)>)>,
     /// The index so far; `None` until a base is set.
     pub state: Option<IndexState>,
 }
@@ -136,8 +174,20 @@ impl Wide {
             self.models.clear();
             return Ok(());
         };
+        // Optional inputs: a missing or odd one is no data, not an error.
+        self.hf = std::fs::read_to_string(dir.join("hf-map.tsv"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                let (id, hf) = (f.next()?.trim(), f.next()?.trim());
+                (!id.is_empty() && !hf.is_empty()).then(|| (id.to_owned(), hf.to_lowercase()))
+            })
+            .collect();
+        self.update_demand(&dir.join("demand"), &first);
         let mut seen = BTreeSet::new();
-        for d in entries.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()) {
+        // Model directories are `<org>__<name>`; anything else is not a model.
+        for d in entries.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n.to_string_lossy().contains("__"))) {
             let id = d.file_name().unwrap_or_default().to_string_lossy().replace("__", "/");
             let Ok(files) = std::fs::read_dir(&d) else { continue };
             let cache = self.models.entry(id.clone()).or_default();
@@ -169,6 +219,30 @@ impl Wide {
         Ok(())
     }
 
+    fn update_demand(&mut self, dir: &Path, first: &str) {
+        let mut keep = Vec::new();
+        for p in std::fs::read_dir(dir).into_iter().flatten().filter_map(|e| e.ok().map(|e| e.path())) {
+            let stem = p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            if p.extension().is_none_or(|x| x != "jsonl") || stem.len() != 10 || stem.as_str() < first {
+                continue;
+            }
+            let Ok(len) = p.metadata().map(|m| m.len()) else { continue };
+            if self.demand.get(&p).is_none_or(|f| f.0 != len) {
+                let Ok(text) = std::fs::read(&p) else { continue };
+                let lines = text
+                    .split(|b| *b == b'\n')
+                    .filter_map(|l| {
+                        let v: Value = serde_json::from_slice(l).ok()?;
+                        Some((v["model"].as_str()?.to_owned(), Demand { at_ms: v["at_ms"].as_u64()?, downloads: v["downloads_30d"].as_u64(), likes: v["likes"].as_u64() }))
+                    })
+                    .collect();
+                self.demand.insert(p.clone(), (len, lines));
+            }
+            keep.push(p);
+        }
+        self.demand.retain(|p, _| keep.contains(p));
+    }
+
     /// Start from a saved index state (see `IndexState::load`).
     pub fn with_state(state: Option<IndexState>) -> Self {
         Self { state, ..Self::default() }
@@ -178,27 +252,50 @@ impl Wide {
     /// `self.state` afterwards (`index-state.json`).
     pub fn market_json(&mut self, now_ms: u64) -> Result<Value> {
         let from = now_ms.saturating_sub(HOLD_MS);
-        let models: Vec<Model> = self
-            .models
-            .iter()
-            .map(|(id, files)| {
-                let mut snaps: Vec<&Snap> = files.values().flat_map(|f| &f.snaps).filter(|s| s.at_ms >= from && s.at_ms <= now_ms + MAX_FUTURE_MS).collect();
-                snaps.sort_by_key(|s| s.at_ms);
-                Model::new(id, snaps)
+        // Aliases: ids sharing a Hugging Face id are one model.
+        let mut groups: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+        for id in self.models.keys() {
+            groups.entry(alias_key(self.hf.get(id).map_or(id.as_str(), |h| h.as_str()))).or_default().push(id);
+        }
+        let models: Vec<Model> = groups
+            .into_values()
+            .map(|mut ids| {
+                ids.sort_by_key(|id| (id.len(), *id));
+                let per: Vec<Vec<&Snap>> = ids
+                    .iter()
+                    .map(|id| {
+                        let mut v: Vec<&Snap> = self.models[*id].values().flat_map(|f| &f.snaps).filter(|s| s.at_ms >= from && s.at_ms <= now_ms + MAX_FUTURE_MS).collect();
+                        v.sort_by_key(|s| s.at_ms);
+                        v
+                    })
+                    .collect();
+                Model::group(ids, per)
             })
             .collect();
         if models.iter().all(|m| m.snaps.is_empty()) {
             bail!("no wide collector data yet");
         }
         advance(&models, &mut self.state, now_ms);
-        Ok(market(&models, &self.quotes.names, self.state.as_ref(), now_ms))
+        let mut demand: HashMap<&str, Vec<&Demand>> = HashMap::new();
+        for (m, d) in self.demand.values().flat_map(|f| &f.1) {
+            demand.entry(m.as_str()).or_default().push(d);
+        }
+        Ok(market(&models, &self.quotes.names, self.state.as_ref(), &demand, now_ms))
     }
 }
 
-/// One model's snapshots and its median at each.
+/// One model (a group of alias ids) and its median at each snapshot.
 struct Model<'a> {
+    /// The shortest id in the group, and the others.
     id: &'a str,
-    snaps: Vec<&'a Snap>,
+    aliases: Vec<&'a str>,
+    /// For a group, each member fetch gives a snapshot of every member's
+    /// latest listing (within a day), merged by (provider, quantization).
+    snaps: Vec<Cow<'a, Snap>>,
+    /// Per snapshot: which member was fetched, and the bitmask of members
+    /// listed in it.
+    src: Vec<usize>,
+    members: Vec<u64>,
     /// Median of usable quotes, or the last one carried forward.
     median: Vec<Option<f64>>,
     /// Whether `median` was computed at that snapshot (not carried).
@@ -212,7 +309,34 @@ fn usable(s: &Snap) -> Vec<f64> {
 }
 
 impl<'a> Model<'a> {
-    fn new(id: &'a str, snaps: Vec<&'a Snap>) -> Self {
+    /// `ids` shortest first; `per` each id's snapshots in time order.
+    fn group(ids: Vec<&'a str>, per: Vec<Vec<&'a Snap>>) -> Self {
+        let (mut snaps, mut src, mut members) = (Vec::new(), Vec::new(), Vec::new());
+        if per.len() == 1 {
+            snaps = per[0].iter().map(|s| Cow::Borrowed(*s)).collect();
+            src = vec![0; snaps.len()];
+            members = vec![1; snaps.len()];
+        } else {
+            let mut ev: Vec<(u64, usize, &Snap)> = per.iter().enumerate().flat_map(|(k, v)| v.iter().map(move |s| (s.at_ms, k, *s))).collect();
+            ev.sort_by_key(|e| (e.0, e.1));
+            let mut latest: Vec<Option<&Snap>> = vec![None; per.len()];
+            for (t, k, s) in ev {
+                latest[k] = Some(s);
+                let live: Vec<(usize, &Snap)> = latest.iter().enumerate().filter_map(|(j, l)| l.filter(|l| t - l.at_ms <= DROP_MS).map(|l| (j, l))).collect();
+                snaps.push(Cow::Owned(Snap { at_ms: t, rows: dedup(live.iter().flat_map(|(_, l)| l.rows.iter().copied()).collect()) }));
+                src.push(k);
+                members.push(live.iter().fold(0u64, |m, (j, _)| m | 1u64 << (*j).min(63)));
+            }
+        }
+        Self::new(ids[0], ids[1..].to_vec(), snaps, src, members)
+    }
+
+    /// The member ids in a bitmask from `members`.
+    fn member_ids(&self, mask: u64) -> Vec<String> {
+        std::iter::once(self.id).chain(self.aliases.iter().copied()).enumerate().filter(|(j, _)| mask & (1u64 << (*j).min(63)) != 0).map(|(_, id)| id.to_owned()).collect()
+    }
+
+    fn new(id: &'a str, aliases: Vec<&'a str>, snaps: Vec<Cow<'a, Snap>>, src: Vec<usize>, members: Vec<u64>) -> Self {
         let (mut median, mut fresh, mut last) = (Vec::new(), Vec::new(), None);
         for s in &snaps {
             let u = usable(s);
@@ -223,7 +347,7 @@ impl<'a> Model<'a> {
             median.push(last);
             fresh.push(ok);
         }
-        Self { id, snaps, median, fresh }
+        Self { id, aliases, snaps, src, members, median, fresh }
     }
 
     /// The median at the last snapshot at or before `t`.
@@ -274,6 +398,9 @@ fn steps(pts: &[(u64, f64)], max: usize) -> Vec<(u64, f64)> {
 pub struct Basket {
     pub base: f64,
     pub last: f64,
+    /// The alias ids listed when it joined (empty: just the model's id).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
 }
 
 /// The index state, persisted as `index-state.json` so the base never moves.
@@ -306,12 +433,15 @@ impl IndexState {
         Ok(Some(s))
     }
 
-    /// One step at snapshot `t` with the models in the index now (id → median).
-    /// Models leaving: the remaining bases are scaled so the level at the last
-    /// medians is unchanged. Then the level is the Jevons index over the
-    /// models staying. Models joining: base = median / (level / 100).
-    fn step(&mut self, t: u64, active: &BTreeMap<&str, f64>) {
-        let gone: Vec<String> = self.models.keys().filter(|k| !active.contains_key(k.as_str())).cloned().collect();
+    /// One step at snapshot `t` with the models in the index now (id →
+    /// (median, alias ids listed)). Models leaving: the remaining bases are
+    /// scaled so the level at the last medians is unchanged. Then the level
+    /// is the Jevons index over the models staying. Models joining: base =
+    /// median / (level / 100). A model whose listed aliases changed leaves
+    /// and joins again in the same step.
+    fn step(&mut self, t: u64, active: &BTreeMap<&str, (f64, Vec<String>)>) {
+        let same = |k: &str, b: &Basket, now: &[String]| if b.members.is_empty() { now.len() == 1 && now[0] == k } else { b.members == now };
+        let gone: Vec<String> = self.models.iter().filter(|(k, b)| active.get(k.as_str()).is_none_or(|a| !same(k, b, &a.1))).map(|(k, _)| k.clone()).collect();
         if !gone.is_empty() {
             for k in &gone {
                 self.models.remove(k);
@@ -323,12 +453,12 @@ impl IndexState {
             }
         }
         // No median moved: the level stays exactly (no float drift after a rescale).
-        if self.models.iter().any(|(k, b)| active[k.as_str()] != b.last) {
-            let mean = self.models.iter().map(|(k, b)| (active[k.as_str()] / b.base).ln()).sum::<f64>() / self.models.len() as f64;
+        if self.models.iter().any(|(k, b)| active[k.as_str()].0 != b.last) {
+            let mean = self.models.iter().map(|(k, b)| (active[k.as_str()].0 / b.base).ln()).sum::<f64>() / self.models.len() as f64;
             self.level = 100.0 * mean.exp();
         }
-        for (k, m) in active {
-            let b = self.models.entry((*k).to_owned()).or_insert(Basket { base: m / (self.level / 100.0), last: *m });
+        for (k, (m, members)) in active {
+            let b = self.models.entry((*k).to_owned()).or_insert_with(|| Basket { base: m / (self.level / 100.0), last: *m, members: members_field(k, members) });
             b.last = *m;
         }
         self.at_ms = t;
@@ -354,28 +484,45 @@ impl IndexState {
     }
 }
 
+/// Members as stored: empty when it is just the model's own id.
+fn members_field(id: &str, members: &[String]) -> Vec<String> {
+    if members.len() == 1 && members[0] == id { Vec::new() } else { members.to_vec() }
+}
+
 /// Advance the chain-linked Jevons index over snapshots after the state's
 /// last step. Without a state, the base is the first snapshot where every
 /// model priced within the first day of the data has a median.
 fn advance(models: &[Model], state: &mut Option<IndexState>, now_ms: u64) {
     // Cycles: snapshots of all models in time order; a new cycle starts after
     // a pause or when a model repeats. Its time is its last snapshot.
-    let mut ev: Vec<(u64, usize, usize)> = models.iter().enumerate().flat_map(|(m, x)| x.snaps.iter().enumerate().map(move |(i, s)| (s.at_ms, m, i))).collect();
+    // A repeat is the same fetched id (an alias group has one snapshot per member fetch).
+    let mut ev: Vec<(u64, usize, usize, usize)> = models.iter().enumerate().flat_map(|(m, x)| x.snaps.iter().enumerate().map(move |(i, s)| (s.at_ms, m, i, x.src[i]))).collect();
     ev.sort();
-    let mut cycles: Vec<Vec<(u64, usize, usize)>> = Vec::new();
+    let mut cycles: Vec<Vec<(u64, usize, usize, usize)>> = Vec::new();
     for e in ev {
         match cycles.last_mut() {
-            Some(c) if e.0 - c.last().unwrap().0 <= CYCLE_GAP_MS && !c.iter().any(|x| x.1 == e.1) => c.push(e),
+            Some(c) if e.0 - c.last().unwrap().0 <= CYCLE_GAP_MS && !c.iter().any(|x| x.1 == e.1 && x.3 == e.3) => c.push(e),
             _ => cycles.push(vec![e]),
         }
     }
-    let t_of = |c: &Vec<(u64, usize, usize)>| c.last().unwrap().0;
+    let t_of = |c: &Vec<(u64, usize, usize, usize)>| c.last().unwrap().0;
+    // If a model's median at the last step, recomputed from the data, is not
+    // the saved one (the method changed, e.g. quotes de-duplicated), re-link
+    // its base so the level at that step is unchanged.
+    if let Some(st) = state.as_mut() {
+        for (k, b) in st.models.iter_mut() {
+            if let Some(r) = models.iter().find(|m| m.id == k).and_then(|m| m.median_at(st.at_ms)).filter(|r| *r != b.last) {
+                b.base *= r / b.last;
+                b.last = r;
+            }
+        }
+    }
     let mut base = None;
     if state.is_none() {
         let Some(t_first) = cycles.first().map(t_of) else { return };
         let mut first_fresh: Vec<Option<u64>> = vec![None; models.len()];
         for c in &cycles {
-            for &(_, m, i) in c {
+            for &(_, m, i, _) in c {
                 if models[m].fresh[i] && first_fresh[m].is_none() {
                     first_fresh[m] = Some(t_of(c));
                 }
@@ -388,9 +535,11 @@ fn advance(models: &[Model], state: &mut Option<IndexState>, now_ms: u64) {
     }
     let mut cur: Vec<Option<f64>> = vec![None; models.len()];
     let mut last_fresh: Vec<Option<u64>> = vec![None; models.len()];
+    let mut listed: Vec<u64> = vec![0; models.len()];
     for c in &cycles {
         let t = t_of(c);
-        for &(_, m, i) in c {
+        for &(_, m, i, _) in c {
+            listed[m] = models[m].members[i];
             if models[m].median[i].is_some() {
                 cur[m] = models[m].median[i];
             }
@@ -402,11 +551,11 @@ fn advance(models: &[Model], state: &mut Option<IndexState>, now_ms: u64) {
             continue;
         }
         // In the index: a median, and a fresh one within the last day.
-        let active: BTreeMap<&str, f64> = (0..models.len()).filter_map(|m| Some((models[m].id, cur[m].filter(|_| last_fresh[m].is_some_and(|f| t - f <= DROP_MS))?))).collect();
+        let active: BTreeMap<&str, (f64, Vec<String>)> = (0..models.len()).filter_map(|m| Some((models[m].id, (cur[m].filter(|_| last_fresh[m].is_some_and(|f| t - f <= DROP_MS))?, models[m].member_ids(listed[m]))))).collect();
         match state {
             Some(s) => s.step(t, &active),
             None => {
-                let models = active.iter().map(|(k, m)| ((*k).to_owned(), Basket { base: *m, last: *m })).collect();
+                let models = active.iter().map(|(k, (m, mem))| ((*k).to_owned(), Basket { base: *m, last: *m, members: members_field(k, mem) })).collect();
                 *state = Some(IndexState { v: 1, base_ms: t, at_ms: t, level: 100.0, models, series: vec![(t, 100.0)] });
             }
         }
@@ -447,7 +596,20 @@ pub fn name_family(id: &str) -> (String, String) {
     (rest.split('-').filter(|w| !w.is_empty()).map(word).collect::<Vec<_>>().join(" "), family)
 }
 
-fn market(models: &[Model], names: &[(String, String)], state: Option<&IndexState>, now_ms: u64) -> Value {
+/// The demand block of a model from its own lines, else its aliases'.
+fn demand_json(m: &Model, demand: &HashMap<&str, Vec<&Demand>>) -> Value {
+    let lines = std::iter::once(m.id).chain(m.aliases.iter().copied()).find_map(|id| demand.get(id).filter(|v| !v.is_empty()));
+    let Some(lines) = lines else { return json!({ "hf_downloads_30d": null, "hf_likes": null, "hf_downloads_change_7d_pct": null, "as_of_ms": null }) };
+    let new = lines.iter().max_by_key(|d| d.at_ms).unwrap();
+    let old = lines.iter().filter(|d| d.at_ms + 6 * DAY_MS <= new.at_ms).max_by_key(|d| d.at_ms);
+    let change = match (new.downloads, old.and_then(|o| o.downloads)) {
+        (Some(n), Some(o)) if o > 0 => Some((n as f64 / o as f64 - 1.0) * 100.0),
+        _ => None,
+    };
+    json!({ "hf_downloads_30d": new.downloads, "hf_likes": new.likes, "hf_downloads_change_7d_pct": change, "as_of_ms": new.at_ms })
+}
+
+fn market(models: &[Model], names: &[(String, String)], state: Option<&IndexState>, demand: &HashMap<&str, Vec<&Demand>>, now_ms: u64) -> Value {
     let day_ago = now_ms.saturating_sub(DAY_MS);
     let (base, series, n_models) = match state {
         Some(s) => (Some(s.base_ms), s.series.as_slice(), s.models.len()),
@@ -463,7 +625,7 @@ fn market(models: &[Model], names: &[(String, String)], state: Option<&IndexStat
     for m in models {
         let Some(latest) = m.snaps.last() else { continue };
         // Uptime: share of the model's snapshots in the last day where the quote was listed and up.
-        let recent: Vec<&&Snap> = m.snaps.iter().filter(|s| s.at_ms >= day_ago).collect();
+        let recent: Vec<&Snap> = m.snaps.iter().map(|s| &**s).filter(|s| s.at_ms >= day_ago).collect();
         let uptime = |q: u32| -> (usize, usize) { (recent.iter().filter(|s| s.rows.iter().any(|r| r.quote == q && r.up)).count(), recent.len()) };
         let u = usable(latest);
         let thin = u.len() < MIN_QUOTES;
@@ -489,8 +651,13 @@ fn market(models: &[Model], names: &[(String, String)], state: Option<&IndexStat
         }
         let pts: Vec<(u64, f64)> = m.snaps.iter().zip(&m.median).filter_map(|(s, v)| Some((s.at_ms, (*v)?))).collect();
         let (name, family) = name_family(m.id);
+        // Quotes listed now that were not listed 7 days ago (null without data that old).
+        let week_ago = now_ms.saturating_sub(7 * DAY_MS);
+        let then = m.snaps.partition_point(|s| s.at_ms <= week_ago).checked_sub(1).map(|i| &m.snaps[i]);
+        let added = then.map(|then| latest.rows.iter().filter(|r| !then.rows.iter().any(|o| o.quote == r.quote)).count());
         out_models.push(json!({
-            "id": m.id, "name": name, "family": family,
+            "id": m.id, "aliases": m.aliases, "name": name, "family": family,
+            "demand": demand_json(m, demand), "sellers_added_7d": added,
             "sellers_total": latest.rows.len(), "sellers_up": latest.rows.iter().filter(|r| r.up).count(),
             "median": median, "p25": stat(0.25), "p75": stat(0.75), "min": stat(0.0), "max": stat(1.0),
             "thin": thin,
@@ -535,6 +702,9 @@ fn market(models: &[Model], names: &[(String, String)], state: Option<&IndexStat
     changes.truncate(MAX_CHANGES);
     dynamic.sort_by(|a, b| b["changes_24h"].as_u64().cmp(&a["changes_24h"].as_u64()));
     out_models.sort_by(|a, b| b["sellers_up"].as_u64().cmp(&a["sellers_up"].as_u64()).then(a["id"].as_str().cmp(&b["id"].as_str())));
+    let mut ranked: Vec<(&str, u64)> = out_models.iter().filter_map(|m| Some((m["id"].as_str()?, m["demand"]["hf_downloads_30d"].as_u64()?))).collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let demand_rank: Vec<&str> = ranked.into_iter().map(|r| r.0).collect();
     let mut providers: Vec<Value> = provs
         .iter()
         .map(|(name, (ms, q, up, of, cheap))| json!({ "name": name, "models": ms.len(), "quotes": q, "uptime_24h_pct": (*of > 0).then(|| *up as f64 / *of as f64 * 100.0), "cheapest_in": cheap }))
@@ -552,6 +722,7 @@ fn market(models: &[Model], names: &[(String, String)], state: Option<&IndexStat
             "series": steps(series, INDEX_POINTS).iter().map(|p| json!([p.0, p.1])).collect::<Vec<_>>(),
         },
         "models": out_models,
+        "demand_rank": demand_rank,
         "providers": providers,
         "changes": changes.iter().map(|(t, m, q, a, b)| json!({ "at_ms": t, "model": m, "provider": names[*q as usize].0, "quantization": names[*q as usize].1, "from": a, "to": b })).collect::<Vec<_>>(),
         "dynamic": dynamic,
@@ -889,6 +1060,83 @@ mod tests {
     }
 
     #[test]
+    fn dated_snapshots_are_one_model() {
+        assert_eq!(alias_key("deepseek-ai/DeepSeek-V4-Flash-0731"), "deepseek-ai/deepseek-v4-flash");
+        assert_eq!(alias_key("deepseek/deepseek-v4.1-flash-20261017"), "deepseek/deepseek-v4.1-flash");
+        assert_eq!(alias_key("qwen/qwen3-14b"), "qwen/qwen3-14b");
+        assert_eq!(alias_key("x/model-12"), "x/model-12");
+        let d = tmp("alias");
+        std::fs::write(d.join("hf-map.tsv"), "x/flash\tX/Flash\tx/flash-1\nx/flash-0731\tX/Flash-0731\tx/flash-2\nx/other\tX/Other\tx/o\nbad line\n").unwrap();
+        let cyc = |at: u64, alias: bool| {
+            let mut v = vec![line("x/flash", at, &[("A", 2.0, 0), ("B", 3.0, 0), ("C", 4.0, 0)]), three("x/other", at + 1000, 1.0, 1.0)];
+            if alias {
+                // B cheaper on the alias, D only there, A down there.
+                v.push(line("x/flash-0731", at + 2000, &[("A", 1.0, -2), ("B", 2.5, 0), ("D", 9.0, 0)]));
+            }
+            v
+        };
+        put(&d, &[cyc(T0, false), cyc(T0 + 5 * MIN, false), cyc(T0 + 25 * HOUR, true), cyc(T0 + 25 * HOUR + 5 * MIN, true)].concat());
+        let v = run(&d, T0 + 25 * HOUR + 6 * MIN);
+        let ids: Vec<&str> = v["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["x/flash", "x/other"]);
+        let f = model(&v, "x/flash");
+        assert_eq!(f["aliases"], json!(["x/flash-0731"]));
+        let q: Vec<(String, Option<f64>, bool)> = f["quotes"].as_array().unwrap().iter().map(|q| (q["provider"].as_str().unwrap().to_owned(), q["price"].as_f64(), q["up"].as_bool().unwrap())).collect();
+        assert_eq!(q, [("A".into(), Some(2.0), true), ("B".into(), Some(2.5), true), ("C".into(), Some(4.0), true), ("D".into(), Some(9.0), true)]);
+        assert_eq!((v["index"]["n_models"].as_u64(), v["index"]["n_quotes"].as_u64(), v["index"]["n_providers"].as_u64()), (Some(2), Some(7), Some(4)));
+        // The alias showing up re-links the group (median 3 → 3.25): no jump.
+        assert!(levels(&v).iter().all(|l| *l == 100.0), "{:?}", levels(&v));
+    }
+
+    #[test]
+    fn demand_and_sellers_added() {
+        let d = tmp("demand");
+        std::fs::create_dir_all(d.join("demand")).unwrap();
+        let dl = |at: u64, m: &str, n: u64| json!({ "at_ms": at, "model": m, "hf": "h", "downloads_30d": n, "likes": 7 }).to_string();
+        let now = T0 + 8 * DAY_MS;
+        std::fs::write(d.join(format!("demand/{}.jsonl", day(T0 + DAY_MS))), format!("{}\n", dl(T0 + DAY_MS, "x/a", 1000))).unwrap();
+        std::fs::write(d.join(format!("demand/{}.jsonl", day(T0 + 5 * DAY_MS))), format!("{}\n{}\n", dl(T0 + 5 * DAY_MS, "x/a", 1100), dl(T0 + 5 * DAY_MS, "x/b", 10))).unwrap();
+        std::fs::write(d.join(format!("demand/{}.jsonl", day(now))), format!("{}\njunk\n{}\n{{\"at_ms\":1", dl(now - HOUR, "x/a", 1500), dl(now - HOUR, "x/b", 50))).unwrap();
+        put(&d, &[
+            line("x/a", T0, &[("A", 1.0, 0), ("B", 1.0, 0)]),
+            line("x/a", now - MIN, &[("A", 1.0, 0), ("B", 1.0, -2), ("C", 1.0, 0), ("D", 1.0, 0)]),
+            three("x/b", now - 2 * DAY_MS, 1.0, 1.0),
+            three("x/c", now - MIN, 1.0, 1.0),
+        ]);
+        let v = run(&d, now);
+        let a = model(&v, "x/a");
+        // 1500 vs the 1000 from 7 days before (the 1100 is under 6 days older).
+        assert_eq!(a["demand"], json!({ "hf_downloads_30d": 1500, "hf_likes": 7, "hf_downloads_change_7d_pct": 50.0, "as_of_ms": now - HOUR }));
+        assert_eq!(model(&v, "x/b")["demand"]["hf_downloads_change_7d_pct"], Value::Null);
+        assert_eq!(model(&v, "x/c")["demand"]["hf_downloads_30d"], Value::Null);
+        assert_eq!(v["demand_rank"], json!(["x/a", "x/b"]));
+        // C and D are new since 7 days ago; x/b has no data that old.
+        assert_eq!(a["sellers_added_7d"], 2);
+        assert_eq!(model(&v, "x/b")["sellers_added_7d"], Value::Null);
+    }
+
+    #[test]
+    fn a_method_change_relinks_instead_of_jumping() {
+        let d = tmp("relink");
+        let cycle = |at: u64, a: f64| vec![three("x/a", at, 1.0, a), three("x/b", at + 1000, 1.0, 3.0), three("x/c", at + 2000, 1.0, 5.0)];
+        put(&d, &[cycle(T0, 2.0), cycle(T0 + 5 * MIN, 4.0)].concat());
+        let mut w = Wide::default();
+        w.update(&d, T0 + 6 * MIN).unwrap();
+        w.market_json(T0 + 6 * MIN).unwrap();
+        // A state saved by an older method: x/a's last median was 3, not 4.
+        let mut st = w.state.clone().unwrap();
+        let b = st.models.get_mut("x/a").unwrap();
+        (b.base, b.last) = (b.base * 0.75, 3.0);
+        let level = st.level;
+        put(&d, &cycle(T0 + 10 * MIN, 4.0));
+        let mut w = Wide::with_state(Some(st));
+        w.update(&d, T0 + 11 * MIN).unwrap();
+        let v = w.market_json(T0 + 11 * MIN).unwrap();
+        assert!(close(v["index"]["level"].as_f64().unwrap(), level));
+        assert!(close(w.state.unwrap().models["x/a"].base, 1.0 * 4.0 / 3.0 * 0.75 * 2.0));
+    }
+
+    #[test]
     fn names_and_families() {
         let want = [
             ("qwen/qwen3.8-27b", "Qwen3.8 27B", "Qwen"),
@@ -916,8 +1164,9 @@ mod tests {
         let now = 1_794_559_100_000;
         let v = run(dir, now);
         let i = &v["index"];
-        assert_eq!((i["level"].as_f64(), i["base_ms"].as_u64(), i["n_models"].as_u64()), (Some(100.0), Some(1_794_559_021_841), Some(2)));
-        assert_eq!((i["n_quotes"].as_u64(), i["n_quotes_up"].as_u64(), i["n_providers"].as_u64()), (Some(27), Some(24), Some(i["n_providers"].as_u64().unwrap())));
+        assert_eq!((i["level"].as_f64(), i["base_ms"].as_u64(), i["n_models"].as_u64()), (Some(100.0), Some(1_794_559_021_841), Some(1)));
+        // Mistral lists three regional endpoints of one (provider, quantization): one quote.
+        assert_eq!((i["n_quotes"].as_u64(), i["n_quotes_up"].as_u64()), (Some(25), Some(22)));
         assert_eq!((i["change_24h_pct"].clone(), i["change_7d_pct"].clone()), (Value::Null, Value::Null));
         assert_eq!(v["window"], json!({ "from_ms": 1_794_558_705_679u64, "to_ms": now }));
         let q = model(&v, "qwen/qwen3.8-27b");
@@ -929,14 +1178,19 @@ mod tests {
         assert!(qs.windows(2).all(|w| (!w[0]["up"].as_bool().unwrap(), w[0]["price"].as_f64()) <= (!w[1]["up"].as_bool().unwrap(), w[1]["price"].as_f64())));
         assert!(!qs.last().unwrap()["up"].as_bool().unwrap());
         let m = model(&v, "mistralai/mistral-small-2603");
-        assert!(close(m["median"].as_f64().unwrap(), 0.1959375));
+        // The cheapest of the three: (15 × 1.5e-7 + 6e-7) / 16 × 1e6.
+        assert_eq!((m["sellers_total"].as_u64(), m["thin"].as_bool()), (Some(1), Some(true)));
+        assert!(close(m["median"].as_f64().unwrap(), 0.178125));
         let t = model(&v, "qwen/qwen3-14b");
         assert_eq!((t["thin"].as_bool(), t["sellers_up"].as_u64()), (Some(true), Some(2)));
         assert!(close(t["median"].as_f64().unwrap(), 0.1175));
         // Its empty listing five minutes earlier counts as down for both quotes.
         assert!(t["quotes"].as_array().unwrap().iter().all(|x| x["uptime_24h_pct"] == 50.0));
         let ids: Vec<&str> = v["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, ["qwen/qwen3.8-27b", "mistralai/mistral-small-2603", "qwen/qwen3-14b"]);
+        assert_eq!(ids, ["qwen/qwen3.8-27b", "qwen/qwen3-14b", "mistralai/mistral-small-2603"]);
+        // No demand files or hf map in the fixture: nulls, nothing fails.
+        assert_eq!(q["demand"], json!({ "hf_downloads_30d": null, "hf_likes": null, "hf_downloads_change_7d_pct": null, "as_of_ms": null }));
+        assert_eq!((q["sellers_added_7d"].clone(), q["aliases"].clone(), v["demand_rank"].clone()), (Value::Null, json!([]), json!([])));
         let p = v["providers"].as_array().unwrap();
         assert!(p.windows(2).all(|w| w[0]["models"].as_u64() >= w[1]["models"].as_u64()));
         assert_eq!(p.iter().map(|x| x["cheapest_in"].as_u64().unwrap()).sum::<u64>(), 3);

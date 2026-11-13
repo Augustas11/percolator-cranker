@@ -29,7 +29,11 @@ pusher").
   model (`qwen__qwen3.8-27b` for `qwen/qwen3.8-27b`) holding
   `YYYY-MM-DD.jsonl` files, one line per fetch:
   `{"at_ms", "model", "rows": [{"provider", "tag", "quantization", "prompt", "completion", "status", "uptime_30m", "context"}]}`
-  (prices in USD per token). Adds `market.json`, and keeps the index state
+  (prices in USD per token). Optional in the same directory: `hf-map.tsv`
+  (`<openrouter id>\t<hugging face id>\t<slug>`) and `demand/YYYY-MM-DD.jsonl`
+  (`{"at_ms", "model", "hf", "downloads_30d", "likes"}`); missing or odd
+  ones mean no aliases or no demand data, not an error. Only directories
+  named `<org>__<name>` are models. Adds `market.json`, and keeps the index state
   in `<out dir>/index-state.json`.
 - `--rebase` (with `--wide`): ignore any saved index state and start a new
   base. Only for a deliberate re-base; the level then means something new.
@@ -108,7 +112,10 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
 | `index.n_quotes`, `index.n_quotes_up` | Sellers listed in each model's latest fetch, all and up |
 | `index.n_providers` | Distinct providers in those listings |
 | `index.series` | `[t_ms, level]`, at most 500; both sides of every change |
-| `models[]` | Per model, most up sellers first: `id`, `name`, `family`, `sellers_total`, `sellers_up`, `median`, `p25`, `p75`, `min`, `max`, `thin`, `cheapest` (`provider`, `quantization`, `price`; null if no usable quote), `change_24h_pct`, `series` (`[t_ms, median]`, at most 200), `quotes[]` (`provider`, `quantization`, `price` or null, `up`, `uptime_24h_pct`), cheapest first, unpriced next, down last |
+| `models[]` | Per model, most up sellers first: `id` (shortest id of its alias group), `aliases` (the other ids), `name`, `family`, `sellers_total`, `sellers_up`, `median`, `p25`, `p75`, `min`, `max`, `thin`, `cheapest` (`provider`, `quantization`, `price`; null if no usable quote), `change_24h_pct`, `demand` (below), `sellers_added_7d`, `series` (`[t_ms, median]`, at most 200), `quotes[]` (`provider`, `quantization`, `price` or null, `up`, `uptime_24h_pct`), cheapest first, unpriced next, down last |
+| `models[].demand` | From the newest demand line of the model (or an alias): `hf_downloads_30d`, `hf_likes`, `as_of_ms`, and `hf_downloads_change_7d_pct` against the newest line at least 6 days older (null without one). All null without demand data. |
+| `models[].sellers_added_7d` | Quotes (provider, quantization) listed now that were not listed in the snapshot 7 days ago; null without data that old. Sellers adding a model is a supply-side read of demand. |
+| `demand_rank` | Model ids by `hf_downloads_30d`, highest first (models without it left out) |
 | `providers[]` | `name`, `models`, `quotes` (in the latest listings), `uptime_24h_pct` (over all its quotes), `cheapest_in` (models where it is the cheapest up seller); most models first |
 | `changes[]` | Price changes over the last 7 days, newest first, at most 200: `at_ms`, `model`, `provider`, `quantization`, `from`, `to` |
 | `dynamic[]` | Quotes that change price too often to list: `model`, `provider`, `quantization`, `min`, `max` (over 7 days), `changes_24h`; most changes first |
@@ -118,6 +125,15 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
 - **Price.** Each quote's price is (15 × prompt + completion) / 16 × 1e6.
   A quote is usable if it is up (status 0 or missing) and both prices are
   finite, not negative, and not both 0.
+- **Aliases.** Ids are grouped by Hugging Face id from `hf-map.tsv` (else
+  the id itself), lowercased and without a trailing date (`-0731`,
+  `-20261017`), so dated snapshots such as `deepseek/deepseek-v4-flash` and
+  `deepseek/deepseek-v4-flash-0731` are one model, named by its shortest id.
+  Each fetch of a member gives the group a snapshot: every member's latest
+  listing (from the last 24 h) merged. Everywhere, quotes are one per
+  (provider, quantization): the usable one with the lowest price, else an up
+  one. A provider listing several regional endpoints counts once. Totals
+  count after this.
 - **Model median.** At each fetch of a model, the median of its usable
   quotes (mean of the middle two for an even count). Percentiles interpolate
   linearly between the sorted prices. With fewer than 3 usable quotes the
@@ -145,7 +161,13 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
   without 3 usable quotes), the remaining bases are scaled by one common
   factor so the level at their last medians is unchanged. So after a gap
   (feed down for hours), the first snapshot's level comes from the saved
-  bases and moves only by real price changes.
+  bases and moves only by real price changes. A group whose listed aliases
+  change (an alias appears or goes quiet) leaves and joins again in the same
+  step, so its own move at that step is not counted.
+- **Method changes.** At start, each basket model's median at the saved
+  step is recomputed from the data; if it differs from the saved one (the
+  method changed), that model's base is scaled by the same ratio, so the
+  level does not jump.
 - **Uptime.** `uptime_24h_pct` is the share of the model's fetches in the
   last 24 h where the quote was listed and up. A fetch that did not list it
   counts as down; times the model was not fetched do not count.
@@ -158,6 +180,10 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
   comes from the org: qwen Qwen, deepseek DeepSeek, moonshotai Kimi, z-ai
   GLM, minimax MiniMax, openai GPT-OSS, meta-llama Llama, google Gemma,
   nvidia Nemotron, mistralai Mistral; any other org is its own family.
+- **Demand.** `hf_downloads_30d` and `hf_likes` come from Hugging Face.
+  They measure interest in the open weights (people downloading the model
+  to run it themselves), not paid API usage on OpenRouter or anywhere
+  else.
 - **Robustness.** Unparsable or torn lines, a line without `rows`, rows
   without a provider, and missing days are skipped. An empty `rows` is a
   fetch that listed nobody.
