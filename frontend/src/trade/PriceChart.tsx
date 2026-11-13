@@ -3,7 +3,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import type { Point } from "../compute/client";
 import { perpPrice } from "../market/types";
-import { valueAt } from "./quotes";
+import { cleanPoints, valueAt } from "./quotes";
 
 const PAD = { top: 30, right: 72, bottom: 28, left: 12 };
 
@@ -38,13 +38,16 @@ export default function PriceChart({ mark, index, from, to }: { mark: Point[]; i
   const [ref, { width, height: H }] = useSize();
   const gradient = useId();
   const [hover, setHover] = useState<number | null>(null);
+  const valid = Number.isFinite(from) && Number.isFinite(to) && to > from;
   const markIn = useMemo(() => {
+    if (!valid) return [];
     // Carry the last value before the window in, so the step line starts at the left edge.
-    const before = valueAt(mark, from);
-    const inside = mark.filter(([t]) => t >= from && t <= to);
+    const clean = cleanPoints(mark);
+    const before = valueAt(clean, from);
+    const inside = clean.filter(([t]) => t >= from && t <= to);
     return before !== null ? [[from, before] as Point, ...inside] : inside;
-  }, [mark, from, to]);
-  const indexIn = useMemo(() => index?.filter(([t]) => t >= from && t <= to) ?? [], [index, from, to]);
+  }, [mark, from, to, valid]);
+  const indexIn = useMemo(() => valid && index ? cleanPoints(index).filter(([t]) => t >= from && t <= to) : [], [index, from, to, valid]);
   const values = [...markIn, ...indexIn].map(p => p[1]);
   if (markIn.length === 0 || values.length === 0) return <div ref={ref} className="tx-chart-empty" role="status">No mark pushed in this range.</div>;
   let lo = Math.min(...values), hi = Math.max(...values);

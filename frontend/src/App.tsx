@@ -10,7 +10,8 @@ import { useComputeFeed, latestStale, marketStale, modelStale } from "./compute/
 import { OTHER_MARKET, OwnFills, UNREACHABLE, fixed, number as num, useTradeIndexer } from "./Indexer";
 import type { TradeIndexer } from "./Indexer";
 import PriceChart from "./trade/PriceChart";
-import { availableRanges, change24h, entryPrice, quoteSides, sellerLadder } from "./trade/quotes";
+import { availableRanges, benchmarkModel, change24h, cleanPoints, entryPrice, quoteSides, sellerLadder } from "./trade/quotes";
+import FeedBoundary from "./compute/FeedBoundary";
 import "./App.css";
 import "./site/compute.css";
 import "./site/trade.css";
@@ -131,7 +132,6 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
   const now = useNow(1000, fundingShown);
   const [amount, setAmount] = useState("");
   const [size, setSize] = useState(String(PERP.defaultSize));
-  const [leverage, setLeverage] = useState("1");
   const [side, setSide] = useState<Side>("long");
   useEffect(() => { if (requestedSide) setSide(requestedSide); }, [requestedSide, sideRequest]);
   const [pending, setPending] = useState(false);
@@ -148,23 +148,27 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
   const sized = size.trim() !== "" && Number.isFinite(units) && units > 0;
   const overFill = sized && units > PERP.maxFillUnits;
   const notional = sized && Number.isFinite(mark.price) ? units * mark.price : NaN;
-  const lev = Number(leverage);
   const entry = liq ? entryPrice(side, mark.price, liq.spreadBps) : NaN;
   const fee = market.feeBps !== undefined && Number.isFinite(notional) ? notional * market.feeBps / 10_000 : NaN;
-  const margin = Number.isFinite(notional) && lev >= 1 ? notional / lev : NaN;
+  // Leverage is not an order argument: the engine holds initial margin at its own ratio of notional (1 / max leverage).
+  const imr = market.initialMarginRatio ?? (market.maxLeverage > 0 ? 1 / market.maxLeverage : NaN);
+  const margin = Number.isFinite(notional) && imr > 0 ? notional * imr : NaN;
+  const perUnit = mark.price * (imr + (market.feeBps ?? 0) / 10_000);
+  const maxForCollateral = portfolio.owner && Number.isFinite(health.freeCollateral) && health.freeCollateral >= 0 && perUnit > 0
+    ? Math.floor(health.freeCollateral / perUnit * 100) / 100 : NaN;
 
   // The benchmark model in market.json: the all-seller index and the seller ladder.
-  const bench = feed.market?.models.find(m => m.id === PERP.benchmarkId) ?? null;
-  const index = bench && Number.isFinite(bench.median) ? bench.median : null;
+  const bench = useMemo(() => benchmarkModel(feed.market, PERP.benchmarkId), [feed.market]);
+  const index = bench ? bench.median : null;
   const feedNow = feed.now;
   const benchStale = bench ? modelStale(bench, feedNow) || !!marketStale(feed.market, feedNow) : false;
-  const ladder = useMemo(() => bench ? sellerLadder(bench, Number.isFinite(mark.price) ? mark.price : null, index) : null, [bench, mark.price, index]);
-  const feedNote = feed.failed.market && !feed.market ? "The compute feed is unreachable right now." : benchStale ? "These quotes are over 30 minutes old." : feed.loaded && feed.market && !bench ? `The feed has no quotes for ${PERP.benchmark} right now.` : null;
+  const ladder = useMemo(() => bench && bench.quotes.length ? sellerLadder(bench, Number.isFinite(mark.price) ? mark.price : null, index) : null, [bench, mark.price, index]);
+  const feedNote = feed.failed.market && !feed.market ? "The compute feed is unreachable right now." : benchStale ? "These quotes are over 30 minutes old." : feed.loaded && feed.market && !bench?.quotes.length ? `The feed has no quotes for ${PERP.benchmark} right now.` : null;
 
   // The chart: pushed marks from history.json, the live mark at the end, the index when it has 12 or more reads.
   const history = feed.history;
   const markSeries = useMemo(() => {
-    const pts = history?.points ?? [];
+    const pts = cleanPoints(history?.points);
     return Number.isFinite(mark.price) && pts.length ? [...pts, [Math.max(Date.now(), pts[pts.length - 1][0]), mark.price] as [number, number]] : pts;
   }, [history, mark.price]);
   const ranges = availableRanges(markSeries);
@@ -191,7 +195,7 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
 
   function open() {
     if (overFill) { setError(`The matcher fills up to ${PERP.maxFillUnits} units (${PERP.maxFillUnits} × ${PERP.unit}) per trade. Split a larger order into several trades.`); return; }
-    void call(() => client.openPosition(side, units, Number(leverage)));
+    void call(() => client.openPosition(side, units, market.maxLeverage));
   }
 
   async function call(action: () => Promise<unknown>) {
@@ -240,7 +244,7 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
           {ranges.length > 1 && <div className="tx-ranges" role="group" aria-label="Chart range">{ranges.map(r => <button key={r.label} type="button" aria-pressed={range?.label === r.label} onClick={() => setRangeLabel(r.label)}>{r.label}</button>)}</div>}
         </div>
         {historyStale && <p className="tx-warn" role="status">{historyStale}</p>}
-        {markSeries.length >= 2 ? <PriceChart mark={markSeries} index={indexSeries} from={chartFrom} to={chartTo} />
+        {markSeries.length >= 2 ? <FeedBoundary name="Price chart" data={history}><PriceChart mark={markSeries} index={indexSeries} from={chartFrom} to={chartTo} /></FeedBoundary>
           : feed.failed.history ? <p className="tx-chart-empty" role="status">The price history is unreachable right now.</p>
           : computeFeed === null ? <p className="tx-chart-empty" role="status">The price history is unreachable right now.</p>
           : <div className="tx-chart-skel" aria-busy="true" aria-label="Loading the price history" />}
@@ -249,7 +253,7 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
       <section className={`tx-card tx-book m-quotes m-trades${mobileTab === "trades" ? " m-show-trades" : ""}`} aria-label="Quotes and trades">
         <Tabs id="book" label="Quotes and trades" value={bookTab} onChange={setBookTab} tabs={[["quotes", "Quotes"], ["trades", "Trades"]]} />
         <Panel id="book" k="quotes" value={mobileTab === "trades" ? "trades" : mobileTab === "quotes" ? "quotes" : bookTab}>
-          <Quotes snapshot={snapshot} client={client} ladder={ladder} feedNote={feedNote} />
+          <FeedBoundary name="Quotes" data={feed.market}><Quotes snapshot={snapshot} client={client} ladder={ladder} feedNote={feedNote} /></FeedBoundary>
         </Panel>
         <Panel id="book" k="trades" value={mobileTab === "trades" ? "trades" : mobileTab === "quotes" ? "quotes" : bookTab}>
           <Trades data={idx} indexer={indexer ?? null} snapshot={snapshot} now={Date.now()} />
@@ -276,14 +280,12 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
           <p id="size-help" className={`trade-help${overFill ? " is-over" : ""}`}>
             <span className="trade-notional">{Number.isFinite(notional) ? `${dollars(notional)} notional` : "— notional"}</span>{" · "}up to {PERP.maxFillUnits} units per fill
           </p>
-          <label htmlFor="leverage">Leverage <output htmlFor="leverage">{number.format(lev)}x</output></label>
-          <input id="leverage" className="tx-range" type="range" min="1" max={market.maxLeverage} step="0.5" value={leverage} aria-valuetext={`${number.format(lev)} times`} onChange={e => setLeverage(e.target.value)} />
-          <div className="tx-range-ticks" aria-hidden="true"><span>1x</span><span>{number.format(market.maxLeverage)}x max</span></div>
           <dl className="tx-summary" aria-label="Order summary">
             {Number.isFinite(entry) && <><dt>Entry price</dt><dd>{perpPrice(entry)}</dd></>}
             {Number.isFinite(fee) && <><dt>Fee ({market.feeBps} bps)</dt><dd>{dollars(fee)}</dd></>}
-            {Number.isFinite(margin) && <><dt>Margin required</dt><dd>{dollars(margin)}</dd></>}
+            {Number.isFinite(margin) && <><dt>Initial margin ({number.format(imr * 100)}%)</dt><dd>{dollars(margin)}</dd></>}
             {liq && <><dt>Max this side</dt><dd>{num(side === "long" ? liq.maxLong : liq.maxShort)} {PERP.unitShort}</dd></>}
+            {Number.isFinite(maxForCollateral) && <><dt>Max for your collateral</dt><dd>{num(maxForCollateral)} {PERP.unitShort}</dd></>}
           </dl>
           {tradeOff && <p className="trade-help" role="status">Trading is off in this build: no matcher is set for {PERP.name}. Deposits and withdrawals still work.</p>}
           {connected

@@ -27,6 +27,8 @@ export interface MarketInfo {
   symbol: string; collateral: "USDC"; maxLeverage: number; maintenanceMarginRatio: number;
   /** Trade fee the client sends, in bps of notional; absent until the market account is read. */
   feeBps?: number;
+  /** The engine's initial margin as a share of notional (initial_margin_bps / 10 000); the order sends no leverage. */
+  initialMarginRatio?: number;
 }
 /** The liquidity account behind every fill (the matcher context). Sizes in units of PERP.unit. */
 export interface Liquidity {

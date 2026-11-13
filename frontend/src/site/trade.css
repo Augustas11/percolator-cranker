@@ -151,8 +151,6 @@
 .site .tx .trade-notional { color: var(--site-text); font-family: var(--site-mono); }
 .site .tx .trade-help.is-over, .site .tx .trade-help.is-over .trade-notional { color: var(--tx-short); }
 .site .tx label output { float: right; font: 600 12px var(--site-mono); color: var(--site-text); }
-.site .tx .tx-range { width: 100%; height: 22px; padding: 0; margin: 0; background: transparent; border: 0; accent-color: var(--site-accent); }
-.site .tx .tx-range-ticks { display: flex; justify-content: space-between; font: 10.5px var(--site-mono); color: var(--site-muted); }
 .site .tx .tx-summary { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; margin: 14px 0 12px; padding: 10px 0 0; border-top: 1px solid var(--site-line-7); font-size: 12px; }
 .site .tx .tx-summary dd { margin: 0; text-align: right; font-size: 12px; }
 .site .tx .tx-submit { width: 100%; min-height: 44px; font-size: 15px; }

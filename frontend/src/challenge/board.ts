@@ -25,14 +25,28 @@ export interface ChallengeBoard {
 
 export type BoardLoader = () => Promise<ChallengeBoard>;
 
-function isBoard(data: unknown): data is ChallengeBoard {
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+/** One board row, checked field by field: the page formats every one of them. */
+function isEntry(e: unknown): e is BoardEntry {
+  const x = e as BoardEntry;
+  return !!x && typeof x === "object" && finite(x.rank) && typeof x.handle === "string"
+    && (x.kind === "human" || x.kind === "agent" || x.kind === "reference")
+    && finite(x.gain) && finite(x.se) && typeof x.beats_rule === "boolean" && finite(x.rounds)
+    && typeof x.module_hash === "string" && !!x.terms && typeof x.terms === "object" && TERMS.every(k => finite(x.terms[k]));
+}
+
+export function isBoard(data: unknown): data is ChallengeBoard {
   const b = data as ChallengeBoard;
-  return !!b && typeof b === "object" && !!b.round && typeof b.round.id === "string" && Array.isArray(b.entries);
+  return !!b && typeof b === "object" && !!b.round && typeof b.round === "object" && typeof b.round.id === "string"
+    && typeof b.round.closed_at === "string" && (b.round.scored_at === null || typeof b.round.scored_at === "string")
+    && Array.isArray(b.entries) && b.entries.every(isEntry)
+    && (b.season === undefined || b.season === null || (typeof b.season === "object" && Array.isArray(b.season.entries) && b.season.entries.every(isEntry)));
 }
 
 export function httpBoard(apiBase: string): BoardLoader {
   return async () => {
-    const res = await fetch(`${apiBase.replace(/\/$/, "")}/board.json`, { cache: "no-store" });
+    const res = await fetch(`${apiBase.replace(/\/$/, "")}/board.json`, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
     if (!res.ok) throw new Error(`board.json: HTTP ${res.status}`);
     const data: unknown = await res.json();
     if (!isBoard(data)) throw new Error("board.json: unexpected shape");

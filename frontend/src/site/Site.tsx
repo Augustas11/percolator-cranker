@@ -13,6 +13,7 @@ import type { BoardLoader } from "../challenge/board";
 import { applyMeta, notFoundMeta, pageMeta } from "./meta";
 import Nav from "./Nav";
 import Footer from "./Footer";
+import PageBoundary from "./PageBoundary";
 import { site } from "./config";
 import { PERP } from "../market/types";
 import { Link, usePath } from "./router";
@@ -63,8 +64,8 @@ export default function Site({ client, indexer, indexerBase = null, computeFeed 
       <img className="site-watermark" src="/brand/d-mark.svg" alt="" />
     </div>
     <Nav />
-    {tradeMounted && <div hidden={path !== site.paths.trade}><App client={client} indexer={indexer} computeFeed={computeFeed} requestedSide={requestedSide} sideRequest={sideRequest} /></div>}
-    {path !== site.paths.trade && <main className={path === site.paths.home ? "site-home" : "site-page"}>{page}</main>}
+    {tradeMounted && <div hidden={path !== site.paths.trade}><PageBoundary path={site.paths.trade}><App client={client} indexer={indexer} computeFeed={computeFeed} requestedSide={requestedSide} sideRequest={sideRequest} /></PageBoundary></div>}
+    {path !== site.paths.trade && <main className={path === site.paths.home ? "site-home" : "site-page"}><PageBoundary path={path}>{page}</PageBoundary></main>}
     <Footer />
   </div>;
 }

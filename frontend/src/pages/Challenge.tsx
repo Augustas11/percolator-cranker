@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import type { ComputeFeedClient } from "../compute/client";
 import { useComputeFeed } from "../compute/useFeed";
 import { times, when } from "../compute/format";
-import { TERMS, httpBoard } from "../challenge/board";
+import { TERMS, httpBoard, isBoard } from "../challenge/board";
+import FeedBoundary from "../compute/FeedBoundary";
 import type { BoardEntry, BoardLoader, ChallengeBoard } from "../challenge/board";
 import { PERP } from "../market/types";
 import { site } from "../site/config";
@@ -70,7 +71,11 @@ function Board({ load, firstClose }: { load: BoardLoader; firstClose: number | n
   useEffect(() => {
     let active = true;
     const run = async () => {
-      try { const b = await load(); if (active) { setBoard(b); setError(""); } }
+      try {
+        const b: unknown = await load();
+        if (!isBoard(b)) throw new Error("board.json: unexpected shape");
+        if (active) { setBoard(b); setError(""); }
+      }
       catch (e) { if (active) setError(e instanceof Error ? e.message : "request failed"); }
     };
     void run();
@@ -188,7 +193,7 @@ export default function Challenge({ feed, board = null }: { feed: ComputeFeedCli
 
     {cfg.apiBase && load && <section className="cx-section" aria-labelledby="ch-board">
       <h2 id="ch-board">Leaderboard</h2>
-      <Board load={load} firstClose={firstClose} />
+      <FeedBoundary name="Leaderboard"><Board load={load} firstClose={firstClose} /></FeedBoundary>
     </section>}
 
     <div className="arena-cta">

@@ -1,5 +1,5 @@
 // Pure maths for the trade screen: the liquidity account's two sides, the seller ladder and the mark's 24 h move.
-import type { MarketModel, Point } from "../compute/client";
+import type { ComputeMarket, MarketModel, MarketQuote, Point } from "../compute/client";
 import type { Side } from "../market/types";
 
 /** Bid and ask around the mark. The matcher fills at mark ± spread (its spread is 0, so both equal the mark). */
@@ -61,4 +61,29 @@ export function availableRanges(points: Point[]) {
   if (points.length < 2) return [];
   const span = points[points.length - 1][0] - points[0][0];
   return RANGES.filter(r => span >= r.ms * 0.9);
+}
+
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+/** Finite [time, value] pairs from untrusted JSON, oldest first. Anything else is dropped. */
+export function cleanPoints(points: unknown): Point[] {
+  if (!Array.isArray(points)) return [];
+  return points.filter((p): p is Point => Array.isArray(p) && finite(p[0]) && finite(p[1])).sort((a, b) => a[0] - b[0]);
+}
+
+/**
+ * The benchmark model from market.json, checked field by field before the page reads it: quotes and series that
+ * are not arrays become empty, malformed rows are dropped, a non-finite median becomes null. Null without the model.
+ */
+export function benchmarkModel(market: ComputeMarket | null, id: string) {
+  const models: unknown = market?.models;
+  if (!Array.isArray(models)) return null;
+  const m = models.find((x): x is MarketModel => !!x && typeof x === "object" && (x as MarketModel).id === id);
+  if (!m) return null;
+  const quotes: MarketQuote[] = (Array.isArray(m.quotes) ? m.quotes : []).filter((q: unknown): q is MarketQuote => {
+    const x = q as MarketQuote;
+    return !!x && typeof x === "object" && typeof x.provider === "string" && typeof x.quantization === "string"
+      && (x.price === null || finite(x.price)) && typeof x.up === "boolean";
+  });
+  return { ...m, median: finite(m.median) ? m.median : null, quotes, series: cleanPoints(m.series) };
 }

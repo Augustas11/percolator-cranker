@@ -161,3 +161,32 @@ it("keeps flat health margins at zero and free collateral available", async () =
   expect(legs).toEqual([]);
   expect(health).toEqual({ equity: collateral, initialMarginUsed: 0, maintenanceMargin: 0, freeCollateral: collateral, ratio: Infinity, status: "healthy" });
 });
+
+it.each([0, NaN, -1, 1e-7, 1e20])("rejects deposit and openPosition of %s before asking the wallet to sign", async bad => {
+  client = new DevnetMarketClient({ ...devnetConfig, matcherProgram: tester.publicKey, matcherContext: portfolio });
+  await client.connect();
+  const sign = vi.spyOn((globalThis as unknown as { window: { solflare: { signTransaction: () => unknown } } }).window.solflare, "signTransaction");
+  await expect(client.deposit(bad)).rejects.toThrow(/positive and representable/);
+  await expect(client.withdraw(bad)).rejects.toThrow(/positive and representable/);
+  for (const side of ["long", "short"] as const) await expect(client.openPosition(side, bad, 1)).rejects.toThrow(/positive and representable/);
+  expect(sign).not.toHaveBeenCalled();
+  expect(Connection.prototype.sendRawTransaction).not.toHaveBeenCalled();
+});
+
+it("reports no leverage or margin ratio when the market's initial margin is zero", async () => {
+  const zero = Buffer.from(market);
+  const offset = layout.MARKET_GROUP_OFF + layout["group.config"] + layout["config.initial_margin_bps"];
+  zero.writeBigUInt64LE(0n, offset);
+  vi.mocked(Connection.prototype.getMultipleAccountsInfo).mockImplementation(async keys => keys.map(key =>
+    account(key.equals(devnetConfig.market) ? zero : key.equals(devnetConfig.lpPortfolio) ? lp : data)));
+  client = new DevnetMarketClient(devnetConfig);
+  await vi.advanceTimersByTimeAsync(0);
+  const { maxLeverage, initialMarginRatio } = client.getSnapshot().market;
+  expect(maxLeverage).toBeNaN();
+  expect(initialMarginRatio).toBeNaN();
+  // With the fixture's own value: 20% initial margin, 5x.
+  vi.mocked(Connection.prototype.getMultipleAccountsInfo).mockImplementation(async keys => keys.map(key =>
+    account(key.equals(devnetConfig.market) ? market : key.equals(devnetConfig.lpPortfolio) ? lp : data)));
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(client.getSnapshot().market).toMatchObject({ maxLeverage: 5, initialMarginRatio: 0.2 });
+});

@@ -84,6 +84,7 @@ export class DevnetMarketClient implements MarketClient {
     // The engine counts only realizable positive PnL (v16.rs:12353-12378).
     const collateral = pf ? Number(pf.capital + (pf.pnl < 0n ? pf.pnl : 0n)) / 1e6 : 0;
     const mmRatio = Number(market.maintenanceMarginBps) / 10000;
+    const imBps = Number(market.initialMarginBps);
     // Engine health (floors, lag penalty, v16.rs:4095-4139) is not reproduced client-side.
     const maintenanceMargin = size ? NaN : 0;
     const initialMarginUsed = size ? NaN : 0;
@@ -91,7 +92,7 @@ export class DevnetMarketClient implements MarketClient {
     if (this.disposed) return;
     const now = Date.now();
     this.snapshot = {
-      market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 10000 / Number(market.initialMarginBps), maintenanceMarginRatio: mmRatio,
+      market: { symbol: PERP.name, collateral: "USDC", maxLeverage: imBps > 0 ? 10000 / imBps : NaN, initialMarginRatio: imBps > 0 ? imBps / 10000 : NaN, maintenanceMarginRatio: mmRatio,
         // The fee buildTrade sends: 12 bps, floored at the market's own base fee (chain/tx.ts).
         feeBps: Math.max(12, Number(market.config.tradeFeeBaseBps)) },
       mark: { price, ts: now }, funding: { rate: 0, nextFundingTs: now },

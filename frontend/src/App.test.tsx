@@ -56,15 +56,20 @@ test("connects, deposits, opens a long, and keeps rendering after a tick", async
     expect(container.textContent!.match(/Test tokens/gi)).toHaveLength(1);
     expect(container.textContent).not.toMatch(/SOL-PERP|\bSOL\b/);
     expect(container.textContent).toContain("No open position");
-    // Summary: entry at the ask (spread 0, so the mark), the market's fee, margin at 1x.
-    const summary = Array.from(container.querySelectorAll(".tx-summary dt, .tx-summary dd"), el => el.textContent);
-    expect(summary).toEqual(["Entry price", "$0.3036", "Fee (15 bps)", "$0.05", "Margin required", "$30.36", "Max this side", "100 Mtok"]);
+    // Summary: entry at the ask (spread 0, so the mark), the market's fee, the engine's initial margin. No leverage control: the order sends none.
+    const summary = () => Array.from(container.querySelectorAll(".tx-summary dt, .tx-summary dd"), el => el.textContent);
+    expect(summary()).toEqual(["Entry price", "$0.3036", "Fee (15 bps)", "$0.05", "Initial margin (50%)", "$15.18", "Max this side", "100 Mtok"]);
+    expect(container.querySelector("#leverage")).toBeNull();
+    expect(container.textContent).not.toMatch(/leverage/i);
 
     await ui.click("Connect wallet");
     expect(ui.button("Connect wallet")).toBeUndefined();
     await ui.input("amount", "1000");
     await ui.click("Deposit");
     expect(client.getSnapshot().portfolio.collateral).toBe(1000);
+    // Free collateral over margin plus fee per unit: 1000 / (mark × (0.5 + 0.0015)).
+    const most = Math.floor(1000 / (client.getSnapshot().mark.price * 0.5015) * 100) / 100;
+    expect(summary().slice(-2)).toEqual(["Max for your collateral", `${most.toLocaleString("en-US", { maximumFractionDigits: 2 })} Mtok`]);
     await ui.click("Short");
     expect(ui.button("Open short")).toBeDefined();
     await ui.click("Long");
@@ -77,8 +82,6 @@ test("connects, deposits, opens a long, and keeps rendering after a tick", async
     expect(container.querySelector<HTMLInputElement>("#size")!.value).toBe("25");
     await ui.input("size", "50");
     expect(container.querySelector(".trade-notional")!.textContent).toBe("$15.18 notional");
-    await ui.input("leverage", "2");
-    expect(container.querySelector('label[for="leverage"] output')!.textContent).toBe("2x");
     await ui.click("Open long");
 
     const position = container.querySelector('[aria-labelledby="position-heading"]')!;
@@ -139,6 +142,35 @@ test("renders infinite health values as unavailable", async () => {
     await ui.unmount();
     client.dispose();
   }
+});
+
+test("a malformed benchmark model in market.json does not take the page down", async () => {
+  const client = new MockMarketClient({ autoTick: false });
+  const feed = new MockComputeFeedClient();
+  const good = await feed.market();
+  const broken = { ...good, models: good.models.map(m => m.id === "qwen/qwen3.8-27b" ? { ...m, quotes: undefined, series: undefined, median: "x" } : m) };
+  vi.spyOn(feed, "market").mockResolvedValue(broken as never);
+  const history = await feed.history();
+  vi.spyOn(feed, "history").mockResolvedValue({ ...history, points: [...history.points, ["bad", 1], null, [1, Infinity]] } as never);
+  const ui = await mount(client, { computeFeed: feed });
+  try {
+    expect(ui.container.querySelector("h1")!.textContent).toBe("COMPUTE-PERP");
+    expect(ui.stats().map(s => s[0])).not.toContain("Index (all sellers)");
+    expect(ui.container.querySelector(".tx-ladder li:not(.tx-ladder-head)")).toBeNull();
+    expect(ui.container.querySelector(".tx-sides")).not.toBeNull();
+    expect(ui.container.querySelector("svg.tx-chart")).not.toBeNull();
+    expect(ui.button("Connect wallet")).toBeDefined();
+  } finally { await ui.unmount(); client.dispose(); vi.restoreAllMocks(); }
+
+  // Models that are not an array at all: no benchmark, no crash.
+  const c2 = new MockMarketClient({ autoTick: false });
+  const f2 = new MockComputeFeedClient();
+  vi.spyOn(f2, "market").mockResolvedValue({ ...good, models: { nope: 1 } } as never);
+  const ui2 = await mount(c2, { computeFeed: f2 });
+  try {
+    expect(ui2.container.querySelector("h1")!.textContent).toBe("COMPUTE-PERP");
+    expect(ui2.container.querySelector(".tx-quotes")!.textContent).toContain("The feed has no quotes for Qwen3.8-27B right now.");
+  } finally { await ui2.unmount(); c2.dispose(); vi.restoreAllMocks(); }
 });
 
 test("market bar: each stat only when its source has a value", async () => {

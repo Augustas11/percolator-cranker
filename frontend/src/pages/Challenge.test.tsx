@@ -124,6 +124,32 @@ test("board: empty and unreachable states", async () => {
   expect(container.querySelector('[aria-labelledby="ch-board"] [role="status"]')?.textContent).toBe("The board is unreachable right now (HTTP 502). Try again in a minute.");
 });
 
+test("board: a malformed entry shows the unreachable note, not a blank page", async () => {
+  Object.assign(site.challenge, { enabled: true, apiBase: "https://api.example.invalid" });
+  const { terms: _t, se: _s, module_hash: _m, ...broken } = MOCK_BOARD.entries[0];
+  for (const bad of [
+    { ...MOCK_BOARD, entries: [broken] },
+    { ...MOCK_BOARD, season: { entries: [{ ...MOCK_BOARD.entries[0], terms: { ...MOCK_BOARD.entries[0].terms, jump: "x" } }] } },
+  ]) {
+    const container = await render("/challenge", async () => bad as never);
+    expect(container.querySelector("h1")?.textContent).toBe("Design the price of AI compute.");
+    expect(container.querySelector('[aria-labelledby="ch-board"] [role="status"]')?.textContent).toBe("The board is unreachable right now (board.json: unexpected shape). Try again in a minute.");
+    expect(container.querySelector(".ch-board")).toBeNull();
+    await cleanup?.(); cleanup = undefined;
+  }
+});
+
+test("httpBoard validates entries and times out after 10 s", async () => {
+  const { httpBoard, isBoard } = await import("../challenge/board");
+  expect(isBoard(MOCK_BOARD)).toBe(true);
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ ...MOCK_BOARD, entries: [{ rank: 1 }] })));
+  const timeout = vi.spyOn(AbortSignal, "timeout");
+  await expect(httpBoard("https://api.example.invalid/")()).rejects.toThrow("board.json: unexpected shape");
+  expect(timeout).toHaveBeenCalledWith(10_000);
+  expect(fetchSpy.mock.calls[0][0]).toBe("https://api.example.invalid/board.json");
+  expect((fetchSpy.mock.calls[0][1] as RequestInit).signal).toBe(timeout.mock.results[0].value);
+});
+
 test("next close and countdown", () => {
   const first = Date.parse("2026-12-06T00:00:00Z");
   expect(nextClose(first, first - 1000)).toBe(first);

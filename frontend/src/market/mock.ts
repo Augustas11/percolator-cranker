@@ -44,7 +44,7 @@ export class MockMarketClient implements MarketClient {
     this.random = mulberry32(seed);
     const now = Date.now();
     this.snapshot = freeze({
-      market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 2, maintenanceMarginRatio: 0.25, feeBps: 15 },
+      market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 2, initialMarginRatio: 0.5, maintenanceMarginRatio: 0.25, feeBps: 15 },
       mark: { price: startPrice, ts: now },
       funding: { rate: 0.0001, nextFundingTs: now + 3_600_000 },
       portfolio: {
