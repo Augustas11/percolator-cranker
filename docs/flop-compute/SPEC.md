@@ -83,6 +83,26 @@ in which endpoints are clamped logs a `flop alert: clamped ...` line (and
 `flop alert: no endpoint clamped` when it clears), so the first promo is
 noticed.
 
+**Missing endpoints** (owner decision 2026-11-13: rule approved, off until
+its length is chosen). An endpoint that goes down, loses its price or leaves
+the listing keeps counting, as up and at the price it last had while up, for
+`or_hold_missing_s`; after that it is dropped as before. One that comes back
+counts at its new price at once, and a price shown while down is ignored. Why:
+in the recorder's first 44 h (2026-11-11 to 11-13) no bf16 or fp16 price
+changed, but GMICloud's bf16 endpoint was down 44% of the time in 15 spells
+(median 30 min, longest 6 h 15 min). Each spell moved the pricing set from the
+bf16 pair ($0.3112) to DeepInfra with Cerebras fp16 ($0.3035), a 2.5% step
+either way, 29 times, with no price change behind it. Cost of the rule: a real
+exit reaches the mark one hold late. Limits: the hold is kept in memory, so
+after a pusher restart nothing is held until an endpoint is seen up again; a
+push line logs `hold_missing_s`, the held endpoints (`held`) and the listing
+as priced, so the mark recomputes from the line, but the line alone does not
+prove the endpoint was up when `held` says. A change in what is held logs
+`flop alert: held at last up price: ...`. The shipped value is 0 (off): 2 h,
+6 h and 12 h are scored as `hold-2h`, `hold-6h` and `hold-12h`
+([SCORER.md](SCORER.md)) on the recorder's first full week, and the owner
+sets the length then. Code: `flop_index::Holder`.
+
 Inverse-square weighting has one known exception to "a cheaper provider never
 raises the mark": a cut by an endpoint priced over 2x the mark raises it a
 little, because the cheaper expensive endpoint wins weight. Example, bf16 at

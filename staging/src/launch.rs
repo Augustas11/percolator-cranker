@@ -199,6 +199,10 @@ pub struct OracleCfg {
     /// The clamp applies only to a set with at least this many up endpoints.
     #[serde(default = "default_or_clamp_min")]
     pub or_clamp_min_endpoints: usize,
+    /// A down or unlisted endpoint counts at its last up price for this long
+    /// (flop_index::Holder). 0 = off.
+    #[serde(default)]
+    pub or_hold_missing_s: u64,
 }
 
 impl OracleCfg {

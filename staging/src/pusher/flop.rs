@@ -239,7 +239,7 @@ fn index_from(side: &FlopSide, o: &launch::OracleCfg) -> Result<(u64, u64)> {
     Ok((mark as u64, side.newest_ms))
 }
 
-pub use flop_index::{combine, or_quote_with, Guard, OrEndpoint, OrQuote, Used};
+pub use flop_index::{combine, or_quote_with, Guard, Held, Holder, OrEndpoint, OrQuote, Used};
 
 /// Pick endpoints: the first quantization tier with at least `or_min_endpoints`;
 /// else all listed tiers together if that reaches it; else every endpoint.
@@ -310,8 +310,17 @@ pub(super) fn fetch_or_text(client: &reqwest::blocking::Client, url: &str) -> Re
     Ok(client.get(url).send()?.error_for_status()?.text()?)
 }
 
-fn fetch_or(client: &reqwest::blocking::Client, o: &launch::OracleCfg) -> Result<OrQuote> {
-    or_quote(&parse_or(&fetch_or_text(client, &o.or_url)?)?, launch::now_ms(), o)
+fn fetch_or(client: &reqwest::blocking::Client, o: &launch::OracleCfg, holder: &mut Holder) -> Result<OrQuote> {
+    held_quote(&parse_or(&fetch_or_text(client, &o.or_url)?)?, launch::now_ms(), o, holder)
+}
+
+/// The quote for one fetched listing, with missing endpoints held at their
+/// last up price (`or_hold_missing_s`; 0 leaves the listing as fetched).
+pub fn held_quote(endpoints: &[OrEndpoint], at_ms: u64, o: &launch::OracleCfg, holder: &mut Holder) -> Result<OrQuote> {
+    let (eps, held) = holder.apply(at_ms, endpoints);
+    let mut q = or_quote(&eps, at_ms, o)?;
+    q.held = held;
+    Ok(q)
 }
 
 /// One endpoint as the price recorder saves it: every row, priced or not.
@@ -377,6 +386,16 @@ pub fn clamp_alert(prev: &mut Vec<String>, q: &OrQuote) -> Option<String> {
         .map(|u| format!("{} {} ${:.4} to ${:.4}", u.provider, u.quantization, u.listed, u.priced))
         .collect();
     Some(format!("flop alert: clamped {} (set {}, mark ${:.4})", legs.join(", "), q.set, q.usd_e6 as f64 / 1e6))
+}
+
+/// One log line when the set of held endpoints changes, so a hold is noticed.
+pub fn hold_alert(prev: &mut Vec<String>, q: &OrQuote) -> Option<String> {
+    let now: Vec<String> = q.held.iter().map(|h| format!("{}/{}", h.provider, h.quantization)).collect();
+    if now == *prev {
+        return None;
+    }
+    *prev = now.clone();
+    Some(if now.is_empty() { "flop alert: no endpoint held".to_owned() } else { format!("flop alert: held at last up price: {}", now.join(", ")) })
 }
 
 /// The mark under `openrouter`: the last good quote while it is fresh.
@@ -490,6 +509,8 @@ impl FlopIndex {
         let (mut models_at, mut or_at) = (None::<Instant>, None::<Instant>);
         let (mut last_table, mut last_status) = (String::new(), String::new());
         let mut clamped: Vec<String> = Vec::new();
+        let mut holder = Holder::new(cfg.or_hold_missing_s.saturating_mul(1000));
+        let mut held_now: Vec<String> = Vec::new();
         std::thread::spawn(move || loop {
             // Model registry for the status table: hourly, and kept on a failed read.
             if models_at.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(3600)) {
@@ -502,9 +523,12 @@ impl FlopIndex {
             // quote, which `or_mark` ages out after or_max_age_s.
             if o.flop_mark_source == "openrouter" && or_at.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(o.or_refresh_s)) {
                 or_at = Some(Instant::now());
-                match fetch_or(&client, &o) {
+                match fetch_or(&client, &o, &mut holder) {
                     Ok(q) => {
                         if let Some(line) = clamp_alert(&mut clamped, &q) {
+                            eprintln!("{line}");
+                        }
+                        if let Some(line) = hold_alert(&mut held_now, &q) {
                             eprintln!("{line}");
                         }
                         *or_writer.lock().unwrap_or_else(|p| p.into_inner()) = Some(q);
@@ -580,6 +604,7 @@ impl FlopIndex {
                 "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
                 "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp",
                 "clamp_min_endpoints": o.or_clamp_min_endpoints, "clamp": q.clamp, "used": q.used,
+                "hold_missing_s": o.or_hold_missing_s, "held": q.held,
                 "endpoints": q.endpoints, "flop_side": side_json,
             }))
         } else {
@@ -824,6 +849,12 @@ fn rule_ok(line: &str, new_rule_seen: &mut bool) -> Result<()> {
         "weighting": s.weighting, "min_endpoints": s.min_endpoints, "quantizations": s.quantizations,
         "blend_in_out": s.blend,
     });
+    // Lines from before 2026-11-13 carry no hold_missing_s: nothing was held.
+    if let Some(h) = inputs.get("hold_missing_s") {
+        if h.as_u64() != Some(s.hold_missing_s) {
+            bail!("rule loosened or changed: hold_missing_s is {h}, the shipped rule has {}", s.hold_missing_s);
+        }
+    }
     for (k, v) in want.as_object().expect("object") {
         let got = &inputs[k.as_str()];
         let same = match (got.as_f64(), v.as_f64()) {
@@ -922,6 +953,29 @@ mod tests {
         assert_eq!(o.or_weighting, s.weighting);
         assert_eq!(o.or_min_frac_of_median, s.min_frac_of_median);
         assert_eq!(o.or_clamp_min_endpoints, s.clamp_min_set);
+        assert_eq!(o.or_hold_missing_s, s.hold_missing_s);
+    }
+
+    #[test]
+    fn a_held_endpoint_is_logged_and_the_line_still_verifies() {
+        let mut o = cfg();
+        o.or_hold_missing_s = 6 * 3600;
+        let mut h = Holder::new(o.or_hold_missing_s * 1000);
+        let mut eps = vec![ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2), ep("Novita", "bf16", 0.30, 2.4)];
+        let up = held_quote(&eps, NOW, &o, &mut h).unwrap();
+        assert!(up.held.is_empty());
+        eps[1].status = -2;
+        let q = held_quote(&eps, NOW + 3_600_000, &o, &mut h).unwrap();
+        assert_eq!(q.usd_e6, up.usd_e6);
+        assert_eq!((q.held.len(), q.held[0].provider.as_str(), q.held[0].last_up_ms), (1, "GMICloud", NOW));
+        // The logged endpoints are the held listing, so the line recomputes.
+        let kp = Keypair::new();
+        let line = line_for(&o, &kp, &q, &q.set, serde_json::to_value(&q.used).unwrap());
+        assert_eq!(verify_push(&line, Some(&kp.pubkey())).unwrap(), q.usd_e6);
+        let mut prev = Vec::new();
+        assert_eq!(hold_alert(&mut prev, &q).unwrap(), "flop alert: held at last up price: GMICloud/bf16");
+        assert!(hold_alert(&mut prev, &q).is_none());
+        assert_eq!(hold_alert(&mut prev, &up).unwrap(), "flop alert: no endpoint held");
     }
 
     #[test]
@@ -1144,7 +1198,7 @@ mod tests {
     fn openrouter_goes_stale_without_a_good_fetch() {
         let o = cfg();
         assert!(or_mark(None, NOW, &o).is_err());
-        let q = OrQuote { usd_e6: 439_844, at_ms: NOW - o.or_max_age_s * 1000, used: vec![], set: "bf16".into(), clamp: "on".into(), endpoints: vec![] };
+        let q = OrQuote { usd_e6: 439_844, at_ms: NOW - o.or_max_age_s * 1000, used: vec![], set: "bf16".into(), clamp: "on".into(), endpoints: vec![], held: vec![] };
         assert_eq!(or_mark(Some(&q), NOW, &o).unwrap(), (439_844, q.at_ms));
         let e = or_mark(Some(&q), NOW + 1000, &o).unwrap_err();
         assert!(e.to_string().contains("stale"), "{e}");
@@ -1187,7 +1241,7 @@ mod tests {
     #[test]
     fn status_logs_the_flop_implied_rate() {
         let o = cfg();
-        let q = OrQuote { usd_e6: 257_813, at_ms: NOW, used: vec![Used { provider: "DeepInfra".into(), quantization: "bf16".into(), listed: 0.2578, priced: 0.2578 }], set: "bf16".into(), clamp: "on".into(), endpoints: vec![] };
+        let q = OrQuote { usd_e6: 257_813, at_ms: NOW, used: vec![Used { provider: "DeepInfra".into(), quantization: "bf16".into(), listed: 0.2578, priced: 0.2578 }], set: "bf16".into(), clamp: "on".into(), endpoints: vec![], held: vec![] };
         let side = flop_side(&many(o.flop_min_prints, P3), NOW, &o);
         let s = status(Some(&q), &side, None, &o);
         // At the anchor price the implied rate equals the stand-in.
