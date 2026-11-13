@@ -39,6 +39,11 @@ const ERRORS: &[&str] = &[
     "AssetGenerationMismatch",
     "RentExemptRequired",
 ];
+/// Matcher programs that only return full fills (no `FLAG_PARTIAL_OK`), so a landed
+/// single-leg TradeCpi through them executed exactly the requested size. Drip matcher:
+/// matcher/README.md ("full fills only, exact oracle/mark execution price").
+pub const FULL_FILL_MATCHERS: &[&str] = &["8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE"];
+
 pub fn error_name(code: u64) -> Option<&'static str> {
     usize::try_from(code)
         .ok()
@@ -112,6 +117,12 @@ pub struct Fill {
     pub limit_price: Option<u64>,
     pub requested_fee_bps: u64,
     pub status: &'static str,
+    /// Taker-signed executed size; None while the execution is unknown (`requested`).
+    pub executed_size: Option<String>,
+    /// CPI only: the oracle/mark price the wrapper passed to the matcher for this leg.
+    pub applied_price: Option<u64>,
+    /// Instruction signer 0; both handlers require it to own the taker portfolio.
+    pub taker_owner: String,
 }
 #[derive(Debug)]
 pub struct Mark {
@@ -301,6 +312,18 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
                 observation_sequence: *observation_sequence,
             });
         }
+        let cpi = matches!(tag, Some(10 | 67));
+        let matcher = if cpi {
+            matcher_call(tx, i, account(4).ok().as_deref(), &keys)
+        } else {
+            vec![]
+        };
+        // Wrapper validate_matcher_return: a zero or partial fill needs FLAG_PARTIAL_OK, which
+        // full-fill matchers never set; batches must fill every leg exactly
+        // (validate_atomic_batch_matcher_return). A landed instruction therefore executed size_q.
+        let known = !cpi
+            || tag == Some(67)
+            || account(4).is_ok_and(|m| FULL_FILL_MATCHERS.contains(&m.as_str()));
         let mut fill = |leg,
                         aid,
                         bid,
@@ -327,11 +350,13 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
                 reported_price: exec_price,
                 limit_price,
                 requested_fee_bps: fee_bps,
-                status: if matches!(tag, Some(10 | 67)) {
-                    "requested"
-                } else {
-                    "executed"
-                },
+                status: if known { "executed" } else { "requested" },
+                executed_size: known.then(|| size_q.to_string()),
+                applied_price: matcher
+                    .get(leg)
+                    .filter(|m| m.0 == asset_index && m.2 == size_q)
+                    .map(|m| m.1),
+                taker_owner: account(0)?,
             });
             Ok(())
         };
@@ -420,6 +445,53 @@ pub fn decode(signature: &str, tx: &Value, program: &str, market: &str) -> Resul
         }
     }
     Ok(out)
+}
+
+/// Per-leg (asset_index, oracle_price_e6, req_size) the wrapper sent to the matcher program
+/// in its CPI under top-level instruction `ix` (wrapper invoke_matcher / invoke_matcher_batch).
+fn matcher_call(
+    tx: &Value,
+    ix: usize,
+    matcher: Option<&str>,
+    keys: &[Value],
+) -> Vec<(u16, u64, i128)> {
+    let Some(matcher) = matcher else {
+        return vec![];
+    };
+    let inner = tx["meta"]["innerInstructions"]
+        .as_array()
+        .into_iter()
+        .flatten();
+    for group in inner.filter(|g| g["index"].as_u64() == Some(ix as u64)) {
+        for call in group["instructions"].as_array().into_iter().flatten() {
+            let program = call["programIdIndex"]
+                .as_u64()
+                .and_then(|n| keys.get(n as usize))
+                .and_then(Value::as_str);
+            if program != Some(matcher) {
+                continue;
+            }
+            let Ok(d) = bs58::decode(call["data"].as_str().unwrap_or("")).into_vec() else {
+                continue;
+            };
+            let u16_at = |o: usize| u16::from_le_bytes(d[o..o + 2].try_into().unwrap());
+            let u64_at = |o: usize| u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
+            let i128_at = |o: usize| i128::from_le_bytes(d[o..o + 16].try_into().unwrap());
+            match d.first() {
+                Some(0) if d.len() == 67 => return vec![(u16_at(9), u64_at(19), i128_at(27))],
+                Some(3) if d.len() >= 2 && d.len() == 18 + 26 * d[1] as usize => {
+                    return (0..d[1] as usize)
+                        .map(|k| {
+                            let o = 18 + 26 * k;
+                            (u16_at(o), u64_at(o + 2), i128_at(o + 10))
+                        })
+                        .collect();
+                }
+                _ => {}
+            }
+        }
+    }
+    vec![]
 }
 
 #[cfg(test)]
@@ -614,7 +686,12 @@ pub(crate) mod tests {
                         ix,
                         Instruction::TradeCpi { .. } | Instruction::BatchTradeCpi { .. }
                     );
-                    assert_eq!(f.status, if cpi { "requested" } else { "executed" });
+                    // The synthetic TradeCpi names no matcher program, so its execution is
+                    // unknown; batches must fill exactly, so they are executed.
+                    let unknown = matches!(ix, Instruction::TradeCpi { .. });
+                    assert_eq!(f.status, if unknown { "requested" } else { "executed" });
+                    assert_eq!(f.executed_size, (!unknown).then(|| "-42".to_string()));
+                    assert_eq!(f.applied_price, None);
                     assert_eq!(f.reported_price, (!cpi).then_some(12345));
                     assert_eq!(f.limit_price, cpi.then_some(12345));
                     let batch = matches!(
@@ -788,6 +865,139 @@ pub(crate) mod tests {
         );
         assert_eq!(fixture("push_mark").instructions[0].name, "PushAuthMark");
         assert_eq!(fixture("push_mark").instructions[0].tag, Some(63));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod cpi_tests {
+    use super::tests::PROGRAM;
+    use super::*;
+    use percolator_prog::ix::BatchTradeCpiLeg;
+    use serde_json::json;
+    const COMPUTE: &str = "uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J";
+    const TAKER: &str = "Gk9KSFvjwf9YZxM9BmkHmNCFwZNC5ndaFZqgLr4qQeVS";
+    const LP: &str = "GcS4f5uCiYozfEtHzmttMKkHab2ympTasA9MvHashhSZ";
+    const OWNER: &str = "ECUyFtvBfRRxdXTgV4Ze4QY6PmhBJKTRgcDCrZq5ZcHQ";
+    pub fn compute(name: &str) -> (Value, Decoded) {
+        let v: Value = serde_json::from_str(
+            &std::fs::read_to_string(format!(
+                "{}/tests/fixtures/{name}.json",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let d = decode(v["signature"].as_str().unwrap(), &v["tx"], PROGRAM, COMPUTE).unwrap();
+        (v, d)
+    }
+    #[test]
+    fn real_trade_cpi_through_full_fill_matcher_is_executed_at_the_matcher_mark() {
+        for (name, size) in [
+            ("trade_cpi_open", "1000000"),
+            ("trade_cpi_close", "-1000000"),
+        ] {
+            let (_, d) = compute(name);
+            assert_eq!(d.fills.len(), 1, "{name}");
+            let f = &d.fills[0];
+            assert_eq!(f.status, "executed");
+            assert_eq!(f.size_q, size);
+            assert_eq!(f.executed_size.as_deref(), Some(size));
+            assert_eq!(f.applied_price, Some(311207));
+            assert_eq!(f.reported_price, None);
+            assert_eq!(f.taker_portfolio, TAKER);
+            assert_eq!(f.maker_portfolio, LP);
+            assert_eq!(f.taker_owner, OWNER);
+        }
+    }
+    #[test]
+    fn unknown_matchers_stay_requested_and_failed_cpi_has_no_fill() {
+        let (mut v, _) = compute("trade_cpi_open");
+        // Swap the matcher program key: partial and zero fills become possible.
+        v["tx"]["transaction"]["message"]["accountKeys"][5] = json!(PROGRAM.replace('G', "H"));
+        let d = decode("unknown", &v["tx"], PROGRAM, COMPUTE).unwrap();
+        assert_eq!(d.fills[0].status, "requested");
+        assert_eq!(d.fills[0].executed_size, None);
+        assert_eq!(d.fills[0].applied_price, Some(311207));
+        // An inner call whose size differs from the instruction is not trusted for price.
+        let (mut v, _) = compute("trade_cpi_open");
+        let mut data = bs58::decode(
+            v["tx"]["meta"]["innerInstructions"][0]["instructions"][0]["data"]
+                .as_str()
+                .unwrap(),
+        )
+        .into_vec()
+        .unwrap();
+        data[27] ^= 1;
+        v["tx"]["meta"]["innerInstructions"][0]["instructions"][0]["data"] =
+            json!(bs58::encode(data).into_string());
+        assert_eq!(
+            decode("mismatch", &v["tx"], PROGRAM, COMPUTE)
+                .unwrap()
+                .fills[0]
+                .applied_price,
+            None
+        );
+        v["tx"]["meta"]["err"] = json!({"InstructionError":[4,{"Custom":19}]});
+        assert!(decode("failed", &v["tx"], PROGRAM, COMPUTE)
+            .unwrap()
+            .fills
+            .is_empty());
+    }
+    #[test]
+    fn batch_cpi_legs_take_their_matcher_prices() {
+        let (v, _) = compute("trade_cpi_open");
+        let ix = Instruction::BatchTradeCpi {
+            account_a_portfolio_id: 7,
+            account_a_position_epoch: 0,
+            account_b_portfolio_id: 8,
+            account_b_position_epoch: 0,
+            account_b_matcher_sequence: 0,
+            max_slippage_atoms: 0,
+            max_fee_atoms: 0,
+            legs: vec![
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    market_id: 1,
+                    size_q: 5,
+                    limit_price: 0,
+                    fee_bps: 12,
+                },
+                BatchTradeCpiLeg {
+                    asset_index: 1,
+                    market_id: 2,
+                    size_q: -6,
+                    limit_price: 0,
+                    fee_bps: 12,
+                },
+            ],
+        };
+        let mut call = vec![3u8, 2];
+        call.extend_from_slice(&[0; 16]);
+        for (asset, price, size) in [(0u16, 111u64, 5i128), (1, 222, -6)] {
+            call.extend_from_slice(&asset.to_le_bytes());
+            call.extend_from_slice(&price.to_le_bytes());
+            call.extend_from_slice(&size.to_le_bytes());
+        }
+        let mut tx = v["tx"].clone();
+        tx["transaction"]["message"]["instructions"][4]["data"] =
+            json!(bs58::encode(ix.encode()).into_string());
+        tx["meta"]["innerInstructions"][0]["instructions"][0]["data"] =
+            json!(bs58::encode(call).into_string());
+        // Batches always fill exactly, whichever matcher: use an unknown program key.
+        tx["transaction"]["message"]["accountKeys"][5] = json!(PROGRAM.replace('G', "H"));
+        let d = decode("batch", &tx, PROGRAM, COMPUTE).unwrap();
+        let got: Vec<_> = d
+            .fills
+            .iter()
+            .map(|f| (f.status, f.executed_size.clone(), f.applied_price))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("executed", Some("5".into()), Some(111)),
+                ("executed", Some("-6".into()), Some(222))
+            ]
+        );
     }
 }
 

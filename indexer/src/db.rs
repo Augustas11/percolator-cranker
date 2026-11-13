@@ -9,6 +9,8 @@ pub fn open(path: &Path) -> Result<Connection> {
     c.busy_timeout(Duration::from_secs(5))?;
     let legacy: bool = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fills') WHERE name='exec_price')
+         OR (EXISTS(SELECT 1 FROM pragma_table_info('fills'))
+             AND NOT EXISTS(SELECT 1 FROM pragma_table_info('fills') WHERE name='executed_size'))
          OR (EXISTS(SELECT 1 FROM pragma_table_info('marks'))
              AND (NOT EXISTS(SELECT 1 FROM pragma_table_info('marks') WHERE name='observation_sequence')
                   OR NOT EXISTS(SELECT 1 FROM pragma_table_info('marks') WHERE name='market_id')))",
@@ -24,7 +26,7 @@ CREATE TABLE IF NOT EXISTS txs(signature TEXT PRIMARY KEY,slot INTEGER,block_tim
 -- portfolio associates successful closes with the liquidation exclusion query.
 CREATE TABLE IF NOT EXISTS instructions(signature TEXT,ix_index INTEGER,tag INTEGER,name TEXT,decode_error TEXT,portfolio TEXT,PRIMARY KEY(signature,ix_index));
 CREATE TABLE IF NOT EXISTS cranks(signature TEXT,ix_index INTEGER,slot INTEGER,block_time INTEGER,signer TEXT,target_portfolio TEXT,outcome TEXT,error_code INTEGER,PRIMARY KEY(signature,ix_index));
-CREATE TABLE IF NOT EXISTS fills(signature TEXT,ix_index INTEGER,leg INTEGER,slot INTEGER,block_time INTEGER,taker_portfolio TEXT,taker_portfolio_id TEXT,maker_portfolio TEXT,maker_portfolio_id TEXT,asset_index INTEGER,market_id TEXT,size_q TEXT,reported_price TEXT,limit_price TEXT,requested_fee_bps TEXT,status TEXT,PRIMARY KEY(signature,ix_index,leg));
+CREATE TABLE IF NOT EXISTS fills(signature TEXT,ix_index INTEGER,leg INTEGER,slot INTEGER,block_time INTEGER,taker_portfolio TEXT,taker_portfolio_id TEXT,maker_portfolio TEXT,maker_portfolio_id TEXT,asset_index INTEGER,market_id TEXT,size_q TEXT,reported_price TEXT,limit_price TEXT,requested_fee_bps TEXT,status TEXT,executed_size TEXT,applied_price TEXT,taker_owner TEXT,PRIMARY KEY(signature,ix_index,leg));
 CREATE TABLE IF NOT EXISTS marks(signature TEXT,ix_index INTEGER,slot INTEGER,asset_index INTEGER,price TEXT,observation_sequence TEXT,market_id TEXT,PRIMARY KEY(signature,ix_index));
 CREATE INDEX IF NOT EXISTS marks_asset_slot ON marks(asset_index,slot DESC);
 CREATE INDEX IF NOT EXISTS marks_asset_market_slot ON marks(asset_index,market_id,slot DESC);
@@ -35,6 +37,8 @@ CREATE TABLE IF NOT EXISTS liquidations(portfolio TEXT,slot INTEGER,signature TE
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT);
 CREATE INDEX IF NOT EXISTS txs_slot ON txs(slot,signature);
 CREATE INDEX IF NOT EXISTS fills_slot ON fills(slot DESC,signature DESC,ix_index DESC,leg DESC);
+CREATE INDEX IF NOT EXISTS fills_status_slot ON fills(status,slot DESC,signature DESC,ix_index DESC,leg DESC);
+CREATE INDEX IF NOT EXISTS fills_status_time ON fills(status,block_time);
 CREATE INDEX IF NOT EXISTS instructions_portfolio ON instructions(portfolio, name);
 CREATE INDEX IF NOT EXISTS fills_taker_slot ON fills(taker_portfolio,slot);
 CREATE INDEX IF NOT EXISTS fills_taker_slot_order ON fills(taker_portfolio,slot DESC,signature DESC,ix_index DESC,leg DESC);
@@ -124,7 +128,7 @@ pub fn insert(c: &Connection, t: &Decoded) -> Result<()> {
         )?;
     }
     for r in &t.fills {
-        c.execute("INSERT OR IGNORE INTO fills VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",params![r.signature,r.ix_index,r.leg,r.slot,r.block_time,r.taker_portfolio,r.taker_portfolio_id.to_string(),r.maker_portfolio,r.maker_portfolio_id.to_string(),r.asset_index,r.market_id.to_string(),r.size_q,r.reported_price.map(|x|x.to_string()),r.limit_price.map(|x|x.to_string()),r.requested_fee_bps.to_string(),r.status])?;
+        c.execute("INSERT OR IGNORE INTO fills VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",params![r.signature,r.ix_index,r.leg,r.slot,r.block_time,r.taker_portfolio,r.taker_portfolio_id.to_string(),r.maker_portfolio,r.maker_portfolio_id.to_string(),r.asset_index,r.market_id.to_string(),r.size_q,r.reported_price.map(|x|x.to_string()),r.limit_price.map(|x|x.to_string()),r.requested_fee_bps.to_string(),r.status,r.executed_size,r.applied_price.map(|x|x.to_string()),r.taker_owner])?;
     }
     for r in &t.marks {
         c.execute(
@@ -253,6 +257,7 @@ pub fn stats(c: &Connection, cfg: &Config, now: i64) -> Result<Value> {
     let since: Option<u64> = c.query_row("SELECT MIN(slot) FROM portfolio_snapshots", [], |r| {
         r.get(0)
     })?;
+    let (fills_24h, volume_24h) = window(c, now - 86_400)?;
     Ok(
         json!({"since_slot":cfg.start_slot,"market":cfg.market.to_string(),"program":cfg.program.to_string(),
         "as_of_slot":meta(c,"last_ingest_slot")?.and_then(|s|s.parse::<u64>().ok()),
@@ -261,7 +266,8 @@ pub fn stats(c: &Connection, cfg: &Config, now: i64) -> Result<Value> {
         "open_interest":market.get("open_interest").cloned().unwrap_or(json!({})),
         "depositors":count("SELECT COUNT(DISTINCT portfolio) FROM transfers WHERE kind='deposit' AND ok=1")?,
         "portfolios":count("SELECT COUNT(DISTINCT portfolio) FROM portfolio_snapshots")?,
-        "fills":count("SELECT COUNT(*) FROM fills WHERE status='executed'")?,"mode":market["mode"],
+        "fills":count("SELECT COUNT(*) FROM fills WHERE status='executed'")?,
+        "fills_24h":fills_24h,"volume_24h":volume_24h.to_string(),"mode":market["mode"],
         "materialized_portfolio_count":market["materialized_portfolio_count"],
         "insurance":market["insurance"],"vault":market["vault"]}),
     )
@@ -302,10 +308,39 @@ pub fn cached_stats(c: &Connection, cfg: &Config) -> Result<Value> {
         json!({"since_slot":cfg.start_slot,"market":cfg.market.to_string(),"program":cfg.program.to_string(),
         "as_of_slot":null,"as_of":null,"cranks":cranks,"uptime":uptime,
         "liquidations_observed":0,"liquidations_since_slot":null,"open_interest":{},
-        "depositors":0,"portfolios":0,"fills":0,"mode":null,
+        "depositors":0,"portfolios":0,"fills":0,"fills_24h":0,"volume_24h":"0","mode":null,
         "materialized_portfolio_count":null,"insurance":null,"vault":null}),
     )
 }
+/// Executed fills with block_time >= since: count and notional (|size| * price / 1e6, the
+/// season volume unit), all takers. Fills without any known price count without volume.
+fn window(c: &Connection, since: i64) -> Result<(u64, i128)> {
+    let mut stmt = c.prepare(&format!(
+        "SELECT f.executed_size,{FILL_PRICE} FROM fills f
+        WHERE f.status='executed' AND f.block_time>=?1"
+    ))?;
+    let mut count = 0u64;
+    let mut volume = 0i128;
+    for row in stmt.query_map([since], |r| {
+        Ok((
+            r.get::<_, Option<String>>(0)?,
+            r.get::<_, Option<String>>(1)?,
+        ))
+    })? {
+        let (size, price) = row?;
+        count += 1;
+        if let (Some(size), Some(price)) = (size, price) {
+            if price.parse::<u64>().is_ok() && size.parse::<i128>().is_ok() {
+                add_notional(&mut volume, &size, &price)?;
+            }
+        }
+    }
+    Ok((count, volume))
+}
+/// Fill price in preference order, and its source label for API rows.
+const FILL_PRICE: &str = "COALESCE(f.reported_price,f.applied_price,(SELECT m.price FROM marks m WHERE m.asset_index=f.asset_index AND m.market_id=f.market_id
+         AND (m.slot<f.slot OR (m.signature=f.signature AND m.ix_index<f.ix_index))
+         ORDER BY m.slot DESC,length(m.observation_sequence) DESC,m.observation_sequence DESC,m.signature DESC,m.ix_index DESC LIMIT 1))";
 const FILL_MARK: &str = "(SELECT m.price FROM marks m WHERE m.asset_index=f.asset_index AND m.market_id=f.market_id
          AND (m.slot<f.slot OR (m.signature=f.signature AND m.ix_index<f.ix_index))
          ORDER BY m.slot DESC,length(m.observation_sequence) DESC,m.observation_sequence DESC,m.signature DESC,m.ix_index DESC LIMIT 1)";
@@ -314,8 +349,9 @@ pub fn fills(c: &Connection, portfolio: &str, limit: u64, before: Option<&str>) 
     let cursor = before.map(fill_cursor).transpose()?;
     let (slot, signature, ix, leg) = cursor.unwrap_or((i64::MAX, String::new(), 0, 0));
     let mut stmt = c.prepare(&format!(
-        "SELECT f.*,
-        {FILL_MARK}
+        "SELECT f.signature,f.ix_index,f.leg,f.slot,f.block_time,f.taker_portfolio,f.taker_portfolio_id,
+        f.maker_portfolio,f.maker_portfolio_id,f.asset_index,f.market_id,f.size_q,f.reported_price,
+        f.limit_price,f.requested_fee_bps,f.status,{FILL_MARK},f.executed_size,f.applied_price
         FROM fills f WHERE (taker_portfolio=?1 OR maker_portfolio=?1)
         AND (?2 IS NULL OR (f.slot,f.signature,f.ix_index,f.leg)<(?3,?4,?5,?6))
         ORDER BY f.slot DESC,f.signature DESC,f.ix_index DESC,f.leg DESC LIMIT ?7",
@@ -333,6 +369,7 @@ pub fn fills(c: &Connection, portfolio: &str, limit: u64, before: Option<&str>) 
             json!({"signature":r.get::<_,String>(0)?,"ix_index":r.get::<_,u64>(1)?,"leg":r.get::<_,u64>(2)?,"slot":r.get::<_,u64>(3)?,"block_time":r.get::<_,Option<i64>>(4)?,
             "taker_portfolio":taker,"taker_portfolio_id":unsigned(6)?,"maker_portfolio":r.get::<_,String>(7)?,"maker_portfolio_id":unsigned(8)?,
             "asset_index":r.get::<_,u64>(9)?,"market_id":unsigned(10)?,"size_q":size,"reported_price":unsigned(12)?,"limit_price":unsigned(13)?,"requested_fee_bps":unsigned(14)?,"status":r.get::<_,String>(15)?,"mark_price":unsigned(16)?,
+            "executed_size":r.get::<_,Option<String>>(17)?,"applied_price":unsigned(18)?,
             "price_note":"estimate: execution uses the engine mark; mark_price is the last pushed mark before this fill",
             "side":if (taker == portfolio) == positive {"buy"} else {"sell"}}),
         )
@@ -356,6 +393,59 @@ pub fn fills(c: &Connection, portfolio: &str, limit: u64, before: Option<&str>) 
         ));
     }
     Ok(json!({"fills":rows,"next_before":next}))
+}
+/// Market-wide executed fills, newest first, with the same cursor as `/fills`.
+pub fn trades(c: &Connection, limit: u64, before: Option<&str>) -> Result<Value> {
+    let cursor = before.map(fill_cursor).transpose()?;
+    let (slot, signature, ix, leg) = cursor.unwrap_or((i64::MAX, String::new(), 0, 0));
+    let mut stmt = c.prepare(&format!(
+        "SELECT f.signature,f.ix_index,f.leg,f.slot,f.block_time,f.executed_size,f.taker_owner,
+        f.taker_portfolio,f.maker_portfolio,f.asset_index,f.reported_price,f.applied_price,{FILL_PRICE}
+        FROM fills f WHERE f.status='executed'
+        AND (?1 IS NULL OR (f.slot,f.signature,f.ix_index,f.leg)<(?2,?3,?4,?5))
+        ORDER BY f.slot DESC,f.signature DESC,f.ix_index DESC,f.leg DESC LIMIT ?6",
+    ))?;
+    let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Value> {
+        let size = r
+            .get::<_, Option<String>>(5)?
+            .and_then(|s| s.parse::<i128>().ok());
+        let source = if r.get::<_, Option<String>>(10)?.is_some() {
+            "reported"
+        } else if r.get::<_, Option<String>>(11)?.is_some() {
+            "matcher_oracle"
+        } else {
+            "last_mark"
+        };
+        let price = r
+            .get::<_, Option<String>>(12)?
+            .and_then(|s| s.parse::<u64>().ok());
+        Ok(
+            json!({"signature":r.get::<_,String>(0)?,"ix_index":r.get::<_,u64>(1)?,"leg":r.get::<_,u64>(2)?,
+            "slot":r.get::<_,u64>(3)?,"block_time":r.get::<_,Option<i64>>(4)?,
+            "side":if size.is_some_and(|n| n > 0) {"buy"} else {"sell"},
+            "size":size.map(|n| n.unsigned_abs().to_string()),
+            "price":price,"price_source":if price.is_some() {Value::from(source)} else {Value::Null},
+            "wallet":r.get::<_,Option<String>>(6)?,"taker_portfolio":r.get::<_,String>(7)?,
+            "maker_portfolio":r.get::<_,String>(8)?,"asset_index":r.get::<_,u64>(9)?}),
+        )
+    };
+    let mut rows = stmt
+        .query_map(params![before, slot, signature, ix, leg, limit + 1], read)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut next = None;
+    if rows.len() > limit as usize {
+        rows.truncate(limit as usize);
+        let row = rows.last().unwrap();
+        next = Some(format!(
+            "{}.{}.{}.{}",
+            row["slot"],
+            row["signature"].as_str().unwrap(),
+            row["ix_index"],
+            row["leg"]
+        ));
+    }
+    Ok(json!({"trades":rows,"next_before":next,
+        "price_note":"reported: NoCpi instruction price; matcher_oracle: the mark the wrapper passed to the matcher (AuthMark markets execute at this mark); last_mark: last pushed mark before the fill (estimate)"}))
 }
 pub fn positions(c: &Connection, owner: &str) -> Result<Value> {
     let mut stmt=c.prepare("SELECT s.portfolio,slot,capital,pnl,positions_json FROM portfolio_snapshots s JOIN current_portfolios c ON c.portfolio=s.portfolio WHERE owner=?1 AND slot=(SELECT MAX(slot) FROM portfolio_snapshots WHERE portfolio=s.portfolio) ORDER BY s.portfolio")?;
@@ -622,7 +712,7 @@ pub fn cached_season(c: &Connection, cfg: &Config) -> Result<Value> {
 }
 
 // Same-slot marks pick any one (volume estimate only).
-const SEASON_FILLS_SQL: &str = "SELECT f.size_q,COALESCE(f.reported_price,
+const SEASON_FILLS_SQL: &str = "SELECT COALESCE(f.executed_size,f.size_q),COALESCE(f.reported_price,f.applied_price,
     (SELECT price FROM marks WHERE asset_index=f.asset_index AND market_id=f.market_id AND slot<=f.slot ORDER BY slot DESC LIMIT 1))
     FROM fills f WHERE f.taker_portfolio=?1 AND f.status IN ('executed','requested')";
 
@@ -1123,6 +1213,115 @@ mod tests {
         assert_eq!(s["fills"], 1);
         assert!(s.get("volume").is_none());
         assert!(s.get("notional").is_none());
+    }
+    #[test]
+    fn executed_cpi_fills_count_in_stats_window_season_and_trades() {
+        let c = memory();
+        let (_, mut cfg) = Config::parse(["serve".into()]).unwrap();
+        cfg.leaderboard_exclude.clear();
+        let (_, open_trade) = crate::decode::cpi_tests::compute("trade_cpi_open");
+        let (_, close) = crate::decode::cpi_tests::compute("trade_cpi_close");
+        insert(&c, &open_trade).unwrap();
+        insert(&c, &close).unwrap();
+        // An unknown-matcher CPI stays requested: excluded from fills, 24h and /trades.
+        let mut unknown = fixture("crank_trade");
+        unknown.fills[0].status = "requested";
+        unknown.fills[0].executed_size = None;
+        insert(&c, &unknown).unwrap();
+        let close_time = close.block_time.unwrap();
+        let s = stats(&c, &cfg, close_time + 10).unwrap();
+        assert_eq!(s["fills"], 2);
+        assert_eq!(s["fills_24h"], 2);
+        // 2 x 1_000_000 q at 311207 e6 / 1e6.
+        assert_eq!(s["volume_24h"], "622414");
+        let s = stats(&c, &cfg, close_time + 86_400 - 10).unwrap();
+        assert_eq!(
+            (s["fills_24h"].clone(), s["volume_24h"].clone()),
+            (json!(1), json!("311207"))
+        );
+        assert_eq!(cached_stats(&c, &cfg).unwrap()["volume_24h"], "0");
+
+        let t = trades(&c, 1, None).unwrap();
+        assert_eq!(t["trades"][0]["signature"], close.signature);
+        assert_eq!(t["trades"][0]["side"], "sell");
+        assert_eq!(t["trades"][0]["size"], "1000000");
+        assert_eq!(t["trades"][0]["price"], 311207);
+        assert_eq!(t["trades"][0]["price_source"], "matcher_oracle");
+        assert_eq!(
+            t["trades"][0]["wallet"],
+            "ECUyFtvBfRRxdXTgV4Ze4QY6PmhBJKTRgcDCrZq5ZcHQ"
+        );
+        assert_eq!(
+            t["trades"][0]["taker_portfolio"],
+            "Gk9KSFvjwf9YZxM9BmkHmNCFwZNC5ndaFZqgLr4qQeVS"
+        );
+        assert_eq!(t["trades"][0]["block_time"], close_time);
+        let next = trades(&c, 5, t["next_before"].as_str()).unwrap();
+        assert_eq!(next["trades"].as_array().unwrap().len(), 1);
+        assert_eq!(next["trades"][0]["side"], "buy");
+        assert!(next["next_before"].is_null());
+        // A NoCpi fill keeps its reported price; mark fallback is labelled.
+        let nocpi = fixture("crank_trade");
+        insert(&c, &nocpi).unwrap();
+        c.execute(
+            "UPDATE fills SET status='executed',executed_size=size_q WHERE signature=?1",
+            [&nocpi.signature],
+        )
+        .unwrap();
+        let all = trades(&c, 10, None).unwrap();
+        assert_eq!(all["trades"].as_array().unwrap().len(), 3);
+        assert_eq!(all["trades"][2]["price_source"], "reported");
+        c.execute(
+            "UPDATE fills SET applied_price=NULL WHERE signature=?1",
+            [&close.signature],
+        )
+        .unwrap();
+        assert_eq!(
+            trades(&c, 1, None).unwrap()["trades"][0]["price"],
+            Value::Null
+        );
+        c.execute("INSERT INTO marks VALUES('m',0,1,0,'300000','1','1')", [])
+            .unwrap();
+        let t = trades(&c, 1, None).unwrap();
+        assert_eq!(
+            (
+                t["trades"][0]["price"].clone(),
+                t["trades"][0]["price_source"].clone()
+            ),
+            (json!(300000), json!("last_mark"))
+        );
+
+        // Season: agent taker volume counts executed CPI fills at the matcher price.
+        c.execute("INSERT INTO portfolio_snapshots VALUES('Gk9KSFvjwf9YZxM9BmkHmNCFwZNC5ndaFZqgLr4qQeVS',1,0,'ECUyFtvBfRRxdXTgV4Ze4QY6PmhBJKTRgcDCrZq5ZcHQ','0','0','[]')", []).unwrap();
+        set_meta(&c, "observed_slot", "999999999999").unwrap();
+        let agents = agent_portfolios(&c, &cfg).unwrap();
+        let season = season(&c, &cfg, &agents).unwrap();
+        assert_eq!(season["trades"], 2);
+        // close falls back to the mark it now resolves (300000) after applied_price was cleared.
+        assert_eq!(season["volume_usd"], "611207");
+        // /fills exposes the executed size and applied price.
+        let f = fills(&c, "Gk9KSFvjwf9YZxM9BmkHmNCFwZNC5ndaFZqgLr4qQeVS", 10, None).unwrap();
+        assert_eq!(f["fills"][1]["executed_size"], "1000000");
+        assert_eq!(f["fills"][1]["applied_price"], 311207);
+        assert_eq!(f["fills"][1]["status"], "executed");
+    }
+    #[test]
+    fn fills_without_executed_size_require_rebuild() {
+        let c = memory();
+        c.execute_batch("DROP TABLE fills; CREATE TABLE fills(signature TEXT,status TEXT);")
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "indexer-legacy-fills-{}.sqlite",
+            std::process::id()
+        ));
+        c.execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+            .unwrap();
+        let result = open(&path);
+        std::fs::remove_file(path).unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("legacy indexer schema"));
     }
     #[test]
     fn marks_only_precede_fills_by_slot_or_same_transaction() {

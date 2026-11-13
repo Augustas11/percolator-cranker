@@ -26,6 +26,10 @@ pub enum Query {
     Positions {
         owner: String,
     },
+    Trades {
+        limit: u64,
+        before: Option<String>,
+    },
     NotFound,
 }
 pub fn parse(url: &str) -> Result<Query> {
@@ -39,6 +43,7 @@ pub fn parse(url: &str) -> Result<Query> {
             | "/fills/recent"
             | "/season"
             | "/positions"
+            | "/trades"
     ) {
         return Ok(Query::NotFound);
     }
@@ -54,6 +59,7 @@ pub fn parse(url: &str) -> Result<Query> {
         "/fills" => &["portfolio", "limit", "before"],
         "/fills/recent" => &["limit"],
         "/positions" => &["owner"],
+        "/trades" => &["limit", "before"],
         _ => &[],
     };
     for key in pairs.keys() {
@@ -64,8 +70,28 @@ pub fn parse(url: &str) -> Result<Query> {
         Pubkey::from_str(value).with_context(|| format!("invalid {key} pubkey"))?;
         Ok((*value).into())
     };
+    let before = || -> Result<Option<String>> {
+        let before = pairs.get("before").map(|s| (*s).to_owned());
+        if let Some(value) = &before {
+            db::fill_cursor(value)?;
+        }
+        Ok(before)
+    };
+    let limit = |max: u64| -> Result<u64> {
+        let limit = pairs
+            .get("limit")
+            .unwrap_or(&"100")
+            .parse::<u64>()
+            .context("invalid limit")?;
+        anyhow::ensure!((1..=max).contains(&limit), "limit must be 1..{max}");
+        Ok(limit)
+    };
     Ok(match path {
         "/health" => Query::Health,
+        "/trades" => Query::Trades {
+            limit: limit(500)?,
+            before: before()?,
+        },
         "/stats" => Query::Stats,
         "/leaderboard" => Query::Leaderboard,
         "/season" => Query::Season,
@@ -81,23 +107,11 @@ pub fn parse(url: &str) -> Result<Query> {
         "/positions" => Query::Positions {
             owner: pubkey("owner")?,
         },
-        "/fills" => {
-            let limit = pairs
-                .get("limit")
-                .unwrap_or(&"100")
-                .parse::<u64>()
-                .context("invalid limit")?;
-            anyhow::ensure!((1..=500).contains(&limit), "limit must be 1..500");
-            let before = pairs.get("before").map(|s| (*s).to_owned());
-            if let Some(value) = &before {
-                db::fill_cursor(value)?;
-            }
-            Query::Fills {
-                portfolio: pubkey("portfolio")?,
-                limit,
-                before,
-            }
-        }
+        "/fills" => Query::Fills {
+            limit: limit(500)?,
+            before: before()?,
+            portfolio: pubkey("portfolio")?,
+        },
         _ => unreachable!(),
     })
 }
@@ -126,6 +140,7 @@ fn query(c: &Connection, cfg: &Config, q: Query) -> Result<(u16, Value)> {
                 before,
             } => db::fills(c, &portfolio, limit, before.as_deref())?,
             Query::Positions { owner } => db::positions(c, &owner)?,
+            Query::Trades { limit, before } => db::trades(c, limit, before.as_deref())?,
             Query::NotFound => return Ok((404, json!({"error":"not found"}))),
         },
     ))
@@ -276,6 +291,47 @@ mod tests {
         ] {
             assert_eq!(cors(origin, &allowed), None);
         }
+    }
+    #[test]
+    fn trades_query() {
+        assert_eq!(
+            parse("/trades").unwrap(),
+            Query::Trades {
+                limit: 100,
+                before: None
+            }
+        );
+        let cursor = format!("7.{}.0.0", "1".repeat(64));
+        assert_eq!(
+            parse(&format!("/trades?limit=500&before={cursor}")).unwrap(),
+            Query::Trades {
+                limit: 500,
+                before: Some(cursor)
+            }
+        );
+        for url in [
+            "/trades?limit=0",
+            "/trades?limit=501",
+            "/trades?before=1.bad.0.0",
+            "/trades?portfolio=11111111111111111111111111111111",
+            "/trades?limit=1&limit=2",
+        ] {
+            assert!(parse(url).is_err(), "{url}");
+        }
+        let c = db::open(std::path::Path::new(":memory:")).unwrap();
+        let (_, cfg) = Config::parse(["serve".into()]).unwrap();
+        let out = query(
+            &c,
+            &cfg,
+            Query::Trades {
+                limit: 1,
+                before: None,
+            },
+        )
+        .unwrap()
+        .1;
+        assert_eq!(out["trades"], json!([]));
+        assert!(out["next_before"].is_null());
     }
     #[test]
     fn season_and_recent_queries() {
