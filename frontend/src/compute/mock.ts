@@ -1,0 +1,40 @@
+import type { ComputeFeedClient, ComputeHistory, ComputeLatest } from "./client";
+
+const HOUR = 3_600_000;
+
+// Deterministic feed for tests and `npm run dev`. Times are relative to `now`.
+export class MockComputeFeedClient implements ComputeFeedClient {
+  readonly mock = true;
+  constructor(private now = Date.now(), private ageMs = 3 * 60_000) {}
+
+  async latest(): Promise<ComputeLatest> {
+    const landed = this.now - this.ageMs;
+    return {
+      v: 1, generated_ms: this.now, mark_usd: 0.303551, landed_ms: landed, source_ms: landed - 140_000,
+      sig: "mock-push-signature", slot: 1000, market: "mock-market", oracle: "mock-oracle",
+      source: "openrouter", set: "preferred", clamp: "off (n<3)", blend_in_out: 15,
+      pricing_set: [
+        { provider: "DeepInfra", quantization: "bf16", listed: 0.2578125, priced: 0.2578125, up: true },
+        { provider: "Cerebras", quantization: "fp16", listed: 1.02125, priced: 1.02125, up: true },
+      ],
+      sellers: [
+        { provider: "Darkbloom", quantization: "fp4", blended: 0.1265625, up: true, in_set: false, tier: false },
+        { provider: "DeepInfra", quantization: "bf16", blended: 0.2578125, up: true, in_set: true, tier: true },
+        { provider: "GMICloud", quantization: "bf16", blended: 0.621875, up: false, in_set: false, tier: true },
+        { provider: "Cerebras", quantization: "fp16", blended: 1.02125, up: true, in_set: true, tier: true },
+      ],
+      flop_side: { flop_per_gn: 0.00291036, prints: 185, buyers: 3, miners: 34, gateway_share: 0.498, stale: null },
+    };
+  }
+
+  async history(): Promise<ComputeHistory> {
+    const from = this.now - 168 * HOUR;
+    const points: [number, number][] = Array.from({ length: 168 }, (_, i) => [from + i * HOUR, i < 140 ? 0.311224 : 0.303551]);
+    return {
+      v: 1, generated_ms: this.now, from_ms: from, to_ms: this.now, points,
+      changes: [{ t_ms: from + 140 * HOUR, from: 0.311224, to: 0.303551, sig: "mock-change-signature" }],
+      outages: [{ provider: "GMICloud", quantization: "bf16", from_ms: from + 139 * HOUR, to_ms: null }],
+      recorder_gaps: [],
+    };
+  }
+}

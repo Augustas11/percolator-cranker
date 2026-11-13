@@ -5,6 +5,7 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
+pub mod feed;
 pub mod score;
 
 /// The SPEC rule's parameters. The pusher reads its own from

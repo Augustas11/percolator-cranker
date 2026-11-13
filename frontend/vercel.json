@@ -6,6 +6,7 @@
   "rewrites": [
     { "source": "/indexer/:path*", "destination": "http://159.223.165.194:8091/:path*" },
     { "source": "/faucet/:path*", "destination": "http://159.223.165.194:8092/:path*" },
-    { "source": "/((?!indexer/|faucet/).*)", "destination": "/index.html" }
+    { "source": "/compute-feed/:path*", "destination": "http://159.223.165.194:8091/compute-feed/:path*" },
+    { "source": "/((?!indexer/|faucet/|compute-feed/).*)", "destination": "/index.html" }
   ]
 }

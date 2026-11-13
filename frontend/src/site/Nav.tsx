@@ -11,7 +11,7 @@ export default function Nav() {
     <nav className="site-nav" aria-label="Main">
       <Link className="brand" to="/" aria-label="drip home"><img src="/brand/d-mark.svg" alt="" /><span>rip</span></Link>
       <div className="nav-links">
-        {([['Markets', '/trade'], ['Arena', '/arena'], ['Tools', '/tools'], ['Build', '/build']] as const).map(([label, to]) => <Link key={to} to={to} aria-current={path === to ? "page" : undefined}>{label}</Link>)}
+        {([['Markets', '/trade'], ['Arena', '/arena'], ['Compute', '/compute'], ['Tools', '/tools'], ['Build', '/build']] as const).map(([label, to]) => <Link key={to} to={to} aria-current={path === to ? "page" : undefined}>{label}</Link>)}
         <a href={site.docs}>Docs</a>
       </div>
       <div className="nav-actions"><span className="devnet-pill"><span className="live-dot" aria-hidden="true" />DEVNET</span><Link className="button-link" to="/trade">Open app</Link></div>

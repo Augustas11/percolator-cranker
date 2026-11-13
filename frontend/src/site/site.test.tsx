@@ -38,6 +38,7 @@ test.each([
   [site.paths.tools, "Tools", "Keeper CLI", "Tools · drip"],
   [site.paths.arena, "Arena", "Rules", "Arena · drip"],
   [site.paths.build, "Build", "Add an MCP tool", "Build · drip"],
+  [site.paths.compute, "Compute price", "Price feed not configured.", "Compute price · drip"],
   [site.paths.trade, "SOL-PERP", "Connect wallet", "Trade · drip"],
 ])("renders %s", async (path, heading, text, title) => {
   const container = await render(path);
