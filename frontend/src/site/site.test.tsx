@@ -220,7 +220,7 @@ test("keeps collateral disabled across navigation while a deposit is pending", a
   expect(container.querySelector("#amount")?.closest("[hidden]")).not.toBeNull();
   await navigate(site.paths.trade);
   expect(container.querySelector("#amount")?.closest("[hidden]")).toBeNull();
-  expect(container.querySelector<HTMLFieldSetElement>('[aria-labelledby="collateral-heading"] fieldset')!.disabled).toBe(true);
+  expect(container.querySelector<HTMLFieldSetElement>('.tx-account fieldset')!.disabled).toBe(true);
   await act(async () => { button.click(); });
   expect(deposit).toHaveBeenCalledTimes(1);
 });

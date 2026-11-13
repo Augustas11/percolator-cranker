@@ -1,25 +1,35 @@
 import { useEffect, useState } from "react";
-import type { Fills, IndexerClient, Season, Stats } from "./indexer/client";
+import type { Fills, IndexerClient, RecentFills, Season, Stats } from "./indexer/client";
+import { devnetConfig } from "./chain/config";
 import { PERP, perpPrice } from "./market/types";
 
 const numberFormatter = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
-const usdFormatter = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
-const number = (value: number) => Number.isFinite(value) ? numberFormatter.format(value) : "—";
-const fixed = (value: string) => {
+export const number = (value: number) => Number.isFinite(value) ? numberFormatter.format(value) : "—";
+export const fixed = (value: string) => {
   try { return Number(BigInt(value)) / 1e6; } catch { return NaN; }
 };
-const usdAtoms = (value: string) => {
-  const n = fixed(value);
-  return Number.isFinite(n) ? usdFormatter.format(n) : "—";
-};
-const UNREACHABLE = "The indexer is unreachable right now. Try again in a minute.";
+export const UNREACHABLE = "The indexer is unreachable right now. Try again in a minute.";
+export const OTHER_MARKET = `The indexer reads a different market, not ${PERP.name}.`;
 
-type OwnFill = Fills["fills"][number] & { portfolio: string };
+export type OwnFill = Fills["fills"][number] & { portfolio: string };
 
-/** The trade page's indexed panels: market open interest and volume, and the connected wallet's own fills. */
-export function IndexerPanels({ indexer, owner }: { indexer: IndexerClient | null; owner: string | null }) {
+export interface TradeIndexer {
+  stats: Stats | null;
+  season: Season | null;
+  recent: RecentFills["fills"] | null;
+  fills: OwnFill[] | null;
+  moreHistory: boolean;
+  statsError: string;
+  fillsError: string;
+  /** False when the indexer serves another market: its numbers must not be shown as this market's. */
+  sameMarket: boolean | null;
+}
+
+/** Everything the trade screen reads from the indexer, polled every 15 s; each part keeps its last good value. */
+export function useTradeIndexer(indexer: IndexerClient | null, owner: string | null, market = devnetConfig.market.toBase58()): TradeIndexer {
   const [stats, setStats] = useState<Stats | null>(null);
   const [season, setSeason] = useState<Season | null>(null);
+  const [recent, setRecent] = useState<RecentFills["fills"] | null>(null);
   const [fills, setFills] = useState<OwnFill[] | null>(null);
   const [moreHistory, setMoreHistory] = useState(false);
   const [statsError, setStatsError] = useState("");
@@ -28,12 +38,8 @@ export function IndexerPanels({ indexer, owner }: { indexer: IndexerClient | nul
   useEffect(() => {
     let active = true;
     let pending = false;
-    setStats(null);
-    setSeason(null);
-    setFills(null);
-    setMoreHistory(false);
-    setStatsError("");
-    setFillsError("");
+    setStats(null); setSeason(null); setRecent(null); setFills(null);
+    setMoreHistory(false); setStatsError(""); setFillsError("");
     if (!indexer) return;
     const message = (error: unknown) => error instanceof Error ? error.message : "indexer request failed";
     async function refresh() {
@@ -53,6 +59,12 @@ export function IndexerPanels({ indexer, owner }: { indexer: IndexerClient | nul
           } catch { /* volume is optional; keep the last value */ }
         })(),
         (async () => {
+          try {
+            const result = await indexer!.recentFills?.(30);
+            if (active && result) setRecent(result.fills);
+          } catch { /* keep the last trades */ }
+        })(),
+        (async () => {
           if (!owner) return;
           try {
             const positions = await indexer!.positions(owner);
@@ -69,36 +81,27 @@ export function IndexerPanels({ indexer, owner }: { indexer: IndexerClient | nul
     return () => { active = false; clearInterval(timer); };
   }, [indexer, owner]);
 
-  const interest = stats ? Object.values(stats.open_interest)[0] : undefined;
+  return { stats, season, recent, fills, moreHistory, statsError, fillsError, sameMarket: stats ? stats.market === market : null };
+}
+
+/** The connected wallet's own indexed fills. */
+export function OwnFills({ data, connected, reachable }: { data: TradeIndexer; connected: boolean; reachable: boolean }) {
+  if (!reachable) return <p className="tx-empty" role="status">{UNREACHABLE}</p>;
+  if (data.sameMarket === false) return <p className="tx-empty" role="status">{OTHER_MARKET}</p>;
+  if (!connected) return <p className="tx-empty">Connect a wallet to see your fills.</p>;
   return <>
-    <section aria-labelledby="indexer-stats-heading" className="fills">
-      <h2 id="indexer-stats-heading">{PERP.name} stats</h2>
-      {!indexer ? <p role="status">{UNREACHABLE}</p> : <>
-        {statsError && <p role="status">{statsError}</p>}
-        {stats && <dl>
-          <dt>Open interest</dt><dd>{interest ? `long ${number(fixed(interest.long_q))} / short ${number(fixed(interest.short_q))} × ${PERP.unit}` : "—"}</dd>
-          {season && <><dt>Volume</dt><dd>{usdAtoms(season.volume_usd)}</dd></>}
-          {season && <><dt>Fills</dt><dd>{season.trades.toLocaleString("en-US")}</dd></>}
-          <dt>As of</dt><dd>{stats.as_of === null ? "Indexing" : new Date(stats.as_of * 1000).toLocaleString()}</dd>
-        </dl>}
-      </>}
-    </section>
-    <section aria-labelledby="indexer-history-heading" className="fills">
-      <h2 id="indexer-history-heading">Your fills</h2>
-      {!indexer ? <p role="status">{UNREACHABLE}</p> : !owner ? <p>Connect a wallet to see your fills.</p> : <>
-        {fillsError && <p role="status">{fillsError}</p>}
-        <div className="table-scroll"><table>
-          <thead><tr><th scope="col">Time</th><th scope="col">Side</th><th scope="col">Size ({PERP.unitShort})</th><th scope="col">Price</th><th scope="col">Status</th><th scope="col">Tx</th></tr></thead>
-          <tbody>{fills?.map(fill => <tr key={`${fill.portfolio}:${fill.signature}:${fill.ix_index}:${fill.leg}`}>
-            <td>{fill.block_time === null ? "—" : new Date(fill.block_time * 1000).toLocaleString()}</td>
-            <td>{fill.side === "buy" ? "long" : "short"}</td><td>{number(Math.abs(fixed(fill.size_q)))}</td>
-            <td>{fill.mark_price === null || !Number.isSafeInteger(fill.mark_price) ? "—" : perpPrice(fill.mark_price / 1e6)}</td><td>{fill.status}</td>
-            <td><a href={`https://explorer.solana.com/tx/${encodeURIComponent(fill.signature)}?cluster=devnet`} target="_blank" rel="noreferrer">{fill.signature.slice(0, 7)}…{fill.signature.slice(-4)}</a></td>
-          </tr>)}</tbody>
-        </table></div>
-        {moreHistory && <p>Older fills are on the explorer.</p>}
-        {fills !== null && fills.length === 0 && !fillsError && <p>No fills yet.</p>}
-      </>}
-    </section>
+    {data.fillsError && <p className="tx-empty" role="status">{data.fillsError}</p>}
+    {data.fills === null && !data.fillsError && <p className="tx-empty" aria-busy="true">Loading your fills.</p>}
+    {data.fills !== null && data.fills.length === 0 && !data.fillsError && <p className="tx-empty">No fills yet.</p>}
+    {data.fills !== null && data.fills.length > 0 && <div className="table-scroll"><table className="tx-table">
+      <thead><tr><th scope="col">Time</th><th scope="col">Side</th><th scope="col" className="num">Size ({PERP.unitShort})</th><th scope="col" className="num">Price</th><th scope="col">Status</th><th scope="col">Tx</th></tr></thead>
+      <tbody>{data.fills.map(fill => <tr key={`${fill.portfolio}:${fill.signature}:${fill.ix_index}:${fill.leg}`}>
+        <td>{fill.block_time === null ? "—" : new Date(fill.block_time * 1000).toLocaleString()}</td>
+        <td className={fill.side === "buy" ? "up" : "down"}>{fill.side === "buy" ? "long" : "short"}</td><td className="num">{number(Math.abs(fixed(fill.size_q)))}</td>
+        <td className="num">{fill.mark_price === null || !Number.isSafeInteger(fill.mark_price) ? "—" : perpPrice(fill.mark_price / 1e6)}</td><td>{fill.status}</td>
+        <td><a href={`https://explorer.solana.com/tx/${encodeURIComponent(fill.signature)}?cluster=devnet`} target="_blank" rel="noreferrer">{fill.signature.slice(0, 7)}…{fill.signature.slice(-4)}</a></td>
+      </tr>)}</tbody>
+    </table></div>}
+    {data.moreHistory && <p className="tx-empty">Older fills are on the explorer.</p>}
   </>;
 }

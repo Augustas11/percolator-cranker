@@ -23,7 +23,23 @@ export const perpPrice = (n: number | null | undefined) => n == null || !Number.
 /** A size in units: "100 × 1M tokens". */
 export const perpSize = (n: number) => `${n.toLocaleString("en-US", { maximumFractionDigits: 2 })} × ${PERP.unit}`;
 
-export interface MarketInfo { symbol: string; collateral: "USDC"; maxLeverage: number; maintenanceMarginRatio: number }
+export interface MarketInfo {
+  symbol: string; collateral: "USDC"; maxLeverage: number; maintenanceMarginRatio: number;
+  /** Trade fee the client sends, in bps of notional; absent until the market account is read. */
+  feeBps?: number;
+}
+/** The liquidity account behind every fill (the matcher context). Sizes in units of PERP.unit. */
+export interface Liquidity {
+  /** Fill price over the mark, in bps each side. The matcher fills at the mark, so 0. */
+  spreadBps: number;
+  maxFill: number;
+  /** Largest long / short one fill can open now, given the LP's inventory cap. */
+  maxLong: number;
+  maxShort: number;
+  paused: boolean;
+  /** How far the mark may sit from the matcher's reference price before fills are refused. */
+  deviationBps: number;
+}
 export interface MarkPrice { price: number; ts: number }
 export interface Funding { rate: number /* per hour, fraction */; nextFundingTs: number }
 export interface Leg { side: Side; size: number /* units of PERP.unit, >0 */; entryPrice: number; unrealizedPnl: number }
@@ -49,9 +65,13 @@ export interface MarketSnapshot {
   funding: Funding;
   portfolio: Portfolio;
   fills: Fill[]; // newest first, max 20
+  /** Null or absent until the matcher context is read. */
+  liquidity?: Liquidity | null;
 }
 export interface MarketClient {
   readonly tradingReady?: boolean;
+  /** False when the client has no funding source and the funding fields are placeholders. */
+  readonly fundingKnown?: boolean;
   getSnapshot(): MarketSnapshot;
   subscribe(listener: (s: MarketSnapshot) => void): () => void;
   connect(): Promise<string>;

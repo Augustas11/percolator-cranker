@@ -30,6 +30,7 @@ function freeze<T extends object>(value: T): T {
 }
 
 export class MockMarketClient implements MarketClient {
+  readonly fundingKnown = true;
   private snapshot: MarketSnapshot;
   private listeners = new Set<(s: MarketSnapshot) => void>();
   private timer?: ReturnType<typeof setInterval>;
@@ -43,7 +44,7 @@ export class MockMarketClient implements MarketClient {
     this.random = mulberry32(seed);
     const now = Date.now();
     this.snapshot = freeze({
-      market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 2, maintenanceMarginRatio: 0.25 },
+      market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 2, maintenanceMarginRatio: 0.25, feeBps: 15 },
       mark: { price: startPrice, ts: now },
       funding: { rate: 0.0001, nextFundingTs: now + 3_600_000 },
       portfolio: {
@@ -51,6 +52,7 @@ export class MockMarketClient implements MarketClient {
         health: { equity: 0, initialMarginUsed: 0, maintenanceMargin: 0, freeCollateral: 0, ratio: Infinity, status: "healthy" },
       },
       fills: [],
+      liquidity: { spreadBps: 0, maxFill: 100, maxLong: 100, maxShort: 100, paused: false, deviationBps: 500 },
     });
     if (autoTick) this.timer = setInterval(() => this.tick(), tickMs);
   }

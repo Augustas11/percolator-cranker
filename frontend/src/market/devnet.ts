@@ -7,6 +7,7 @@ import { effectiveAbsQ, parseMarket, parsePortfolio } from "../chain/accounts";
 import { createAtaIdempotentIx } from "../chain/pda";
 import { buildClose, buildCreatePortfolio, buildDeposit, buildTrade, buildWithdraw, findPortfolio } from "../chain/tx";
 import { getWallet } from "../chain/wallet";
+import { liquidityFrom, parseMatcher } from "../chain/matcher";
 import type { Wallet } from "../chain/wallet";
 
 function atoms(value: number, name: string) {
@@ -19,6 +20,9 @@ function atoms(value: number, name: string) {
 
 export class DevnetMarketClient implements MarketClient {
   readonly tradingReady: boolean;
+  /** The engine's funding is not read; the snapshot's funding fields are placeholders. */
+  readonly fundingKnown = false;
+  private matcherReadAt = 0;
   private conn: Connection;
   private wallet?: Wallet;
   private portfolio?: PublicKey;
@@ -49,7 +53,19 @@ export class DevnetMarketClient implements MarketClient {
     return () => { this.listeners.delete(listener); };
   };
 
+  private async readMatcher() {
+    if (!this.cfg.matcherContext || Date.now() - this.matcherReadAt < 10_000) return;
+    this.matcherReadAt = Date.now();
+    try {
+      const account = await this.conn.getAccountInfo(this.cfg.matcherContext);
+      if (!account || this.disposed) return;
+      this.snapshot = { ...this.snapshot, liquidity: liquidityFrom(parseMatcher(account.data)) };
+      for (const listener of this.listeners) listener(this.snapshot);
+    } catch { /* keep the last read; the Quotes panel says when it has none */ }
+  }
+
   private async poll() {
+    void this.readMatcher();
     try { await this.refresh(); } catch {}
     finally {
       if (!this.disposed) this.timer = setTimeout(() => { void this.poll(); }, 2000);
@@ -75,7 +91,9 @@ export class DevnetMarketClient implements MarketClient {
     if (this.disposed) return;
     const now = Date.now();
     this.snapshot = {
-      market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 10000 / Number(market.initialMarginBps), maintenanceMarginRatio: mmRatio },
+      market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 10000 / Number(market.initialMarginBps), maintenanceMarginRatio: mmRatio,
+        // The fee buildTrade sends: 12 bps, floored at the market's own base fee (chain/tx.ts).
+        feeBps: Math.max(12, Number(market.config.tradeFeeBaseBps)) },
       mark: { price, ts: now }, funding: { rate: 0, nextFundingTs: now },
       portfolio: {
         owner: this.wallet?.publicKey.toBase58() ?? null, collateral, realizedPnl: NaN,
@@ -86,6 +104,7 @@ export class DevnetMarketClient implements MarketClient {
         },
       },
       fills: this.snapshot.fills,
+      liquidity: this.snapshot.liquidity ?? null,
     };
     for (const listener of this.listeners) listener(this.snapshot);
   }

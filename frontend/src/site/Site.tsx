@@ -63,7 +63,7 @@ export default function Site({ client, indexer, indexerBase = null, computeFeed 
       <img className="site-watermark" src="/brand/d-mark.svg" alt="" />
     </div>
     <Nav />
-    {tradeMounted && <div hidden={path !== site.paths.trade}><App client={client} indexer={indexer} requestedSide={requestedSide} sideRequest={sideRequest} /></div>}
+    {tradeMounted && <div hidden={path !== site.paths.trade}><App client={client} indexer={indexer} computeFeed={computeFeed} requestedSide={requestedSide} sideRequest={sideRequest} /></div>}
     {path !== site.paths.trade && <main className={path === site.paths.home ? "site-home" : "site-page"}>{page}</main>}
     <Footer />
   </div>;

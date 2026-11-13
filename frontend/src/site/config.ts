@@ -52,6 +52,9 @@ export const site = {
   // The FLOP stats window in latest.json when flop_side does not carry one (the pusher's flop_window_s = 21600).
   flopWindowS: 21_600,
   faucet: null as string | null, // web faucet page not built; agents use the MCP tool claim_test_funds
+  // The faucet's HTTP API (POST {faucetApi}/claim). Null hides "Get test USDC": the deployed faucet still mints the
+  // first market's USDC (faucet/src DEFAULT_MINT) unless FAUCET_MINT is set to COMPUTE-PERP's mint.
+  faucetApi: null as string | null,
   // The Compute Price Challenge. Off until it is built and dated: with enabled false the nav item, footer link and
   // /challenge route do not exist. With it on, each block renders only when its value is set.
   challenge: {
