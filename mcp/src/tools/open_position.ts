@@ -5,10 +5,10 @@ import { tool } from "./tool";
 
 export default tool({
   name: "open_position",
-  description: "Open a long or short SOL-PERP position within matcher limits (devnet, test tokens).",
-  inputSchema: { side: z.enum(["long", "short"]), size_sol: z.number().positive() },
-  run: async (drip, { side, size_sol }) => {
-    const q = atoms(size_sol, "size_sol") * (side === "long" ? 1n : -1n);
+  description: "Open a long or short position on the drip perp within matcher limits; size is in contract units (devnet, test tokens).",
+  inputSchema: { side: z.enum(["long", "short"]), size: z.number().positive() },
+  run: async (drip, { side, size }) => {
+    const q = atoms(size, "size") * (side === "long" ? 1n : -1n);
     return drip.send(async () => {
       checkMatcher((await drip.matcher()).state, q);
       const pf = await drip.requirePortfolio();

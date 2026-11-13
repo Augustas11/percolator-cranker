@@ -1,8 +1,8 @@
 {
   "name": "@driptech/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "Apache-2.0",
-  "description": "MCP server for the drip devnet SOL-PERP market (Percolator v16). Devnet, test tokens only.",
+  "description": "MCP server for the drip devnet compute perp market (Percolator v16). Devnet, test tokens only.",
   "keywords": [
     "mcp",
     "solana",
