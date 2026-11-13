@@ -32,8 +32,8 @@ emits a module with the exports below works.
 | Tables | 10,000 entries. |
 | Declarations | At most 1,000 globals, 10,000 functions, 1,000 data segments, 1,000 element segments. |
 | Mutable globals | i32, i64, f32 or f64 only (a clone copies them between instances; a function reference cannot move). |
-| Traps | 100 per series (the clean pass and every attack replay together); then the rule holds for the rest of the series. |
-| Wall clock | Off in `flop-score`. A round runner can set `Limits::max_wall_ms_per_series`; checked between steps, then the rule holds for the rest of the series. |
+| Traps | 100 in one series disqualify. Counted per instance and cloned with its state, so an attack replay counts from where it was taken. |
+| Wall clock | Off in `flop-score`. A round runner can set `Limits::max_wall_ms_per_series`; checked between steps; over it disqualifies (never holds, so machine speed cannot change a score). |
 | Imports | None. No WASI, clock, randomness, I/O or threads. |
 | Start function | Not allowed. |
 | Instructions | Not allowed: `table.set/grow/fill/copy/init`, `elem.drop`, `memory.init`, `data.drop` (a clone could not copy their effect). No SIMD, no threads, one memory, 32-bit memory. |
@@ -77,28 +77,34 @@ both zero). FNV-1a: offset basis `0xcbf29ce484222325`, prime `0x100000001b3`;
 the template's `name("bf16")` computes it at compile time. The same name
 always hashes the same, across steps and series.
 
-## What causes a hold
+## What only holds for one step
 
 A hold means no new mark this step; the scorer keeps the rule's last mark.
 
 - `step` returns NaN, infinity, 0 or a negative number. The module's state
   is kept: the step happened.
-- The module traps: `unreachable`, out-of-bounds access, division by zero,
-  stack overflow, running out of fuel (an infinite loop ends here), a
-  failed allocation that aborts. The module is put back exactly as it was
-  before the step (memory and globals), and the next step runs normally.
+- A trap: `unreachable`, out-of-bounds access, division by zero, stack
+  overflow, running out of fuel (an infinite loop ends here), a failed
+  allocation that aborts. The module is put back exactly as it was before
+  the step (memory and globals) and the next step runs normally.
 - `alloc` returns 0, a pointer that is not 8-aligned, or one whose `len`
   bytes do not fit in memory (handled as a trap).
-- For the rest of the series: after 100 traps, after the wall-clock budget
-  if one is set, or if the module cannot be rebuilt after a trap (not
-  expected).
-- For good, with the submission disqualified: a panic inside the runtime.
-  Every call into wasmi runs under `catch_unwind`, so such a panic stops
-  that rule, not the scorer; `flop-score` then reports `DID NOT RUN ...
-  disqualified: <reason>`. This is defence in depth. The control is the
-  load-time checks above, which refuse what a clone could not copy.
 
 The scorer never hangs on a module: every call is bounded by fuel.
+
+## What disqualifies a submission
+
+The scorer returns an error instead of losses, and `flop-score` prints
+`DID NOT RUN: disqualified: <reason>` and exits 2:
+
+- 100 traps in one series (above). Holding for the rest of the series
+  instead would let a module sit out the attack replays.
+- The wall-clock limit, when a runner sets one.
+- A panic inside the runtime. Every call into wasmi runs under
+  `catch_unwind`, so such a panic stops that rule, not the scorer. This is
+  defence in depth; the control is the load-time checks above, which
+  refuse what a clone could not copy.
+- An instance that cannot be rebuilt after a trap or cloned (not expected).
 
 ## How clones work
 
@@ -122,9 +128,9 @@ wasmi added about 10 s to a clean release build of `flop-index`.
 Worst case known (`testdata/wasm/hostile/costly.wat`: memory grown to the
 1 MiB cap, whole-memory copies until out of fuel, so every step traps and
 rebuilds, 1,000 globals): load 1.2 ms, a step 0.94 ms, a clone 0.18 ms. A
-plain infinite loop costs 0.35 ms a step. With the 100-trap budget such a
-module stops costing anything after 100 steps of a series; without it, a
-week of recorder data (about 22,000 calls) would take about 21 s.
+plain infinite loop costs 0.35 ms a step. Such a module is disqualified at its 100th
+trap; without the cap, a week of recorder data (about 22,000 calls) would
+take about 21 s.
 
 ## Known limits before the competition opens
 

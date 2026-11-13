@@ -28,7 +28,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use wasmi::{CompilationMode, Config, Engine, Global, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, Val};
@@ -51,7 +51,7 @@ pub const MAX_SEGMENTS: u32 = 1_000;
 /// Fuel for one step (`alloc` and `step` together); about one unit per
 /// instruction. The template's rules use 9k-33k on 23 quotes.
 pub const FUEL_PER_STEP: u64 = 1_000_000;
-/// After this many traps in one series the rule holds for the rest of it.
+/// This many traps in one series disqualifies the submission.
 pub const MAX_TRAPS_PER_SERIES: u32 = 100;
 
 /// Run-time limits. The defaults are what `flop-score` uses; a round runner
@@ -59,12 +59,15 @@ pub const MAX_TRAPS_PER_SERIES: u32 = 100;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Limits {
     pub fuel_per_step: u64,
-    /// Traps (including out of fuel) allowed in one series, counting the
-    /// clean pass and every replay; after that the rule holds.
+    /// Traps (including out of fuel) in one series that disqualify the
+    /// submission. Counted per instance: a clone starts from the count at
+    /// the point it was taken, like the rest of the module's state, so a
+    /// replay behaves as the clean pass would have.
     pub max_traps_per_series: u32,
-    /// Host time allowed for one series, checked between steps; after that
-    /// the rule holds. Wall time is not deterministic, so this is a safety
-    /// stop for a runner, off by default.
+    /// Host time for one series (all its instances), checked between
+    /// steps; over it disqualifies. Wall time depends on the machine, so
+    /// this never holds (which would change a score): it is a runner's
+    /// safety stop, off by default.
     pub max_wall_ms_per_series: Option<u64>,
 }
 
@@ -108,7 +111,8 @@ struct Shared {
     module: Module,
     /// Export names of the mutable globals, in index order.
     globals: Vec<String>,
-    /// Why the submission was disqualified (a panic in the runtime).
+    /// Why the submission was disqualified: a runtime panic, the trap cap,
+    /// the wall-clock limit, or an instance that could not be rebuilt.
     disqualified: Mutex<Option<String>>,
 }
 
@@ -116,19 +120,10 @@ impl Shared {
     fn disqualified(&self) -> Option<String> {
         self.disqualified.lock().map(|d| d.clone()).unwrap_or_else(|p| p.into_inner().clone())
     }
-}
 
-/// What one series has spent, shared by the clones that replay it.
-#[derive(Default)]
-struct SeriesBudget {
-    traps: AtomicU32,
-    wall_ns: AtomicU64,
-}
-
-impl SeriesBudget {
-    fn spent(&self, l: &Limits) -> bool {
-        self.traps.load(Ordering::Relaxed) >= l.max_traps_per_series
-            || l.max_wall_ms_per_series.is_some_and(|ms| self.wall_ns.load(Ordering::Relaxed) >= ms.saturating_mul(1_000_000))
+    /// Record the first reason; later ones are dropped.
+    fn disqualify(&self, why: String) {
+        self.disqualified.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(why);
     }
 }
 
@@ -151,8 +146,7 @@ fn guarded<T>(shared: &Shared, what: &str, f: impl FnOnce() -> T) -> Option<T> {
         Ok(v) => Some(v),
         Err(p) => {
             let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();
-            let mut d = shared.disqualified.lock().unwrap_or_else(|p| p.into_inner());
-            d.get_or_insert(format!("runtime panic in {what}: {msg}"));
+            shared.disqualify(format!("runtime panic in {what}: {msg}"));
             None
         }
     }
@@ -250,15 +244,16 @@ impl Live {
 pub struct WasmRule {
     shared: Arc<Shared>,
     saved: Saved,
-    /// None once the rule holds for good (disqualified, out of budget, or
-    /// the instance could not be rebuilt).
+    /// None once disqualified.
     live: Option<Live>,
     buf: Vec<u8>,
     limits: Limits,
-    /// The loaded rule: each clone of it starts a series with a fresh budget;
-    /// clones of a series share its budget.
+    /// Traps so far on this instance's path; cloned with its state.
+    traps: u32,
+    /// The loaded rule: each clone of it starts a series with a fresh wall
+    /// clock; clones of a series share it.
     root: bool,
-    series: Arc<SeriesBudget>,
+    wall_ns: Arc<AtomicU64>,
     last_fuel: Option<u64>,
 }
 
@@ -283,7 +278,7 @@ impl WasmRule {
             let live = Live::new(&shared, true)?;
             let mut saved = Saved { memory: Vec::new(), globals: Vec::new() };
             live.save(&mut saved);
-            Ok(Self { shared, saved, live: Some(live), buf: Vec::new(), limits: Limits::default(), root: true, series: Default::default(), last_fuel: None })
+            Ok(Self { shared, saved, live: Some(live), buf: Vec::new(), limits: Limits::default(), traps: 0, root: true, wall_ns: Default::default(), last_fuel: None })
         };
         GUARDED.with(|g| g.set(g.get() + 1));
         let r = catch_unwind(AssertUnwindSafe(load));
@@ -294,17 +289,6 @@ impl WasmRule {
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
         self
-    }
-
-    /// Why this submission was disqualified, if it was. A scorer must not
-    /// report a score for a disqualified rule.
-    pub fn disqualified(&self) -> Option<String> {
-        self.shared.disqualified()
-    }
-
-    /// A handle that reads `disqualified` after the rule is boxed.
-    pub fn verdict(&self) -> Verdict {
-        Verdict(self.shared.clone())
     }
 
     /// Fuel the last step used, a trapping one included (tests and docs).
@@ -318,18 +302,14 @@ impl WasmRule {
     }
 }
 
-/// Reads whether a boxed `WasmRule` (or any clone of it) was disqualified.
-pub struct Verdict(Arc<Shared>);
-
-impl Verdict {
-    pub fn disqualified(&self) -> Option<String> {
-        self.0.disqualified()
-    }
-}
-
 impl Rule for WasmRule {
     fn step(&mut self, at_ms: u64, endpoints: &[OrEndpoint]) -> Option<f64> {
-        if self.shared.disqualified().is_some() || self.series.spent(&self.limits) {
+        if let Some(ms) = self.limits.max_wall_ms_per_series {
+            if self.wall_ns.load(Ordering::Relaxed) >= ms.saturating_mul(1_000_000) {
+                self.shared.disqualify(format!("used more than {ms} ms of host time in one series (the wall-clock limit)"));
+            }
+        }
+        if self.shared.disqualified().is_some() {
             self.live = None;
         }
         let live = self.live.as_mut()?;
@@ -353,14 +333,18 @@ impl Rule for WasmRule {
                 match r {
                     Ok(x) => (x.is_finite() && x > 0.0).then_some(x),
                     Err(_) => {
-                        // Back to the state before this step, unless the
-                        // series is out of traps; if rebuilding fails, hold for good.
-                        let traps = self.series.traps.fetch_add(1, Ordering::Relaxed) + 1;
-                        self.live = if traps >= self.limits.max_traps_per_series {
+                        // Back to the state before this step. Holding for
+                        // good instead would let a module opt out of the
+                        // attack replays, so the cap and a failed rebuild
+                        // disqualify.
+                        self.traps += 1;
+                        let (shared, saved) = (&self.shared, &self.saved);
+                        self.live = if self.traps >= self.limits.max_traps_per_series {
+                            shared.disqualify(format!("trapped {} times in one series (the cap)", self.traps));
                             None
                         } else {
-                            let (shared, saved) = (&self.shared, &self.saved);
-                            guarded(shared, "rebuild", || Live::restored(shared, saved).ok()).flatten()
+                            let l = guarded(shared, "rebuild", || Live::restored(shared, saved)).and_then(|r| r.map_err(|e| shared.disqualify(format!("could not rebuild after a trap: {e:#}"))).ok());
+                            l
                         };
                         None
                     }
@@ -368,16 +352,24 @@ impl Rule for WasmRule {
             }
         };
         if let Some(t) = t {
-            self.series.wall_ns.fetch_add(t.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+            self.wall_ns.fetch_add(t.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
         }
         mark
     }
 
     fn clone_box(&self) -> Box<dyn Rule> {
         let (shared, saved) = (&self.shared, &self.saved);
-        let live = if self.live.is_some() && shared.disqualified().is_none() { guarded(shared, "clone", || Live::restored(shared, saved).ok()).flatten() } else { None };
-        let series = if self.root { Arc::default() } else { self.series.clone() };
-        Box::new(WasmRule { shared: shared.clone(), saved: saved.clone(), live, buf: Vec::new(), limits: self.limits, root: false, series, last_fuel: None })
+        let live = if self.live.is_some() && shared.disqualified().is_none() {
+            guarded(shared, "clone", || Live::restored(shared, saved)).and_then(|r| r.map_err(|e| shared.disqualify(format!("could not clone: {e:#}"))).ok())
+        } else {
+            None
+        };
+        let wall_ns = if self.root { Arc::default() } else { self.wall_ns.clone() };
+        Box::new(WasmRule { shared: shared.clone(), saved: saved.clone(), live, buf: Vec::new(), limits: self.limits, traps: self.traps, root: false, wall_ns, last_fuel: None })
+    }
+
+    fn disqualified(&self) -> Option<String> {
+        self.shared.disqualified()
     }
 }
 

@@ -336,16 +336,21 @@ fn run_series(proto: &dyn Rule, s: &Series, seed: u64, pool: &[String], out: &mu
     }
 }
 
-/// A rule's loss per day (day = UTC day number).
-pub fn day_losses(rule: &dyn Rule, series: &[Series], seed: u64) -> BTreeMap<u64, DayLoss> {
+/// A rule's loss per day (day = UTC day number), or an error if the rule
+/// was disqualified while it ran.
+pub fn day_losses(rule: &dyn Rule, series: &[Series], seed: u64) -> Result<BTreeMap<u64, DayLoss>> {
     let pool: Vec<String> = series.iter().flat_map(|s| s.snaps.iter().flat_map(|sn| sn.endpoints.iter().map(|e| e.provider.clone()))).collect::<BTreeSet<_>>().into_iter().collect();
     let mut acc = BTreeMap::new();
     for s in series {
         run_series(rule, s, seed, &pool, &mut acc);
     }
-    acc.into_iter()
+    if let Some(why) = rule.disqualified() {
+        bail!("disqualified: {why}");
+    }
+    Ok(acc
+        .into_iter()
         .map(|(d, a)| (d, DayLoss { jump: avg(a.jump), follow: avg(a.follow), reference: avg(a.reference), attack: [avg(a.attack[0]), avg(a.attack[1]), avg(a.attack[2]), avg(a.attack[3])] }))
-        .collect()
+        .collect())
 }
 
 /// Mean of paired differences and its standard error.
@@ -410,8 +415,8 @@ pub fn score(cand: &dyn Rule, base: &dyn Rule, series: &[Series], seed: u64, spl
     if series.is_empty() {
         bail!("no series with 2+ providers in the data");
     }
-    let b = day_losses(base, series, seed);
-    let c = day_losses(cand, series, seed);
+    let b = day_losses(base, series, seed).map_err(|e| anyhow::anyhow!("{e:#} (baseline)"))?;
+    let c = day_losses(cand, series, seed).map_err(|e| anyhow::anyhow!("{e:#} (candidate)"))?;
     let all: Vec<u64> = b.keys().copied().collect();
     let days = split_days(&all, split);
     if days.len() < 2 {

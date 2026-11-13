@@ -133,14 +133,14 @@ fn a_stateful_wasm_rule_scores_like_its_native_twin_under_attack_replay() {
     // scenarios from the clone: equal day losses mean the clones carried
     // the module's state exactly.
     for s in [real(), five_minute(3)] {
-        let w = day_losses(&fixture("hold.wasm"), &s, 1);
-        let n = day_losses(&NativeHold::default(), &s, 1);
+        let w = day_losses(&fixture("hold.wasm"), &s, 1).unwrap();
+        let n = day_losses(&NativeHold::default(), &s, 1).unwrap();
         assert_eq!(w, n);
         assert!(w.len() >= 2);
     }
     // And the state matters: holding is not the plain median here.
     let s = five_minute(3);
-    assert_ne!(day_losses(&fixture("hold.wasm"), &s, 1), day_losses(&NativeMedian, &s, 1));
+    assert_ne!(day_losses(&fixture("hold.wasm"), &s, 1).unwrap(), day_losses(&NativeMedian, &s, 1).unwrap());
     same_marks(&mut fixture("hold.wasm"), &mut NativeHold::default(), &s);
 }
 
@@ -172,8 +172,8 @@ fn a_clone_carries_state_and_is_independent() {
 #[test]
 fn two_runs_give_the_same_losses_to_the_bit() {
     let s = five_minute(2);
-    let a = day_losses(&fixture("hold.wasm"), &s, 7);
-    let b = day_losses(&fixture("hold.wasm"), &s, 7);
+    let a = day_losses(&fixture("hold.wasm"), &s, 7).unwrap();
+    let b = day_losses(&fixture("hold.wasm"), &s, 7).unwrap();
     let flat = |m: &BTreeMap<u64, crate::score::DayLoss>| m.values().flat_map(|l| [l.jump, l.follow, l.reference, l.attack[0], l.attack[1], l.attack[2], l.attack[3]]).map(f64::to_bits).collect::<Vec<_>>();
     assert_eq!(flat(&a), flat(&b));
 }
@@ -220,7 +220,7 @@ fn the_scorer_runs_through_a_rule_that_loops_some_steps() {
     // Loops forever on every snapshot whose at_ms is a multiple of 3 x 5 min,
     // else returns 1.0: the scorer finishes and the rule holds its last mark.
     let r = hostile("loops-every-15min").unwrap();
-    let l = day_losses(&r, &five_minute(1)[..], 1);
+    let l = day_losses(&r, &five_minute(1)[..], 1).unwrap();
     assert_eq!(l.len(), 1);
 }
 
@@ -296,22 +296,6 @@ fn a_mutable_reference_global_is_refused() {
     assert!(e.contains("mutable funcref global"), "{e}");
 }
 
-#[test]
-fn a_panic_in_the_runtime_disqualifies_instead_of_crashing() {
-    // Defence in depth behind the load checks: whatever panics inside a
-    // guarded call is caught, and the rule and its clones hold from then on.
-    let mut r = fixture("median.wasm");
-    let v = r.verdict();
-    let s = real();
-    let sn = &s[0].snaps[0];
-    assert!(r.step(sn.at_ms, &sn.endpoints).is_some());
-    let mut c = r.clone_box();
-    assert_eq!(r.guarded(|| panic!("boom")), None);
-    assert!(v.disqualified().unwrap().contains("boom"));
-    assert_eq!(r.step(sn.at_ms, &sn.endpoints), None);
-    assert_eq!(c.step(sn.at_ms, &sn.endpoints), None, "clones share the verdict");
-    assert!(!in_guard());
-}
 
 #[test]
 fn modules_over_the_load_caps_are_refused() {
@@ -330,40 +314,7 @@ fn modules_over_the_load_caps_are_refused() {
     assert!(WasmRule::new(&w).is_err());
 }
 
-#[test]
-fn traps_are_budgeted_per_series() {
-    let mut r = hostile("odd").unwrap();
-    for _ in 0..MAX_TRAPS_PER_SERIES - 1 {
-        assert_eq!(r.step(2, &[]), None);
-    }
-    assert_eq!(r.step(1, &[]), Some(1001.0), "still running under the budget");
-    assert_eq!(r.step(2, &[]), None);
-    assert_eq!(r.step(1, &[]), None, "out of traps: holds for the rest of the series");
-    // A series started from the loaded rule has its own budget...
-    let root = hostile("odd").unwrap();
-    let mut a = root.clone_box();
-    for _ in 0..MAX_TRAPS_PER_SERIES {
-        a.step(2, &[]);
-    }
-    assert_eq!(a.step(1, &[]), None);
-    assert_eq!(root.clone_box().step(1, &[]), Some(1001.0));
-    // ...and a replay clone shares its series' budget.
-    assert_eq!(a.clone_box().step(1, &[]), None);
-}
 
-#[test]
-fn a_wall_clock_budget_stops_a_series() {
-    let mut r = hostile("alloc-loops").unwrap().with_limits(Limits { max_wall_ms_per_series: Some(5), ..Limits::default() });
-    let t = std::time::Instant::now();
-    for _ in 0..2_000 {
-        assert_eq!(r.step(1, &[]), None);
-    }
-    // Without the budget 2,000 out-of-fuel steps take seconds.
-    assert!(t.elapsed() < std::time::Duration::from_millis(500), "{:?}", t.elapsed());
-    let mut r = fixture("median.wasm").with_limits(Limits { max_wall_ms_per_series: Some(0), ..Limits::default() });
-    let s = real();
-    assert_eq!(r.step(s[0].snaps[0].at_ms, &s[0].snaps[0].endpoints), None);
-}
 
 #[test]
 fn fuel_used_reports_the_trapping_step() {
@@ -383,16 +334,86 @@ fn an_unaligned_alloc_holds() {
     assert_eq!(ok.step(1, &[]), Some(1001.0));
 }
 
+
+#[test]
+fn a_panic_in_the_runtime_disqualifies_instead_of_crashing() {
+    // Defence in depth behind the load checks: whatever panics inside a
+    // guarded call is caught, the rule and its clones hold, and the scorer
+    // returns an error instead of losses.
+    let mut r = fixture("median.wasm");
+    let s = real();
+    let sn = &s[0].snaps[0];
+    assert!(r.step(sn.at_ms, &sn.endpoints).is_some());
+    let mut c = r.clone_box();
+    assert_eq!(r.guarded(|| panic!("boom")), None);
+    assert!(r.disqualified().unwrap().contains("boom"));
+    assert_eq!(r.step(sn.at_ms, &sn.endpoints), None);
+    assert_eq!(c.step(sn.at_ms, &sn.endpoints), None, "clones share the verdict");
+    assert!(c.disqualified().is_some());
+    assert!(!in_guard());
+    let e = format!("{:#}", day_losses(&r, &s, 1).unwrap_err());
+    assert!(e.starts_with("disqualified: runtime panic"), "{e}");
+}
+
+#[test]
+fn reaching_the_trap_cap_disqualifies() {
+    // Re-review of PR 88: with a shared trap budget, 100 traps late in the
+    // clean pass made every replay hold at the anchor, immune to attacks.
+    // Two days of a module that loops every 15 minutes: 192 traps in the
+    // clean pass.
+    let r = hostile("loops-every-15min").unwrap();
+    let e = format!("{:#}", day_losses(&r, &five_minute(2), 1).unwrap_err());
+    assert_eq!(e, format!("disqualified: trapped {MAX_TRAPS_PER_SERIES} times in one series (the cap)"));
+    let e = format!("{:#}", crate::score::score(&r, &Spec, &five_minute(2), 1, crate::score::Split::All).err().unwrap());
+    assert!(e.starts_with("disqualified: trapped") && e.ends_with("(candidate)"), "{e}");
+    // One day: 96 in the clean pass, under the cap; each replay counts from
+    // its save point, so it runs.
+    assert!(day_losses(&hostile("loops-every-15min").unwrap(), &five_minute(1), 1).is_ok());
+}
+
+#[test]
+fn the_trap_count_is_cloned_with_the_state() {
+    // A clone taken before some traps replays them exactly as the original
+    // did, count included.
+    let lim = Limits { max_traps_per_series: 4, ..Limits::default() };
+    let run = |r: &mut dyn Rule| [1, 2, 1, 2, 1, 2, 1].map(|t| r.step(t, &[]));
+    let mut a = hostile("odd").unwrap().with_limits(lim).clone_box();
+    a.step(1, &[]);
+    let mut before = a.clone_box();
+    let first = run(a.as_mut());
+    assert_eq!(first, [Some(2002.0), None, Some(3003.0), None, Some(4004.0), None, Some(5005.0)]);
+    assert_eq!(run(before.as_mut()), first, "same from the save point");
+    // Now a has 3 traps: a clone of it has 3 too, and its next trap is the 4th.
+    let mut after = a.clone_box();
+    assert_eq!(after.step(1, &[]), Some(6006.0));
+    assert!(after.disqualified().is_none());
+    assert_eq!(after.step(2, &[]), None);
+    assert!(after.disqualified().unwrap().contains("trapped 4 times"));
+}
+
+#[test]
+fn the_wall_clock_limit_disqualifies() {
+    let mut r = hostile("alloc-loops").unwrap().with_limits(Limits { max_wall_ms_per_series: Some(5), max_traps_per_series: u32::MAX, ..Limits::default() });
+    let t = std::time::Instant::now();
+    for _ in 0..2_000 {
+        assert_eq!(r.step(1, &[]), None);
+    }
+    assert!(t.elapsed() < std::time::Duration::from_millis(500), "{:?}", t.elapsed());
+    assert!(r.disqualified().unwrap().contains("wall-clock limit"));
+    let r = fixture("median.wasm").with_limits(Limits { max_wall_ms_per_series: Some(0), ..Limits::default() });
+    let e = format!("{:#}", day_losses(&r, &real(), 1).unwrap_err());
+    assert!(e.starts_with("disqualified: used more than 0 ms"), "{e}");
+}
+
 #[test]
 fn the_costliest_known_module_is_bounded() {
     // Grows to 1 MiB, then copies memory until out of fuel every step, with
-    // 1,000 globals: it holds, and the scorer finishes a day of it.
+    // 1,000 globals: every step traps, so the cap disqualifies it quickly.
     let r = hostile("costly").unwrap();
     let mut c = r.clone_box();
     assert_eq!(c.step(1, &[]), Some(1.0), "grows");
     assert_eq!(c.step(2, &[]), None, "out of fuel");
     let t = std::time::Instant::now();
-    let l = day_losses(&r, &five_minute(1)[..], 1);
-    assert_eq!(l.len(), 1);
-    assert!(t.elapsed() < std::time::Duration::from_secs(60), "{:?}", t.elapsed());
+    assert!(day_losses(&r, &five_minute(1)[..], 1).is_err());
+    assert!(t.elapsed() < std::time::Duration::from_secs(30), "{:?}", t.elapsed());
 }
