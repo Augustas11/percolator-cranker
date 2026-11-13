@@ -52,8 +52,9 @@ account while it still holds that much, funded by `scripts/staging_usdc_faucet.s
 The pusher must add UpdateRef to its PushAuthMark transaction, signed by the same
 oracle key. The matcher cannot read the market through the wrapper's CPI tail.
 At this pin fills book at AuthMark; returned price only feeds the taker's limit check.
-The wrapper rejects target/effective mismatch and fees below the 12 bps base fee.
-SetMatcherConfig uses a 12 bps cap; TradeCpi charges the LP exactly the base fee.
+The wrapper rejects target/effective mismatch and fees below the market's base fee
+(12 bps on SOL-PERP, 15 on COMPUTE-PERP). SetMatcherConfig sets the LP cap to that base fee
+(minimum 12), and so does test-fill; TradeCpi charges the LP exactly the base fee.
 Return flags are VALID only: backing-fee cap bits are zero, so the LP pays no backing fee.
 
 `check` (same options as test-fill) gates read-only on what the fill transaction cannot fix:
