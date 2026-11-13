@@ -1,0 +1,37 @@
+[package]
+name = "flop-rule"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Starter template for a mark rule run by `flop-score --rule wasm:<file>`
+# (docs/flop-compute/CHALLENGE_ABI.md). The library is the ABI wrapper; each
+# example is one rule. Build with ./build.sh. Not part of flop-index's build.
+
+[lib]
+path = "src/lib.rs"
+
+[[example]]
+name = "median"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "live"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "hold"
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+panic = "abort"
+
+# Its own workspace: never pulled into another crate's build.
+[workspace]
