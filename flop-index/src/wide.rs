@@ -217,9 +217,14 @@ impl Config {
     /// `total` weights: attention (layers × 4 × hidden²) and embedding
     /// (vocab × hidden, vocab 150,000 if unknown) always run, the rest is
     /// expert weights of which (per token + shared) / (experts + shared) run.
-    /// Without layers or hidden size: total × that share. Clamped to [0, total].
+    /// Without layers or hidden size: total × that share. None for a config
+    /// that cannot be right: more experts per token than experts, or fixed
+    /// weights at or over the total.
     pub fn estimate_active(&self, total: u64) -> Option<u64> {
         let (e, k) = (self.experts.filter(|e| *e > 1)?, self.experts_per_tok.filter(|k| *k > 0)?);
+        if k > e || total == 0 {
+            return None;
+        }
         let sh = self.shared_experts.unwrap_or(0) as f64;
         let share = (k as f64 + sh) / (e as f64 + sh);
         let t = total as f64;
@@ -227,6 +232,9 @@ impl Config {
             (Some(l), Some(h)) => {
                 let (l, h) = (l as f64, h as f64);
                 let fixed = l * 4.0 * h * h + self.vocab_size.unwrap_or(150_000) as f64 * h;
+                if fixed >= t {
+                    return None;
+                }
                 fixed + (t - fixed) * share
             }
             _ => t * share,
@@ -285,7 +293,7 @@ pub fn active_from_id(id: &str) -> Option<u64> {
     name.split('-').skip(1).find_map(|w| {
         let n = w.strip_prefix('a')?.strip_suffix('b')?;
         let v: f64 = n.parse().ok().filter(|_| n.bytes().all(|b| b.is_ascii_digit() || b == b'.'))?;
-        (v > 0.0).then(|| (v * 1e9).round() as u64)
+        Some((v * 1e9).round() as u64).filter(|a| *a > 0)
     })
 }
 
@@ -321,14 +329,16 @@ impl Compute {
     /// included); 2 × active params from the table, else the id, else
     /// estimated from the config; 2 × params for a model of at most 100B
     /// weights whose config shows no experts; else unknown.
+    /// A parameter count of 0 is unknown; a G_n that is not > 0 is none.
     pub fn gn(&self, ids: &[&str], params: Option<u64>, config: Option<&Config>) -> Gn {
+        let params = params.filter(|p| *p > 0);
         let active = ids
             .iter()
-            .find_map(|id| self.active_params.get(*id).map(|a| (*a, "table")))
+            .find_map(|id| self.active_params.get(*id).filter(|a| **a > 0).map(|a| (*a, "table")))
             .or_else(|| ids.iter().find_map(|id| active_from_id(id).map(|a| (a, "id"))))
             .or_else(|| config.zip(params).and_then(|(c, p)| c.estimate_active(p)).map(|a| (a, "config_estimate")));
         let (active_params, active_source) = (active.map(|a| a.0), active.map(|a| a.1));
-        let gn = |g: f64, basis| Gn { gn_per_token: Some(g), active_params, basis: Some(basis), active_source };
+        let gn = |g: f64, basis| if g.is_finite() && g > 0.0 { Gn { gn_per_token: Some(g), active_params, basis: Some(basis), active_source } } else { Gn::default() };
         let anchor = ids.iter().any(|id| V3_IDS.contains(id)) && params.is_some_and(|p| (p as f64 / V3_ANCHOR.1 - 1.0).abs() <= ANCHOR_TOL);
         if let Some(g) = ids.iter().find_map(|id| self.registry.get(*id)) {
             return gn(*g, "flop_registry");
@@ -990,17 +1000,20 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
         let per_bn = |usd_per_m: f64| gn.map(|g| usd_per_bn_gn(usd_per_m, g));
         let mix_at: Vec<Option<f64>> = MIXES.iter().map(|r| mix_median(&m.held_now, *r)).collect();
         let out_in = out_in_ratio(&m.held_now);
-        if !thin {
-            per_gn.extend(per_bn(median));
-            n_unknown += usize::from(gn.is_none());
-            n_estimated += usize::from(c.basis == Some("2x_active_params_est"));
+        // Totals: models neither thin nor stale, finite values only.
+        let finite = |x: Option<f64>| x.filter(|x| x.is_finite());
+        if !thin && !stale {
+            let u = finite(per_bn(median));
+            per_gn.extend(u);
+            n_unknown += usize::from(u.is_none());
+            n_estimated += usize::from(u.is_some() && c.basis == Some("2x_active_params_est"));
             for (v, x) in mixes.iter_mut().zip(&mix_at) {
-                v.extend(*x);
+                v.extend(finite(*x));
             }
-            ratios.extend(out_in);
-        }
-        if ids().any(|id| id == BASIS_MODEL) {
-            basis_gn = per_bn(median);
+            ratios.extend(finite(out_in));
+            if ids().any(|id| id == BASIS_MODEL) {
+                basis_gn = u;
+            }
         }
         // Quotes listed now that were not listed 7 days ago (null without data that old).
         let week_ago = now_ms.saturating_sub(7 * DAY_MS);
@@ -1820,6 +1833,15 @@ mod tests {
         assert_eq!(g(&c, &["x/dense"], Some(DENSE_MAX_PARAMS), None), (Some(200.0), None, Some("2x_params_dense"), None));
         assert_eq!(g(&c, &["x/big"], Some(DENSE_MAX_PARAMS + 1), None), NONE);
         assert_eq!(g(&c, &["x/none"], None, None), NONE);
+        // A zero count is unknown, and a G_n of 0 is none.
+        assert_eq!(g(&c, &["x/zero"], Some(0), None), NONE);
+        assert_eq!(g(&c, &["x/zero"], Some(0), Some(&Config { experts: Some(8), experts_per_tok: Some(2), ..Config::default() })), NONE);
+        assert_eq!(active_from_id("x/m-1b-a0.0000000001b"), None);
+        assert_eq!(g(&c, &["x/m-1b-a0.0000000001b"], Some(0), None), NONE);
+        let mut z = Compute::default();
+        z.registry.insert("x/z".into(), 0.0);
+        z.active_params.insert("x/y".into(), 0);
+        assert_eq!((g(&z, &["x/z"], None, None), g(&z, &["x/y"], None, None)), (NONE, NONE));
         // Experts in the config: never dense, even if they give no estimate.
         let moe = Config { experts: Some(32), ..Config::default() };
         assert_eq!(g(&c, &["x/small-moe"], Some(20_000_000_000), Some(&moe)), NONE);
@@ -1854,6 +1876,34 @@ mod tests {
         assert_eq!((g(&c, &["z/k"], Some(1_000_000_000_000), None).0, c.registry["z/k2"]), (Some(64.0), 9.0));
     }
 
+    #[test]
+    fn totals_skip_thin_stale_and_infinite_values() {
+        let d = tmp("compute-totals");
+        let now = T0 + HOUR;
+        put(&d, &[
+            // The basis model is thin: no implied FLOP price.
+            line("qwen/qwen3.8-27b", now - MIN, &[("A", 1.0, 0), ("B", 1.0, 0)]),
+            three("x/ok", now - MIN, 1.0, 1.0),
+            // Stale (over 30 minutes old): left out of the totals.
+            three("x/stale", now - HOUR, 9.0, 9.0),
+            // A G_n so small that USD per G_n overflows to infinity.
+            three("x/inf", now - MIN, 1.0, 1.0),
+        ]);
+        let mut w = Wide::default();
+        w.compute.gn_price_flop = Some(0.002);
+        w.compute.registry.extend([("x/ok".to_owned(), 10.0), ("x/stale".to_owned(), 10.0), ("x/inf".to_owned(), 1e-320)]);
+        w.update(&d, now).unwrap();
+        let v = w.market_json(now + STEP_LAG_MS).unwrap();
+        assert_eq!(model(&v, "qwen/qwen3.8-27b")["thin"], true);
+        assert!(model(&v, "qwen/qwen3.8-27b")["usd_per_bn_gn"].is_number());
+        assert_eq!(model(&v, "x/stale")["stale"], true);
+        assert_eq!(model(&v, "x/inf")["usd_per_bn_gn"], Value::Null);
+        assert_eq!(v["flop"]["implied_flop_usd"], Value::Null);
+        // Only x/ok counts: $1 per 1M at 10 G_n per token = $100 per bn G_n.
+        assert_eq!(v["compute_price"], json!({ "median_usd_per_bn_gn": 100.0, "p25": 100.0, "p75": 100.0, "n_models": 1, "n_estimated": 0, "n_unknown": 1 }));
+        assert_eq!(v["mixes"]["avg_15_1"], 1.0);
+    }
+
     /// DeepSeek-V3's `config.json` (685B weights).
     const V3: Config = Config { hidden_size: Some(7168), num_hidden_layers: Some(61), vocab_size: Some(129_280), experts_per_tok: Some(8), experts: Some(256), shared_experts: Some(1) };
 
@@ -1875,8 +1925,13 @@ mod tests {
         assert_eq!(Config { vocab_size: None, ..c }.estimate_active(10_000_000), Some((800.0 + 1_500_000.0 + (10_000_000.0 - 1_500_800.0) / 3.0_f64).round() as u64));
         // No layers or hidden size: total × share.
         assert_eq!(Config { num_hidden_layers: None, ..c }.estimate_active(900), Some(300));
-        // Clamped: fixed weights over the total give the total.
-        assert_eq!(c.estimate_active(5_000), Some(5_000));
+        // Configs that cannot be right give no estimate: fixed weights at or
+        // over the total, more per token than experts, no experts, total 0.
+        assert_eq!((c.estimate_active(10_800), c.estimate_active(5_000), c.estimate_active(10_801).is_some()), (None, None, true));
+        assert_eq!(Config { experts_per_tok: Some(9), ..c }.estimate_active(100_000), None);
+        assert_eq!(Config { experts_per_tok: Some(8), ..c }.estimate_active(100_000), Some(100_000));
+        assert_eq!(Config { experts: Some(0), ..c }.estimate_active(100_000), None);
+        assert_eq!(c.estimate_active(0), None);
         // No experts, or none per token: no estimate.
         assert_eq!(Config { experts: None, ..c }.estimate_active(100_000), None);
         assert_eq!(Config { experts_per_tok: None, ..c }.estimate_active(100_000), None);
