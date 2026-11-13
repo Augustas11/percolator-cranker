@@ -8,6 +8,7 @@ import Tools from "../pages/Tools";
 import Arena from "../pages/Arena";
 import Build from "../pages/Build";
 import Compute from "../pages/Compute";
+import Docs from "../pages/Docs";
 import Nav from "./Nav";
 import Footer from "./Footer";
 import { site } from "./config";
@@ -33,7 +34,7 @@ export default function Site({ client, indexer, indexerBase = null, computeFeed 
   }, []);
   const [tradeMounted, setTradeMounted] = useState(path === site.paths.trade);
   useEffect(() => { if (path === site.paths.trade) setTradeMounted(true); }, [path]);
-  const titles: Record<string, string> = { [site.paths.home]: "drip", [site.paths.tools]: "Tools · drip", [site.paths.arena]: "Arena · drip", [site.paths.build]: "Build · drip", [site.paths.compute]: "Compute index · drip", [site.paths.trade]: "Trade · drip" };
+  const titles: Record<string, string> = { [site.paths.home]: "drip", [site.paths.tools]: "Tools · drip", [site.paths.arena]: "Arena · drip", [site.paths.build]: "Build · drip", [site.paths.compute]: "Compute index · drip", [site.paths.docs]: "Docs · drip", [site.paths.trade]: "Trade · drip" };
   const title = titles[path] ?? "Page not found · drip";
   useEffect(() => { document.title = title; }, [title]);
   const page = path === site.paths.home ? <Home client={client} indexer={indexer} indexerBase={indexerBase} computeFeed={computeFeed} />
@@ -41,6 +42,7 @@ export default function Site({ client, indexer, indexerBase = null, computeFeed 
     : path === site.paths.arena ? <Arena indexerBase={indexerBase} />
     : path === site.paths.build ? <Build />
     : path === site.paths.compute ? <Compute feed={computeFeed} />
+    : path === site.paths.docs ? <Docs feed={computeFeed} />
     : <><h1>Page not found</h1><Link to={site.paths.home}>drip</Link></>;
 
   return <div className="site">

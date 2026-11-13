@@ -9,7 +9,7 @@ import { Arrow } from "../site/Nav";
 import CopyButton from "../site/CopyButton";
 import type { ComputeFeedClient, ComputeMarket } from "../compute/client";
 import { useComputeFeed } from "../compute/useFeed";
-import { RangeStrip, marketScale, widest } from "../compute/charts";
+import { RangeStrip, marketScale, typicalPrice, widest } from "../compute/charts";
 import { ago as agoMs, count, times, usd as perMillion, usd4 } from "../compute/format";
 import "../site/home.css";
 import "../site/compute.css";
@@ -26,7 +26,7 @@ const rules = [["Market", "SOL-PERP"], ["Funds", "Test USDC"], ["Ranking", "Real
 const builds = [
   { tag: "MCP TOOLS", title: "Add a tool", body: "One file per tool, one line to register it. New tools ship to every connected agent.", path: "mcp/src/tools/" },
   { tag: "AGENTS", title: "Ship an agent", body: "Market makers, hedgers, arena traders. Publish yours and it shows on the board.", path: "agents/" },
-  { tag: "OPERATORS", title: "Run the keeper", body: "drip cranks Percolator markets. Run it, improve it, send a PR.", path: "Augustas11/drip" },
+  { tag: "OPERATORS", title: "Run the keeper", body: "drip cranks Percolator markets. Run it, improve it, send a PR.", path: "Augustas11/drip-markets" },
 ];
 
 function usd(atoms: string) {
@@ -50,21 +50,23 @@ function ComputeCard({ market, mark, markAgo, sellersUp, sellers }: { market: Co
   const scale = market ? marketScale(market) : null;
   const top = market ? [...market.models].sort((a, b) => b.sellers_total - a.sellers_total).slice(0, 4) : [];
   const wide = market ? widest(market) : null;
+  const typical = market ? typicalPrice(market) : null;
   return <div className="market-card compute-card">
     <div className="cc-block">
-      <div className="market-header"><div><div className="market-name">Compute index</div><div className="market-subtitle">Open-model inference{market && <>, updated {agoMs(market.generated_ms, Date.now())}</>}</div></div></div>
+      <div className="market-header"><div><div className="market-name">Open-model inference</div><div className="market-subtitle">Compute index{market && <>, updated {agoMs(market.generated_ms, Date.now())}</>}</div></div></div>
       {market ? <>
-        <div className="cc-level"><strong>{market.index.level.toFixed(2)}</strong><span>{count(market.index.n_quotes)} quotes · {count(market.index.n_providers)} providers · {count(market.index.n_models)} models</span></div>
+        {typical && <div className="cc-level"><span className="cc-label">Median price to run an open model</span><strong>{perMillion(typical.median)}</strong><span className="cc-unit">per 1M tokens</span></div>}
+        <div className="cc-meta">{count(market.index.n_quotes)} quotes · {count(market.index.n_providers)} providers · index {market.index.level.toFixed(2)}</div>
         <ul className="cc-models" aria-label="Most-sold models">{top.map(m => <li key={m.id}>
           <span className="cc-name">{m.name}</span><RangeStrip model={m} scale={scale!} quotes={false} /><b>{perMillion(m.median)}</b>
         </li>)}</ul>
-        {wide && <p className="cc-note">{wide.name} costs {perMillion(wide.min)} to {perMillion(wide.max)} per 1M tokens depending on the seller: {times(wide.min, wide.max)}.</p>}
+        {wide && <p className="cc-note">Same model, up to {times(wide.min, wide.max)} apart: {wide.name} costs {perMillion(wide.min)} to {perMillion(wide.max)} depending on the seller.</p>}
       </> : <div className="cc-loading" aria-busy="true"><span className="sk" /><span className="sk" /><span className="sk" /></div>}
     </div>
     <div className="cc-block cc-perp">
-      <div className="market-header"><div><div className="market-name">Qwen3.8-27B perp</div><div className="market-subtitle">Settlement price · Solana devnet, test tokens</div></div></div>
+      <div className="market-header"><div><div className="market-name">COMPUTE-PERP</div><div className="market-subtitle">USD per 1M tokens · Qwen3.8-27B</div></div></div>
       <div className="market-price">{mark === null ? "—" : usd4(mark)}<span className="cc-unit"> / 1M tokens</span></div>
-      <div className="cc-note">{sellers ? `${sellersUp} of ${sellers} full-precision sellers up` : "Waiting for the feed"}{markAgo && ` · pushed ${markAgo}`}</div>
+      <div className="cc-note">Settlement price{markAgo && `, pushed ${markAgo}`}. {sellers ? `${sellersUp} of ${sellers} full-precision sellers up.` : ""}</div>
     </div>
     <Link className="button-link" to={site.paths.compute}>Open the compute index <Arrow /></Link>
   </div>;
@@ -113,9 +115,9 @@ export default function Home({ client, indexer, indexerBase, computeFeed = null 
           <p className="eyebrow">COMPUTE MARKETS</p>
           <h1 id="hero-title"><span>Price and</span><span className="accent">hedge AI</span><span>compute.</span></h1>
           <p className="hero-description">{compute.market
-            ? <>A live price index for open-model inference, built from {count(compute.market.index.n_quotes)} seller quotes across {count(compute.market.index.n_providers)} providers, and a perpetual future on that price.</>
-            : <>A live price index for open-model inference, built from every seller's quote, and a perpetual future on that price.</>}</p>
-          <div className="hero-actions"><Link className="button-link hero-primary" to={site.paths.compute}>See the compute index <Arrow /></Link><Link className="button-link outline" to="/trade">Trade SOL-PERP</Link></div>
+            ? <>What open-model inference costs right now: {count(compute.market.index.n_quotes)} quotes from {count(compute.market.index.n_providers)} providers on {count(compute.market.models.length)} models. See who is cheapest and by how much, and trade the price with a perpetual.</>
+            : <>What open-model inference costs right now, from every seller of every major open model. See who is cheapest and by how much, and trade the price with a perpetual.</>}</p>
+          <div className="hero-actions"><Link className="button-link hero-primary" to={site.paths.compute}>See the compute index <Arrow /></Link><Link className="button-link outline" to="/trade">Trade SOL-PERP</Link><span className="trade-note">Test tokens</span></div>
           <p className="hero-credit">Perps run on Percolator, the open-source engine by Anatoly Yakovenko.</p>
         </div>
         <ComputeCard market={compute.market} mark={compute.latest?.mark_usd ?? null} markAgo={compute.latest ? agoMs(compute.latest.landed_ms, compute.now) : null}

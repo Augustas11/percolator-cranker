@@ -131,3 +131,12 @@ export function Sparkline({ series, label, className = "spark", step = false, mi
 }
 
 export const sinceLabel = (series: Point[]) => series.length ? `since ${day(series[0][0])}` : "";
+
+/** The going rate for an open model: median of the non-thin model medians, with the cheapest and dearest model. */
+export function typicalPrice(market: ComputeMarket) {
+  const pool = market.models.filter(m => !m.thin && m.median > 0);
+  if (!pool.length) return null;
+  const sorted = pool.map(m => m.median).sort((a, b) => a - b);
+  const byMedian = [...pool].sort((a, b) => a.median - b.median);
+  return { median: quantile(sorted, 0.5), cheapest: byMedian[0], dearest: byMedian[byMedian.length - 1], models: pool.length };
+}

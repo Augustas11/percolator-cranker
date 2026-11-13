@@ -6,7 +6,7 @@ export default function Build() {
   return <>
     <h1>Build</h1>
     <section><h2>Repos</h2><ul className="repos">
-      <li><a href={site.repo}>Augustas11/drip</a><p>Keeper: cranks and liquidations</p></li>
+      <li><a href={site.repo}>Augustas11/drip-markets</a><p>Keeper: cranks and liquidations</p></li>
       {site.upstream.map(repo => <li key={repo.url}><a href={repo.url}>{repo.name}</a><p>{repo.note}</p></li>)}
     </ul></section>
     <section><h2>Add an MCP tool</h2>

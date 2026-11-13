@@ -121,16 +121,17 @@
 .site .hero-credit { margin: 22px 0 0; font-size: 13px; color: var(--site-muted); }
 .site .compute-card { display: grid; gap: 18px; max-width: 520px; padding: 22px; }
 .site .cc-block + .cc-block { padding-top: 18px; border-top: 1px solid var(--site-line-7); }
-.site .cc-level { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-top: 10px; }
-.site .cc-level strong { font: 700 56px/1 var(--site-display); letter-spacing: -2px; }
-.site .cc-level span { font: 12px var(--site-mono); color: var(--site-muted); }
+.site .cc-level { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-top: 14px; }
+.site .cc-label { flex-basis: 100%; font-size: 14px; color: var(--site-secondary); }
+.site .cc-level strong { font: 700 56px/1 var(--site-display); letter-spacing: -2px; color: var(--site-accent); }
+.site .cc-meta { margin-top: 8px; font: 12px var(--site-mono); color: var(--site-muted); }
 .site .cc-models { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 4px; }
 .site .cc-models li { display: grid; grid-template-columns: 112px minmax(0, 1fr) 64px; gap: 12px; align-items: center; margin: 0; }
 .site .cc-models .strip { height: 22px; }
 .site .cc-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .site .cc-models b { font: 700 13px var(--site-mono); text-align: right; }
 .site .cc-note { margin: 12px 0 0; font-size: 13px; line-height: 1.5; color: var(--site-muted); }
-.site .cc-perp .market-price { color: var(--site-accent); }
+.site .cc-perp .market-price { color: var(--site-text); }
 .site .cc-unit { font: 400 13px var(--site-font); letter-spacing: 0; color: var(--site-muted); }
 .site .cc-perp .cc-note { margin-top: 4px; }
 .site .compute-card > .button-link { min-height: 48px; }

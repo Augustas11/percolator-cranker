@@ -2,10 +2,12 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, test, vi } from "vitest";
 import Compute from "../pages/Compute";
+import Docs from "../pages/Docs";
 import type { ComputeFeedClient, ComputeMarket } from "./client";
 import { MockComputeFeedClient } from "./mock";
 import { marketFixture } from "./fixture";
-import { logScale } from "./charts";
+import { logScale, typicalPrice } from "./charts";
+import { day, usd } from "./format";
 import { site } from "../site/config";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -37,17 +39,33 @@ test("renders the index, its scale and every section from the fixture", async ()
   const container = await render(liveFeed(now));
   const text = container.textContent!;
   expect(container.querySelector("h1")?.textContent).toBe("Compute index");
-  expect(container.querySelector(".cx-level strong")?.textContent).toBe(market.index.level.toFixed(2));
-  const scale = Array.from(container.querySelectorAll(".cx-scale li")).map(li => li.textContent);
-  expect(scale).toEqual([`${market.index.n_quotes} quotes`, `${market.index.n_providers} providers`, `${market.index.n_models} models`, `${market.index.n_quotes_up} up now`]);
-  expect(text).toContain("A 24 h change prints once the index is a day old.");
-  expect(container.querySelector(".cx-widest")?.textContent).toContain("GLM 5.3: $0.150 to $3.18 across 46 sellers");
-  expect(container.querySelector(".cx-widest strong")?.textContent).toBe("21×");
+  const typical = typicalPrice(market)!;
+  expect(container.querySelector(".cx-label")?.textContent).toBe("Median price to run an open model");
+  expect(container.querySelector(".cx-price")?.textContent).toBe(`${usd(typical.median)}per 1M tokens`);
+  expect(container.querySelector(".cx-range")?.textContent).toBe(`Cheapest model ${typical.cheapest.name} ${usd(typical.cheapest.median)} · dearest ${typical.dearest.name} ${usd(typical.dearest.median)}`);
+  expect(container.querySelector(".cx-proof")?.textContent).toBe(`Medians of ${market.index.n_quotes} seller quotes from ${market.index.n_providers} providers on ${typical.models} models. Input and output tokens mixed 15:1.`);
+  expect(container.querySelector(".cx-indexstat")?.textContent).toBe(`Index ${market.index.level.toFixed(2)} · 100 = ${day(market.index.base_ms)}`);
+  expect(container.querySelector(".cx-spread-line")?.textContent).toBe("The same model costs up to 21\u00d7 more depending on the seller.");
+  expect(container.querySelector(".cx-spread-eg")?.textContent).toBe("GLM 5.3: $0.150 to $3.18 per 1M tokens across 46 sellers.");
+  // Who it is for: each entry jumps to a section that exists.
+  const who = Array.from(container.querySelectorAll(".cx-who a"));
+  expect(who.map(a => a.getAttribute("href"))).toEqual(["#board", "#providers", "#perp"]);
+  for (const a of who) expect(container.querySelector(a.getAttribute("href")!)).not.toBeNull();
+  expect(who[0].textContent).toContain(`Cheapest seller for each of ${market.models.length} models`);
+  expect(who[2].textContent).toContain("now $0.3036");
+  // The perp sits right after the board, before providers.
+  const order = ["#board", "#perp", "#providers"].map(id => Array.from(container.querySelectorAll("section, article")).indexOf(container.querySelector(id)!));
+  expect(order).toEqual([...order].sort((a, b) => a - b));
   // Two index points: the distribution, not a dead line.
   expect(container.querySelector(".swarm svg")?.getAttribute("aria-label")).toMatch(/^\d+ live quotes, each divided by its model's median price\. Half sit between/);
   expect(container.querySelector(".cx-index-line")).toBeNull();
-  for (const heading of ["Price by model", "Providers", "Price moves", "Method"]) expect(text).toContain(heading);
-  expect(text).toContain("Independent of Flop Labs and OpenRouter.");
+  expect(text).not.toMatch(/\b(?:mock|sample)\b/i);
+  for (const heading of ["Price by model", "Providers", "Price moves"]) expect(text).toContain(heading);
+  // The method lives in Docs; /compute keeps one line pointing there.
+  expect(container.querySelector('[aria-labelledby="compute-how-heading"]')).toBeNull();
+  expect(container.querySelector(".cx-how a")?.getAttribute("href")).toBe("/docs#compute-index");
+  expect(container.querySelector(".cx-how")?.textContent).toBe("How these prices are made");
+  expect(text).not.toMatch(/Independent of|devnet only|no real value/i);
   expect(container.querySelector(".compute-stale")).toBeNull();
 });
 
@@ -114,6 +132,20 @@ test("providers, price moves and dynamic pricers come from the feed", async () =
   expect(moves.querySelectorAll(".move-list:not(.dyn-list) li")).toHaveLength(market.changes.length);
   expect(moves.querySelectorAll(".dyn-list li")).toHaveLength(market.dynamic.length);
   expect(moves.querySelector(".dyn-list li")?.textContent).toContain("212 changes");
+  expect(moves.textContent).not.toContain("Frequent repricers");
+});
+
+test("a seller with 3+ changes is grouped as a frequent repricer, never contradicted", async () => {
+  const now = Date.now();
+  const repeat = (at: number, from: number, to: number) => ({ at_ms: now - at * 60_000, model: "openai/gpt-oss-120b", provider: "PrimeIntellect", quantization: "fp4", from, to });
+  const container = await render(liveFeed(now, m => ({ ...m, dynamic: [], changes: [repeat(5, 0.0385, 0.0493), repeat(15, 0.0493, 0.041), repeat(25, 0.041, 0.0385), { ...repeat(9, 0.2, 0.22), provider: "Novita" }] })));
+  const moves = container.querySelector('[aria-labelledby="compute-moves-heading"]')!;
+  expect(moves.textContent).toContain("Frequent repricers");
+  const rows = Array.from(moves.querySelectorAll(".dyn-list li")).map(li => li.textContent);
+  expect(rows).toEqual(["PrimeIntellectGPT-OSS-120B · fp4$0.0385–$0.04933 changes"]);
+  expect(moves.querySelectorAll(".move-list:not(.dyn-list) li")).toHaveLength(1);
+  expect(moves.textContent).not.toContain("No seller repriced");
+  expect(moves.textContent).not.toContain("Dynamic pricers");
 });
 
 test("the perp and FLOP panels show the settlement price, its sellers and FLOP's rate", async () => {
@@ -121,19 +153,16 @@ test("the perp and FLOP panels show the settlement price, its sellers and FLOP's
   const perp = container.querySelector('[aria-labelledby="compute-perp-heading"]')!;
   expect(perp.querySelector(".perp-price strong")?.textContent).toBe("$0.3036");
   expect(Array.from(perp.querySelectorAll(".perp-sellers li")).map(li => li.textContent)).toEqual(["DeepInfra bf16$0.2578up", "Cerebras fp16$1.0213up"]);
-  expect(perp.textContent).toContain("Solana devnet, test tokens");
-  expect(perp.textContent).toContain("full-precision (bf16/fp16) sellers of one benchmark model");
+  expect(perp.querySelector(".cx-k")?.textContent).toBe("COMPUTE-PERP · USD per 1M tokens · Qwen3.8-27B");
+  expect(perp.querySelector(".trade-note")?.textContent).toBe("Test tokens");
+  expect(perp.textContent).toContain("full-precision (bf16/fp16) sellers of one benchmark model, so every contract settles on the same product");
   expect(perp.querySelector('a[href^="https://explorer.solana.com/tx/4w4fnV"]')).not.toBeNull();
   expect(perp.querySelector('a[href="https://explorer.solana.com/address/uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J?cluster=devnet"]')?.textContent).toContain("Market account");
   expect(perp.querySelector(".perp-hist figcaption")?.textContent).toBe("7 d · low $0.3036 · high $0.3112");
   const flop = container.querySelector('[aria-labelledby="compute-flop-heading"]')!;
   expect(flop.querySelector(".perp-price strong")?.textContent).toBe("0.00291");
   expect(Array.from(flop.querySelectorAll(".flop-facts dd")).map(v => v.textContent)).toEqual(["3", "34", "185", "50%"]);
-  expect(flop.textContent).toContain("not a traded price");
-  const how = container.querySelector('[aria-labelledby="compute-how-heading"]')!;
-  expect(how.textContent).toContain("staging verify-push-log");
-  expect(how.textContent).toContain("Clamp now: off (n<3).");
-  expect(how.textContent).toContain(`Geometric mean of the ${marketFixture().index.n_models} model medians`);
+  expect(flop.textContent).toContain("The perp settles on seller prices, not on this rate.");
 });
 
 test("trade link appears when configured", async () => {
@@ -200,10 +229,8 @@ test("latest.json from the future or a stopped feed is stale", async () => {
 test("an index with 12 or more points draws its line with a since date", async () => {
   const now = Date.now();
   const container = await render(liveFeed(now, m => ({ ...m, index: { ...m.index, change_24h_pct: 1.234, change_7d_pct: -0.5, series: Array.from({ length: 24 }, (_, i) => [now - (24 - i) * 3_600_000, 100 + i / 10] as [number, number]) } })));
-  expect(container.querySelector(".swarm")).toBeNull();
   expect(container.querySelector(".cx-index-line figcaption")?.textContent).toMatch(/^Index since \d+ \w+ \d{4}$/);
-  expect(Array.from(container.querySelectorAll(".cx-changes dd")).map(d => d.textContent)).toEqual(["+1.2%", "−0.5%"]);
-  expect(container.textContent).not.toContain("A 24 h change prints");
+  expect(container.querySelector(".cx-indexstat")?.textContent).toMatch(/· 24 h \+1\.2% · 7 d \u22120\.5%$/);
 });
 
 test("a flop_standin price explains its own source", async () => {
@@ -211,7 +238,6 @@ test("a flop_standin price explains its own source", async () => {
   const base = await feed.latest();
   vi.spyOn(feed, "latest").mockResolvedValue({ ...base, source: "flop_standin" });
   const container = await render(feed);
-  expect(container.querySelector('[aria-labelledby="compute-how-heading"]')!.textContent).toContain("FLOP's on-chain price (flop_standin)");
   expect(container.querySelector('[aria-labelledby="compute-flop-heading"]')!.textContent).toContain("This sets the settlement price right now");
 });
 
@@ -227,4 +253,38 @@ test("log scale ticks stay on 1-2-5 steps and inside the range", () => {
   expect(s.ticks).toEqual([0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5]);
   expect(s.at(s.lo)).toBe(0);
   expect(s.at(s.hi)).toBeCloseTo(100);
+});
+
+async function renderDocs(feed: ComputeFeedClient | null) {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  cleanup = async () => { await act(async () => { root.unmount(); }); };
+  await act(async () => { root.render(<Docs feed={feed} />); });
+  return container;
+}
+
+test("docs explain how the index is made, with live values from the feed", async () => {
+  const container = await renderDocs(liveFeed());
+  const how = container.querySelector("#compute-index")!;
+  expect(how.querySelector("h2")?.textContent).toBe("How the compute index is made");
+  expect(Array.from(how.querySelectorAll("dt")).map(d => d.textContent)).toEqual(["01Quote", "02Price", "03Up", "04Model price", "05Index", "06Stale", "07Settlement price", "08Check it"]);
+  expect(how.textContent).toContain(`Geometric mean of the ${marketFixture().index.n_models} model medians`);
+  expect(how.textContent).toContain("Clamp now: off (n<3).");
+  expect(how.textContent).toContain("staging verify-push-log");
+  expect(how.textContent).toContain("Independent of Flop Labs and OpenRouter.");
+});
+
+test("docs state the rules without live counts when there is no feed", async () => {
+  const container = await renderDocs(null);
+  const how = container.querySelector("#compute-index")!;
+  expect(how.textContent).toContain("Geometric mean of the model medians");
+  expect(how.textContent).not.toContain("Clamp now");
+});
+
+test("docs describe a flop_standin settlement price", async () => {
+  const feed = new MockComputeFeedClient();
+  const base = await feed.latest();
+  vi.spyOn(feed, "latest").mockResolvedValue({ ...base, source: "flop_standin" });
+  const container = await renderDocs(feed);
+  expect(container.querySelector("#compute-index")!.textContent).toContain("FLOP's on-chain price (flop_standin)");
 });

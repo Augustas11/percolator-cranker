@@ -1,9 +1,10 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket, MarketModel } from "../compute/client";
-import { Axis, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadSwarm, marketScale, sinceLabel, widest, type LogScale } from "../compute/charts";
+import { Axis, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadSwarm, marketScale, sinceLabel, typicalPrice, widest, type LogScale } from "../compute/charts";
 import { addressUrl, ago, clock, count, day, direction, pct, short, times, txUrl, usd, usd4, when } from "../compute/format";
 import { latestStale, marketStale, useComputeFeed } from "../compute/useFeed";
 import { site } from "../site/config";
+import { Link } from "../site/router";
 import { Arrow } from "../site/Nav";
 import "../site/compute.css";
 
@@ -29,39 +30,45 @@ function Hero({ market, now, error }: { market: ComputeMarket; now: number; erro
   const { index } = market;
   const stale = marketStale(market, now);
   const wide = widest(market);
+  const typical = typicalPrice(market);
   const hasSeries = index.series.length >= MIN_SERIES_POINTS;
   return <header className="cx-hero" aria-labelledby="compute-title">
     <div className="cx-hero-main">
-      <p className="eyebrow">OPEN-MODEL INFERENCE · USD PER 1M TOKENS</p>
-      <h1 id="compute-title">Compute index</h1>
-      <div className="cx-level">
-        <strong>{index.level.toFixed(2)}</strong>
-        {(index.change_24h_pct !== null || index.change_7d_pct !== null) && <dl className="cx-changes">
-          {index.change_24h_pct !== null && <div><dt>24 h</dt><dd><Change value={index.change_24h_pct} /></dd></div>}
-          {index.change_7d_pct !== null && <div><dt>7 d</dt><dd><Change value={index.change_7d_pct} /></dd></div>}
-        </dl>}
-      </div>
-      <p className="cx-base">Indexed from {when(index.base_ms)}.{index.change_24h_pct === null && " A 24 h change prints once the index is a day old."}</p>
-      <ul className="cx-scale" aria-label="Scale">
-        <li><strong>{count(index.n_quotes)}</strong> quotes</li>
-        <li><strong>{count(index.n_providers)}</strong> providers</li>
-        <li><strong>{count(index.n_models)}</strong> models</li>
-        <li><strong>{count(index.n_quotes_up)}</strong> up now</li>
-      </ul>
-      <p className="cx-updated">Updated {ago(market.generated_ms, now)} · {clock(market.generated_ms)} UTC{stale && <> · <Stale why={stale} /></>}</p>
+      <h1 id="compute-title" className="cx-title">Compute index</h1>
+      {typical ? <>
+        <p className="cx-label">Median price to run an open model</p>
+        <div className="cx-price"><strong>{usd(typical.median)}</strong><span>per 1M tokens</span></div>
+        <p className="cx-range">Cheapest model <b>{typical.cheapest.name} {usd(typical.cheapest.median)}</b> · dearest <b>{typical.dearest.name} {usd(typical.dearest.median)}</b></p>
+      </> : <p className="cx-label">No model has enough sellers for a price right now.</p>}
+      <p className="cx-proof">Medians of <b>{count(index.n_quotes)}</b> seller quotes from <b>{count(index.n_providers)}</b> providers on <b>{count(typical?.models ?? index.n_models)}</b> models. Input and output tokens mixed 15:1.</p>
+      <p className="cx-updated">
+        <span className="cx-indexstat">Index {index.level.toFixed(2)} · 100 = {day(index.base_ms)}{index.change_24h_pct !== null && <> · 24 h <Change value={index.change_24h_pct} /></>}{index.change_7d_pct !== null && <> · 7 d <Change value={index.change_7d_pct} /></>}</span>
+        <span>Updated {ago(market.generated_ms, now)} · {clock(market.generated_ms)} UTC</span>
+        {stale && <Stale why={stale} />}
+      </p>
+      {hasSeries && <figure className="cx-index-line"><Sparkline series={index.series} label={`Index level ${sinceLabel(index.series)}: from ${index.series[0][1].toFixed(2)} to ${index.level.toFixed(2)}.`} className="spark" /><figcaption>Index {sinceLabel(index.series)}</figcaption></figure>}
       {error && <p className="note" role="status">Could not refresh ({error}). Showing the last data received.</p>}
     </div>
     <div className="cx-hero-side">
       {wide && <div className="cx-widest">
-        <span className="cx-k">Widest spread</span>
-        <strong>{times(wide.min, wide.max)}</strong>
-        <span>{wide.name}: {usd(wide.min)} to {usd(wide.max)} across {wide.sellers_total} sellers</span>
+        <p className="cx-spread-line">The same model costs up to <strong>{times(wide.min, wide.max)}</strong> more depending on the seller.</p>
+        <p className="cx-spread-eg">{wide.name}: {usd(wide.min)} to {usd(wide.max)} per 1M tokens across {wide.sellers_total} sellers.</p>
       </div>}
-      {hasSeries
-        ? <figure className="cx-index-line"><Sparkline series={index.series} label={`Index level ${sinceLabel(index.series)}: from ${index.series[0][1].toFixed(2)} to ${index.level.toFixed(2)}.`} className="spark spark-lg" /><figcaption>Index {sinceLabel(index.series)}</figcaption></figure>
-        : <><p className="cx-k">Every live quote against its model's median</p><SpreadSwarm market={market} /></>}
+      <p className="cx-k">Every live quote against its model's median</p>
+      <SpreadSwarm market={market} />
     </div>
   </header>;
+}
+
+function Audience({ market, latest }: { market: ComputeMarket; latest: ComputeLatest | null }) {
+  const rows: [string, string, string][] = [
+    ["Buying inference", `Cheapest seller for each of ${count(market.models.length)} models`, "#board"],
+    ["Selling or mining", `Where your price sits against ${count(market.index.n_providers)} providers`, "#providers"],
+    ["Trading", latest ? `Hedge the Qwen3.8-27B price with the perp, now ${usd4(latest.mark_usd)}` : "Hedge the Qwen3.8-27B price with the perp", "#perp"],
+  ];
+  return <nav className="cx-who" aria-label="Jump to">
+    {rows.map(([who, what, href]) => <a key={href} href={href}><span className="cx-k">{who}</span><span className="who-what">{what}</span><Arrow /></a>)}
+  </nav>;
 }
 
 function ModelRow({ model, scale, open, onToggle }: { model: MarketModel; scale: LogScale; open: boolean; onToggle: () => void }) {
@@ -108,7 +115,7 @@ function Board({ market }: { market: ComputeMarket }) {
   const models = useMemo(() => [...market.models].sort((a, b) =>
     sort === "spread" ? b.max / b.min - a.max / a.min : sort === "median" ? b.median - a.median : b.sellers_total - a.sellers_total || a.median - b.median), [market, sort]);
   const toggle = (id: string) => setOpen(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
-  return <section className="cx-section" aria-labelledby="compute-board-heading">
+  return <section id="board" className="cx-section" aria-labelledby="compute-board-heading">
     <div className="cx-section-head">
       <div>
         <h2 id="compute-board-heading">Price by model</h2>
@@ -132,7 +139,7 @@ function Providers({ market }: { market: ComputeMarket }) {
   const [all, setAll] = useState(false);
   const rows = all ? market.providers : market.providers.slice(0, PROVIDERS_SHOWN);
   const most = Math.max(1, ...market.providers.map(p => p.models));
-  return <section className="cx-section" aria-labelledby="compute-providers-heading">
+  return <section id="providers" className="cx-section" aria-labelledby="compute-providers-heading">
     <div className="cx-section-head"><div>
       <h2 id="compute-providers-heading">Providers</h2>
       <p className="cx-sub">{count(market.providers.length)} sellers, by models listed.</p>
@@ -151,9 +158,28 @@ function Providers({ market }: { market: ComputeMarket }) {
   </section>;
 }
 
+const changeKey = (c: { model: string; provider: string; quantization: string }) => `${c.model}\u0000${c.provider}\u0000${c.quantization}`;
+
+/** Sellers with 3 or more changes in the feed's window, as one row each. */
+export function frequentRepricers(changes: ComputeMarket["changes"]) {
+  const groups = new Map<string, ComputeMarket["changes"]>();
+  for (const c of changes) groups.set(changeKey(c), [...(groups.get(changeKey(c)) ?? []), c]);
+  return [...groups.values()].filter(g => g.length >= 3).map(g => {
+    const prices = g.flatMap(c => [c.from, c.to]);
+    return { model: g[0].model, provider: g[0].provider, quantization: g[0].quantization, changes: g.length, min: Math.min(...prices), max: Math.max(...prices) };
+  }).sort((a, b) => b.changes - a.changes);
+}
+
 function Moves({ market }: { market: ComputeMarket }) {
   const names = new Map(market.models.map(m => [m.id, m.name]));
-  const changes = [...market.changes].sort((a, b) => b.at_ms - a.at_ms).slice(0, 12);
+  const frequent = frequentRepricers(market.changes);
+  const grouped = new Set(frequent.map(changeKey));
+  const changes = market.changes.filter(c => !grouped.has(changeKey(c))).sort((a, b) => b.at_ms - a.at_ms).slice(0, 12);
+  const Row = ({ provider, model, quantization, min, max, n }: { provider: string; model: string; quantization: string; min: number; max: number; n: number }) => <li>
+    <span className="mv-what"><b>{provider}</b><span>{names.get(model) ?? model} · {quantization}</span></span>
+    <span className="mv-price">{usd(min)}–{usd(max)}</span>
+    <span className="dyn-n"><b>{n}</b> changes</span>
+  </li>;
   return <section className="cx-section cx-moves" aria-labelledby="compute-moves-heading">
     <h2 id="compute-moves-heading">Price moves</h2>
     <div className="cx-col">
@@ -166,32 +192,34 @@ function Moves({ market }: { market: ComputeMarket }) {
           <span className="mv-price">{usd(c.from)} → {usd(c.to)}</span>
           <Change value={delta} />
         </li>;
-      })}</ol> : <p className="note">No seller has changed a price since {when(market.window.from_ms)}.</p>}
+      })}</ol> : <p className="note">{frequent.length ? "No other seller has changed a price" : "No seller has changed a price"} since {when(market.window.from_ms)}.</p>}
     </div>
-    <div className="cx-col">
+    {frequent.length > 0 && <div className="cx-col">
+      <h3>Frequent repricers</h3>
+      <p className="cx-sub">3 or more price changes since {when(market.window.from_ms)}, and their range.</p>
+      <ol className="move-list dyn-list">{frequent.map(f => <Row key={changeKey(f)} {...f} n={f.changes} />)}</ol>
+    </div>}
+    {(market.dynamic.length > 0 || frequent.length === 0) && <div className="cx-col">
       <h3>Dynamic pricers</h3>
       <p className="cx-sub">Sellers with more than one price in the last 24 h, and their range.</p>
-      {market.dynamic.length ? <ol className="move-list dyn-list">{[...market.dynamic].sort((a, b) => b.changes_24h - a.changes_24h).map(d => <li key={`${d.model}-${d.provider}-${d.quantization}`}>
-        <span className="mv-what"><b>{d.provider}</b><span>{names.get(d.model) ?? d.model} · {d.quantization}</span></span>
-        <span className="mv-price">{usd(d.min)}–{usd(d.max)}</span>
-        <span className="dyn-n"><b>{d.changes_24h}</b> changes</span>
-      </li>)}</ol> : <p className="note">No seller repriced more than once in 24 h.</p>}
-    </div>
+      {market.dynamic.length ? <ol className="move-list dyn-list">{[...market.dynamic].sort((a, b) => b.changes_24h - a.changes_24h).map(d => <Row key={changeKey(d)} {...d} n={d.changes_24h} />)}</ol>
+        : <p className="note">No seller repriced more than once in 24 h.</p>}
+    </div>}
   </section>;
 }
 
 function Perp({ latest, history, now }: { latest: ComputeLatest; history: ComputeHistory | null; now: number }) {
   const stale = latestStale(latest, now);
   const trade = site.computeTrade;
-  return <article className="cx-panel" aria-labelledby="compute-perp-heading">
-    <p className="cx-k">Perp settlement price · Solana devnet, test tokens</p>
-    <h2 id="compute-perp-heading">Qwen3.8-27B, full precision</h2>
+  return <article id="perp" className="cx-panel" aria-labelledby="compute-perp-heading">
+    <p className="cx-k">COMPUTE-PERP · USD per 1M tokens · Qwen3.8-27B</p>
+    <h2 id="compute-perp-heading">The price the perp settles on</h2>
     <div className="perp-price"><strong>{usd4(latest.mark_usd)}</strong><span>per 1M tokens</span></div>
     {history && history.points.length >= 2 && history.to_ms - history.from_ms >= 86_400_000 && <figure className="perp-hist">
       <Sparkline step min={2} series={history.points} label={`Settlement price over 7 days: low ${usd4(history.low)}, high ${usd4(history.high)}.`} className="spark spark-sm" />
       <figcaption>7 d · low {usd4(history.low)} · high {usd4(history.high)}</figcaption>
     </figure>}
-    <p className="perp-why">Narrower than the index: it uses only the full-precision (bf16/fp16) sellers of one benchmark model, so the contract settles on a like-for-like product.</p>
+    <p className="perp-why">Set by the full-precision (bf16/fp16) sellers of one benchmark model, so every contract settles on the same product.</p>
     <ul className="perp-sellers" aria-label="Sellers in the settlement price">{latest.pricing_set.map(r => <li key={`${r.provider}-${r.quantization}`}>
       <span>{r.provider} <span className="q">{r.quantization}</span></span><b>{usd4(r.priced)}</b><Up up={r.up} />
     </li>)}</ul>
@@ -199,6 +227,7 @@ function Perp({ latest, history, now }: { latest: ComputeLatest; history: Comput
     <div className="panel-actions">
       {trade ? <a className="button-link" href={trade}>Trade the perp <Arrow /></a>
         : latest.market && <a className="button-link outline" href={addressUrl(latest.market)} target="_blank" rel="noreferrer">Market account <Arrow /></a>}
+      <span className="trade-note">Test tokens</span>
     </div>
   </article>;
 }
@@ -217,29 +246,8 @@ function Flop({ latest }: { latest: ComputeLatest }) {
       ["From FLOP's gateway", flop.gateway_share == null ? "—" : `${Math.round(flop.gateway_share * 100)}%`],
     ] as const).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
     {flop.stale && <p className="note">Not computed right now: {flop.stale}.</p>}
-    <p className="perp-why">{openrouter ? "Today this is FLOP's listed rate, not a traded price. It does not set the settlement price." : "This sets the settlement price right now, converted to USD at a fixed stand-in rate."}</p>
+    <p className="perp-why">{openrouter ? "FLOP's listed rate for compute today, paid by its buyers to its miners. The perp settles on seller prices, not on this rate." : "This sets the settlement price right now, converted to USD at a fixed stand-in rate."}</p>
   </article>;
-}
-
-function Method({ market, latest }: { market: ComputeMarket | null; latest: ComputeLatest | null }) {
-  const openrouter = latest?.source === "openrouter";
-  const rows: [string, ReactNode][] = [
-    ["Quote", "One seller, one model, one precision, from OpenRouter's public endpoint list."],
-    ["Price", <>(15 × input + output) ÷ 16, in USD per 1M tokens.</>],
-    ["Up", "OpenRouter reports the endpoint with status 0. 24 h uptime is the share of reads it was up."],
-    ["Model price", "Median of the quotes that are up. The box spans the 25th to 75th percentile."],
-    ["Index", market ? <>Geometric mean of the {count(market.index.n_models)} model medians, each against its own starting price. 100 = {day(market.index.base_ms)}.{market.models.length > market.index.n_models && " Models marked thin are listed but left out."}</> : "Combines the model medians, indexed from its first read."],
-    ["Stale", "No new read for 30 minutes. The page shows a stale badge next to the time."],
-    ["Settlement price", openrouter
-      ? <>bf16 sellers first; fewer than 2 up, fp16, then both. Weighted 1 ÷ price². With 3 or more, a quote under half the median counts as half. Clamp now: {latest?.clamp ?? "unknown"}.</>
-      : <>FLOP's on-chain price ({latest?.source ?? "unknown"}), converted to USD at a fixed stand-in rate.</>],
-    ["Check it", <>Each settlement price is a signed log line; <code>staging verify-push-log</code> recomputes it from the logged sellers.</>],
-  ];
-  return <section className="cx-section" aria-labelledby="compute-how-heading">
-    <h2 id="compute-how-heading">Method</h2>
-    <dl className="method">{rows.map(([k, v], i) => <div key={k}><dt><span>{String(i + 1).padStart(2, "0")}</span>{k}</dt><dd>{v}</dd></div>)}</dl>
-    <p className="cx-fine">Independent of Flop Labs and OpenRouter.{site.computeRepo && <> Source code: <a href={site.computeRepo}>{site.computeRepo}</a>.</>}</p>
-  </section>;
 }
 
 export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
@@ -250,12 +258,13 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
     {!loaded && nothing ? <><h1 className="sr-only">Compute index</h1><Skeleton /></>
       : market ? <Hero market={market} now={now} error={failed.market ? error : ""} />
       : <header className="cx-hero is-empty"><div className="cx-hero-main"><h1>Compute index</h1><p role="status" className="error">Market feed unreachable ({failed.market ? error : "no data"}). Try again in a minute.</p></div></header>}
+    {market && <Audience market={market} latest={latest} />}
     {market && <Board market={market} />}
-    {market && <div className="cx-pair"><Providers market={market} /><Moves market={market} /></div>}
     {(latest || failed.latest) && <div className="cx-panels">
       {latest ? <><Perp latest={latest} history={history} now={now} /><Flop latest={latest} /></>
-        : <article className="cx-panel"><h2>Perp settlement price</h2><p role="status" className="error">Price feed unreachable ({error}). Try again in a minute.</p></article>}
+        : <article id="perp" className="cx-panel"><h2>Perp settlement price</h2><p role="status" className="error">Price feed unreachable ({error}). Try again in a minute.</p></article>}
     </div>}
-    {(market || latest) && <Method market={market} latest={latest} />}
+    {market && <div className="cx-pair"><Providers market={market} /><Moves market={market} /></div>}
+    {(market || latest) && <p className="cx-fine cx-how"><Link to={`${site.paths.docs}#compute-index`}>How these prices are made</Link></p>}
   </div>;
 }

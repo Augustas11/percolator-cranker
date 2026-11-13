@@ -9,6 +9,8 @@ import { MockIndexerClient } from "../indexer/mock";
 import type { IndexerClient } from "../indexer/client";
 import { MockComputeFeedClient } from "../compute/mock";
 import { marketFixture } from "../compute/fixture";
+import { typicalPrice } from "../compute/charts";
+import { usd } from "../compute/format";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -42,13 +44,14 @@ test.each([
   [site.paths.build, "Build", "Add an MCP tool", "Build · drip"],
   [site.paths.compute, "Compute index", "Price feed not configured.", "Compute index · drip"],
   [site.paths.trade, "SOL-PERP", "Connect wallet", "Trade · drip"],
+  [site.paths.docs, "Docs", "How the compute index is made", "Docs · drip"],
 ])("renders %s", async (path, heading, text, title) => {
   const container = await render(path);
   expect(container.querySelector("h1")?.textContent).toBe(heading);
   expect(container.textContent).toContain(text);
   expect(document.title).toBe(title);
   expect(container.querySelector("nav")).not.toBeNull();
-  expect(container.querySelector("footer")?.textContent).toContain("Devnet only. Test tokens, no real value.");
+  expect(container.querySelector("footer")?.textContent).toContain("Drip is the market for AI compute. Live prices from every seller, and a perp to trade them. Built for perp traders and for agents on FLOP Network.");
 });
 
 test("home shows its live mark, recent trades and honest unpublished tools", async () => {
@@ -63,7 +66,7 @@ test("home shows its live mark, recent trades and honest unpublished tools", asy
   expect(container.textContent).toContain("Mark price");
   expect(container.querySelector('.hero-actions a[href="/trade"]')?.textContent?.trim()).toBe("Trade SOL-PERP");
   expect(container.querySelector('.hero-actions a[href="/arena"]')?.textContent).toBe("Watch agents trade");
-  expect(container.textContent).toContain("Prizes TBD.");
+  expect(container.textContent).not.toContain("Prizes TBD.");
   expect(container.textContent).toContain("Indexer not configured");
   expect(container.textContent).not.toMatch(/\[TBD\]|\[NPM-PACKAGE\]|npx/);
   expect(container.querySelector(".terminal button")).toBeNull();
@@ -332,16 +335,40 @@ test("home leads with the compute index and the compute perp, SOL-PERP second", 
   const container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient(now));
   const market = marketFixture(now);
   const card = container.querySelector(".compute-card")!;
-  expect(card.querySelector(".cc-level strong")?.textContent).toBe(market.index.level.toFixed(2));
-  expect(card.textContent).toContain(`${market.index.n_quotes} quotes · ${market.index.n_providers} providers · ${market.index.n_models} models`);
+  expect(card.querySelector(".cc-level")?.textContent).toBe(`Median price to run an open model${usd(typicalPrice(market)!.median)}per 1M tokens`);
+  expect(card.querySelector(".cc-meta")?.textContent).toBe(`${market.index.n_quotes} quotes · ${market.index.n_providers} providers · index ${market.index.level.toFixed(2)}`);
+  expect(container.querySelector(".announcement")).toBeNull();
   expect(card.querySelectorAll(".cc-models .strip")).toHaveLength(4);
   expect(card.querySelector(".cc-perp .market-price")?.textContent).toBe("$0.3036 / 1M tokens");
-  expect(card.textContent).toContain("2 of 2 full-precision sellers up");
-  expect(container.querySelector(".hero-description")?.textContent).toContain(`built from ${market.index.n_quotes} seller quotes across ${market.index.n_providers} providers`);
+  expect(card.textContent).toContain("Settlement price, pushed 3 min ago. 2 of 2 full-precision sellers up.");
+  expect(container.querySelector(".hero-description")?.textContent).toContain(`What open-model inference costs right now: ${market.index.n_quotes} quotes from ${market.index.n_providers} providers on ${market.models.length} models.`);
   expect(container.querySelector('.home-hero .hero-primary')?.getAttribute("href")).toBe("/compute");
   expect(container.textContent).toContain("Perps run on Percolator, the open-source engine by Anatoly Yakovenko.");
   const sections = Array.from(container.querySelectorAll("main > section")).map(s => s.className);
   expect(sections.indexOf("home-sol home-container")).toBe(1);
-  expect(container.querySelector('nav .nav-compute')?.getAttribute("href")).toBe("/compute");
+  expect(Array.from(container.querySelectorAll(".nav-links a")).map(a => [a.textContent, a.getAttribute("href")])).toEqual([["Index", "/compute"], ["Trade", "/trade"], ["Arena", "/arena"], ["Tools", "/tools"], ["Build", "/build"], ["Docs", "/docs"]]);
+  expect(container.querySelector(".nav-links")?.textContent).not.toContain("SOL-PERP");
+  expect(card.querySelector(".cc-perp .market-name")?.textContent).toBe("COMPUTE-PERP");
+  expect(card.querySelector(".cc-perp .market-subtitle")?.textContent).toBe("USD per 1M tokens · Qwen3.8-27B");
+  expect(container.querySelector("#sol-title")?.textContent).toBe("Agents trade SOL-PERP.");
+  expect(Array.from(container.querySelectorAll("footer a")).filter(a => ["Index", "Docs"].includes(a.textContent!)).map(a => a.getAttribute("href"))).toEqual(["/compute", "/docs"]);
   expect(container.querySelector(".home-hero")?.textContent).not.toMatch(/mock|sample/i);
+});
+
+test("the arena strip shows on SOL-PERP and arena pages, not on home or compute", async () => {
+  for (const [path, shown] of [[site.paths.home, false], [site.paths.compute, false], [site.paths.arena, true], [site.paths.tools, true]] as const) {
+    const container = await render(path);
+    expect(!!container.querySelector(".announcement")).toBe(shown);
+    await cleanup?.();
+    cleanup = undefined;
+  }
+});
+
+test("footer blurb positions Drip and every GitHub link goes to drip-markets", async () => {
+  const container = await render(site.paths.build);
+  expect(container.querySelector(".footer-about p")?.textContent).toBe("Drip is the market for AI compute. Live prices from every seller, and a perp to trade them. Built for perp traders and for agents on FLOP Network.");
+  const github = Array.from(container.querySelectorAll("a")).map(a => a.getAttribute("href")!).filter(h => h.includes("github.com/Augustas11"));
+  expect(github.length).toBeGreaterThan(2);
+  for (const href of github) expect(href).toMatch(/^https:\/\/github\.com\/Augustas11\/drip-markets(\/|$)/);
+  expect(site.agents.source).toBe("https://github.com/Augustas11/drip-markets/tree/main/agents");
 });

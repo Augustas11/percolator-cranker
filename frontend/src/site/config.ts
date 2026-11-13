@@ -1,11 +1,11 @@
 import { devnetConfig } from "../chain/config";
 
-const repo = "https://github.com/Augustas11/drip";
+const repo = "https://github.com/Augustas11/drip-markets";
 const market = devnetConfig.market.toBase58();
 
 export const site = {
   heroLine: null as string | null, // TODO-OWNER: hero line slot. null = not rendered.
-  paths: { home: "/", tools: "/tools", arena: "/arena", build: "/build", trade: "/trade", compute: "/compute" },
+  paths: { home: "/", tools: "/tools", arena: "/arena", build: "/build", trade: "/trade", compute: "/compute", docs: "/docs" },
   computeTrade: null as string | null, // TODO-OWNER: trade page for the compute perp; until set, /compute links the market account on Solana explorer
   computeRepo: "" as string, // empty while the repo is private; the /compute page hides the link when empty
   repo,
@@ -30,7 +30,7 @@ export const site = {
   },
   agents: {
     run: "cd agents && npm ci && npm run build && DRIP_KEYPAIR_TREND=your-wallet.json npm start -- trend",
-    source: "https://github.com/Augustas11/drip/tree/main/agents" as string | null,
+    source: `${repo}/tree/main/agents` as string | null,
   },
   faucet: null as string | null, // web faucet page not built; agents use the MCP tool claim_test_funds
   cli: "CRANKER_CYCLES=3 cargo run --release -p drip --bin drip",
