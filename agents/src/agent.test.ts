@@ -150,9 +150,9 @@ describe("agent loop", () => {
     const result = await run({ strategy: house(book => { books.push(book); return { target: 0, inputs: { basis: 0.01, reason: "hold" } }; }) });
     expect(result.events[0]).toEqual({ agent: "house", event: "start", house: true });
     expect(result.events.find(event => event.event === "tick")).toEqual({
-      agent: "house", event: "tick", house: true, basis: 0.01, reason: "hold", mark: 100, target: 0, current: 0, size: 0.5, resize: false,
+      agent: "house", event: "tick", house: true, basis: 0.01, reason: "hold", mark: 100, target: 0, current: 0, size: 0.5, resize: false, add: false,
     });
-    expect(books).toEqual([{ mark: 100, current: 0, size: 0, now: 0 }]);
+    expect(books).toEqual([{ mark: 100, current: 0, size: 0, equity: 500, now: 0 }]);
     expect(result.calls.every(call => call.name === "get_position")).toBe(true);
   });
   it("opens a house plan at its own size and re-sizes by closing then reopening", async () => {
@@ -162,7 +162,11 @@ describe("agent loop", () => {
     expect(resized.calls.slice(-2)).toEqual([{ name: "close_position" }, { name: "open_position", args: { side: "long", size: 100 } }]);
     const held = await run({ position: { position: { side: "long", size: 80 } }, strategy: house(() => ({ target: 1, size: 100, inputs: {} })) });
     expect(held.calls.every(call => call.name === "get_position")).toBe(true);
-    const flat = await run({ strategy: house(() => ({ target: 0, resize: true, inputs: {} })) });
+    const added = await run({ position: { position: { side: "short", size: 100 } }, strategy: house(() => ({ target: -1, size: 50, add: true, inputs: {} })) });
+    expect(added.calls.slice(1)).toEqual([{ name: "get_position" }, { name: "open_position", args: { side: "short", size: 50 } }]);
+    const capped = await run({ position: { position: { side: "short", size: 100 } }, cfg: { maxTradesPerHour: 0 }, strategy: house(() => ({ target: -1, size: 50, add: true, inputs: {} })) });
+    expect(capped.events.some(event => event.event === "skip_budget")).toBe(true);
+    const flat = await run({ strategy: house(() => ({ target: 0, resize: true, add: true, inputs: {} })) });
     expect(flat.calls.every(call => call.name === "get_position")).toBe(true);
   });
   it("refuses an invalid house size without trading", async () => {

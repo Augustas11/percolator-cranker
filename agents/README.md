@@ -19,27 +19,37 @@ against each other (every fill is against the LP's matcher). On this market the
 size unit (`size` in the MCP, `SIZE_SOL` here) is 1M tokens.
 
 - `basis`: trades the gap between the broad market and the settlement mark.
-  Each tick it reads `<DRIP_FEED_URL>/market.json`, takes the median price of
-  the benchmark model across all its sellers, and computes
-  `basis = ln(median / mark)`. Long when `basis > DRIP_BASIS_ENTRY`, short when
-  `basis < -DRIP_BASIS_ENTRY`, but only after the same side shows on
-  `DRIP_BASIS_CONFIRM` consecutive new snapshots (the median flickers between
-  neighbouring sellers). Flat once `|basis| < DRIP_BASIS_EXIT`; in between it
-  holds. If the feed is unreachable, older than `DRIP_FEED_MAX_AGE_S`, or the
-  model is missing, thin or has no median, it holds its position and logs why
-  (`reason`). It never trades on stale data.
+  Each tick it reads `<DRIP_FEED_URL>/market.json` and computes
+  `basis = ln(price / mark)`, where `price` is the benchmark model's median
+  across all its sellers (`DRIP_BASIS_SOURCE=median`) or its routed price, what
+  a request pays now across the sellers that are up (`routed`). The gap has a
+  standing level: the broad market includes cheaper, lower-precision sellers
+  than the mark (about -5% for the median, about -45% for the routed price on
+  2026-11-13). So the agent trades the deviation of the basis from its own
+  mean over the last `DRIP_BASIS_WINDOW_H` hours, one sample per new snapshot:
+  long when the broad market sits more than `DRIP_BASIS_ENTRY` above its usual
+  gap to the mark, short when it sits that far below, but only after the same
+  side shows on `DRIP_BASIS_CONFIRM` consecutive new snapshots. It goes flat
+  once the deviation is inside `DRIP_BASIS_EXIT`; in between it holds. It does
+  not trade until it has `DRIP_BASIS_MIN_SAMPLES` samples (the mean lives in
+  memory, so a restart warms up again). If the feed is unreachable, older than
+  `DRIP_FEED_MAX_AGE_S`, or the model is missing, thin or has no price, it
+  holds its position and logs why (`reason`). It never trades on stale data.
 - `hedger`: a month of inference, hedged. `DRIP_HEDGE_SIDE=long` is a buyer
   with an inference bill locking in its price; `short` is a seller hedging its
   revenue. It holds `DRIP_HEDGE_MTOK` million tokens (notional = budget x
-  mark) on its side and re-sizes (close, then reopen at the budget) only when
-  the held notional drifts from that target by more than `DRIP_HEDGE_BAND`. It
-  trades rarely by design; its job is standing open interest. Run one process
-  per side, each with its own wallet.
+  mark) on its side. A budget above one matcher fill (100) is built over
+  several fills, one per tick and within `MAX_TRADES_PER_HOUR`. Once there, it
+  trades again only when the held notional drifts from the target by more than
+  `DRIP_HEDGE_BAND`: it adds when short of it, and closes and rebuilds when over.
+  It never grows past initial margin (50%, 2x leverage) of 80% of its equity.
+  It trades rarely by design; its job is standing open interest. Run one
+  process per side, each with its own wallet.
 
-Each tick line includes the inputs behind the decision (`median`, `mark`,
-`basis`, thresholds, `feed_age_s`, `streak`, `reason`; for the hedger
-`target_notional`, `held_notional`, `drift`, `band`), so every trade can be
-explained afterwards.
+Each tick line includes the inputs behind the decision (`price`, `mark`,
+`basis`, `mean`, `deviation`, thresholds, `feed_age_s`, `samples`, `streak`,
+`reason`; for the hedger `target_notional`, `held_notional`, `drift`, `band`,
+`equity`, `reason`), so every trade can be explained afterwards.
 
 ```sh
 DRIP_KEYPAIR_BASIS=/path/basis.json DRIP_FEED_URL=https://feed.example SIZE_SOL=50 npm start -- basis
@@ -49,19 +59,24 @@ DRIP_KEYPAIR_HEDGER=/path/hedge-long.json DRIP_HEDGE_SIDE=long npm start -- hedg
 | Environment | Default | Meaning |
 | --- | --- | --- |
 | `DRIP_FEED_URL` | unset | Base URL serving `market.json` (required for `basis`) |
+| `DRIP_BASIS_SOURCE` | `median` | `median` (`models[].median`) or `routed` (`models[].routed.price`) |
 | `DRIP_BASIS_MODEL` | `qwen/qwen3.8-27b` | Model id to read from `market.json` |
-| `DRIP_BASIS_ENTRY` | `0.08` | Enter when `abs(basis)` exceeds this (log ratio, ~8%) |
-| `DRIP_BASIS_EXIT` | `0.02` | Go flat when `abs(basis)` is below this; must be under entry |
+| `DRIP_BASIS_ENTRY` | `0.08` median, `0.02` routed | Enter when the deviation from the mean exceeds this (log ratio) |
+| `DRIP_BASIS_EXIT` | `0.02` median, `0.005` routed | Go flat when the deviation is inside this; must be under entry |
 | `DRIP_BASIS_CONFIRM` | `2` | Consecutive new snapshots needed before entering or flipping |
+| `DRIP_BASIS_WINDOW_H` | `6` | Hours of samples in the rolling mean |
+| `DRIP_BASIS_MIN_SAMPLES` | `12` | Samples needed before trading (about an hour of 5-minute snapshots) |
 | `DRIP_FEED_MAX_AGE_S` | `1800` | Hold when the feed's `data_ms` is older than this |
 | `DRIP_HEDGE_SIDE` | unset | `long` or `short` (required for `hedger`) |
 | `DRIP_HEDGE_MTOK` | `100` | Hedged monthly budget, in millions of tokens |
 | `DRIP_HEDGE_BAND` | `0.1` | Re-size when held notional drifts more than this fraction |
 
-Each open must fit the matcher's max fill (100 USD notional on COMPUTE-PERP), so
-keep `DRIP_HEDGE_MTOK x mark` and `SIZE_SOL x mark` under it. The defaults were
-picked from the first 1.7 hours of all-seller prices (2026-11-13); revisit them
-once there are days of feed history.
+Market limits (`perps_markets` on 2026-11-13): 100 units per fill, LP
+inventory cap 1000 units, 2x max leverage. `basis` refuses a `SIZE_SOL` above
+one fill. Keep the house agents' combined one-sided size under the LP cap, or
+the matcher refuses the excess. The basis defaults were picked from the first
+4.7 hours of all-seller prices (2026-11-13); revisit them once there are days of
+feed history.
 
 ## Quick start
 
@@ -114,9 +129,11 @@ function, add it to `src/strategies/index.ts`, then run `npm test`. Directions
 are `-1` (short), `0` (flat), and `1` (long). History holds at most 200 samples.
 
 A strategy that needs outside data or its own size implements
-`observe({ mark, current, size, now })` instead (see `HouseStrategy` in
-`src/strategies/types.ts`). It returns `{ target, size?, resize?, inputs }`; the
-agent logs `inputs` on the tick line and opens at `size` (default `SIZE_SOL`).
+`observe({ mark, current, size, equity, now })` instead (see `HouseStrategy`
+in `src/strategies/types.ts`). It returns `{ target, size?, resize?, add?, inputs }`;
+the agent logs `inputs` on the tick line and opens at `size` (default
+`SIZE_SOL`). `resize` closes and reopens on the same side; `add` opens `size`
+more on the side already held (one trade).
 
 ## Docker
 

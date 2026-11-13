@@ -9,6 +9,7 @@ export interface Book {
   mark: number;
   current: Direction;
   size: number; // open size, in the market's base unit (1M tokens on COMPUTE-PERP)
+  equity: number; // portfolio equity, test USDC
   now: number;
 }
 
@@ -16,6 +17,7 @@ export interface Plan {
   target: Direction;
   size?: number; // open size; defaults to SIZE_SOL
   resize?: boolean; // close and reopen at `size` even though the side already matches
+  add?: boolean; // open `size` more on the side already held (build over several fills)
   inputs: Record<string, unknown>; // logged on the tick line so every trade can be explained
 }
 
