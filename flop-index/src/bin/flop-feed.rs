@@ -2,22 +2,29 @@
 //! OpenRouter recorder and (optionally) the wide collector. See
 //! docs/flop-compute/FEED.md.
 //!
-//!   flop-feed <bots.log> <or-prices dir> <out dir> --oracle <pubkey> [--wide <dir>] [--loop <seconds>]
+//!   flop-feed <bots.log> <or-prices dir> <out dir> --oracle <pubkey> [--wide <dir> [--rebase]] [--loop <seconds>]
+//!
+//! With --wide, the index state is kept in <out dir>/index-state.json; an
+//! unreadable one stops the feed unless --rebase starts a fresh base.
 
 use anyhow::{bail, Context, Result};
 use flop_index::feed::{write_atomic, Feed};
-use flop_index::wide::Wide;
+use flop_index::wide::{IndexState, Wide};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const USAGE: &str = "usage: flop-feed <bots.log> <or-prices dir> <out dir> --oracle <pubkey> [--wide <dir>] [--loop <seconds>]";
+const USAGE: &str = "usage: flop-feed <bots.log> <or-prices dir> <out dir> --oracle <pubkey> [--wide <dir> [--rebase]] [--loop <seconds>]";
 
 fn once(feed: &mut Feed, wide: &mut Option<(Wide, PathBuf)>, log: &Path, or_dir: &Path, out: &Path) -> Result<()> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
     // The market file does not wait for a push line, nor the push files for it.
     let market = wide.as_mut().map(|(w, dir)| -> Result<()> {
         w.update(dir, now)?;
-        write_atomic(out, "market.json", &w.market_json(now)?)
+        let market = w.market_json(now)?;
+        if let Some(s) = &w.state {
+            write_atomic(out, "index-state.json", &serde_json::to_value(s)?)?;
+        }
+        write_atomic(out, "market.json", &market)
     });
     let (latest, history) = feed.build(log, or_dir, now)?;
     write_atomic(out, "history.json", &history)?;
@@ -31,9 +38,13 @@ fn main() -> Result<()> {
         Some([a, b, c]) if !a.starts_with("--") && !b.starts_with("--") && !c.starts_with("--") => [a, b, c].map(PathBuf::from),
         _ => bail!(USAGE),
     };
-    let (mut oracle, mut wide_dir, mut every) = (None, None, None);
+    let (mut oracle, mut wide_dir, mut every, mut rebase) = (None, None, None, false);
     let mut rest = args[3..].iter();
     while let Some(flag) = rest.next() {
+        if flag == "--rebase" {
+            rebase = true;
+            continue;
+        }
         let val = rest.next().context(USAGE)?;
         match flag.as_str() {
             "--oracle" => oracle = Some(val.clone()),
@@ -48,7 +59,14 @@ fn main() -> Result<()> {
         bail!("--oracle must be the oracle authority's base58 pubkey");
     }
     let mut feed = Feed::new(&oracle);
-    let mut wide = wide_dir.map(|d| (Wide::default(), d));
+    if rebase && wide_dir.is_none() {
+        bail!("--rebase needs --wide");
+    }
+    let mut wide = match wide_dir {
+        // Never re-base silently: a state file that is there must load.
+        Some(d) => Some((Wide::with_state(if rebase { None } else { IndexState::load(&out.join("index-state.json"))? }), d)),
+        None => None,
+    };
     let Some(every) = every else { return once(&mut feed, &mut wide, &log, &or_dir, &out) };
     if every == 0 {
         bail!("--loop needs at least 1 second");

@@ -29,7 +29,10 @@ pusher").
   model (`qwen__qwen3.8-27b` for `qwen/qwen3.8-27b`) holding
   `YYYY-MM-DD.jsonl` files, one line per fetch:
   `{"at_ms", "model", "rows": [{"provider", "tag", "quantization", "prompt", "completion", "status", "uptime_30m", "context"}]}`
-  (prices in USD per token). Adds `market.json`.
+  (prices in USD per token). Adds `market.json`, and keeps the index state
+  in `<out dir>/index-state.json`.
+- `--rebase` (with `--wide`): ignore any saved index state and start a new
+  base. Only for a deliberate re-base; the level then means something new.
 - `out dir`: gets `latest.json`, `history.json` and, with `--wide`,
   `market.json`. Each is written to a temp
   file in the same directory (named with the process id), synced, and
@@ -45,7 +48,13 @@ non-zero if the log has no push yet; `--loop` prints the error and retries.
 `market.json` is written even when the log has no push yet, and the push
 files even when the wide directory is empty.
 
-With `--wide`, the feed holds at most 30 days of wide data. Day files are
+With `--wide`, the feed loads `index-state.json` from the out dir at start
+and continues from it. If there is none it creates a base; if it is there
+but cannot be read or has bad values, the feed refuses to start (no silent
+re-base) until it is fixed or `--rebase` is passed. The state is written
+atomically each run, before `market.json`.
+
+The feed holds at most 30 days of wide data. Day files are
 re-read only when their size changed. Day files more than 8 days old keep
 one snapshot per model per hour.
 
@@ -121,21 +130,28 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
   snapshot; its time is the last fetch in it.
 - **Basket.** Every model directory. A model is in the index while it has a
   median and had at least 3 usable quotes in the last 24 h.
-- **Base.** The first snapshot where every model priced within the first
-  24 h of the held data has a median. The index is 100 there. The data held
-  is the last 30 days, so the base moves forward once there is more.
-- **Level.** A Jevons index, chain-linked: at each snapshot the level moves
-  by the geometric mean of (median now / median at the last snapshot) over
-  the models in the index at both. For a fixed basket this equals the
-  geometric mean of (median / base median) × 100. A model that joins later,
-  or leaves after 24 h without 3 usable quotes, does not move the level at
-  that snapshot: in effect its base is scaled so the index is unchanged.
+- **Base.** Set once, when no `index-state.json` exists: the first
+  snapshot where every model priced within the first 24 h of the data has a
+  median. The index is 100 there. The base never moves after that: not on a
+  restart, not when data ages out of the 30 days held. Only `--rebase`
+  starts a new one.
+- **State.** `index-state.json` holds `base_ms`, each basket model's base
+  median (after chain-link scaling) and last median, the last level and its
+  snapshot time (`at_ms`), and the level series (30 days; past 8 days, one
+  point per hour). Each run steps only through snapshots after `at_ms`.
+- **Level.** Jevons over the models in the index: the geometric mean of
+  (median / base median) × 100. A model that joins gets base = median /
+  (level / 100), so the level does not move. When a model leaves (24 h
+  without 3 usable quotes), the remaining bases are scaled by one common
+  factor so the level at their last medians is unchanged. So after a gap
+  (feed down for hours), the first snapshot's level comes from the saved
+  bases and moves only by real price changes.
 - **Uptime.** `uptime_24h_pct` is the share of the model's fetches in the
   last 24 h where the quote was listed and up. A fetch that did not list it
   counts as down; times the model was not fetched do not count.
 - **Changes.** A quote's price changed if it differs from its last price by
   more than 0.1%. A quote that changed in more than 20% of its priced
-  fetches over 7 days is a dynamic pricer: it goes in `dynamic`, not
+  fetches over 7 days, with at least 24 priced fetches, is a dynamic pricer: it goes in `dynamic`, not
   `changes`.
 - **Names.** `name` is the id after `/`, hyphens as spaces, version dots
   kept, words capitalized (size tokens such as `27b` upper-cased). `family`
