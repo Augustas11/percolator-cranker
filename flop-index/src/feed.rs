@@ -444,6 +444,18 @@ impl Feed {
     }
 }
 
+/// Lock `<dir>/.flop-feed.lock` for this process's lifetime (keep the
+/// file), so two feeds cannot write the same directory.
+pub fn lock_out(dir: &Path) -> Result<File> {
+    std::fs::create_dir_all(dir)?;
+    let p = dir.join(".flop-feed.lock");
+    let f = File::options().create(true).truncate(false).write(true).open(&p).with_context(|| format!("open {}", p.display()))?;
+    if f.try_lock().is_err() {
+        anyhow::bail!("another flop-feed is writing {} ({} is locked); stop it first", dir.display(), p.display());
+    }
+    Ok(f)
+}
+
 /// Write `<dir>/<name>` atomically: a temp file in the same directory, then rename.
 pub fn write_atomic(dir: &Path, name: &str, v: &Value) -> Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -670,17 +682,28 @@ mod tests {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../deploy/");
         let nginx = std::fs::read_to_string(format!("{root}indexer-nginx.conf")).unwrap();
         let route = &nginx[nginx.find("location /compute-feed/ {").expect("nginx route")..];
-        let route = &route[..route.find("\n    }").unwrap()];
-        for want in ["limit_except GET { deny all; ", "alias /srv/compute-feed/;", "Cache-Control \"no-store\""] {
+        let route = &route[..route.find("\n    }\n").unwrap()];
+        for want in ["limit_except GET { deny all; ", "alias /srv/compute-feed/;", "Cache-Control \"no-store\"", "location ~ ^/compute-feed/(\\.|index-state\\.json$) {\n            return 404;"] {
             assert!(route.contains(want), "{want}");
         }
         let compose = std::fs::read_to_string(format!("{root}docker-compose.yml")).unwrap();
         assert!(compose.contains(":/srv/compute-feed:ro\""));
         assert!(compose.contains("dockerfile: deploy/Dockerfile.flop-feed"));
-        assert!(compose.contains("\"--oracle\", \"${FLOP_ORACLE_PUBKEY:-}\""));
+        assert!(compose.contains("\"--oracle\", \"${FLOP_ORACLE_PUBKEY:?set FLOP_ORACLE_PUBKEY"));
+        assert!(compose.contains("install -d -o \"$LAUNCH_UID\" -g \"$LAUNCH_GID\" /opt/drip/compute-feed"));
         assert!(compose.contains("\"--wide\", \"/or-prices-wide\""));
         assert!(compose.contains(":/or-prices-wide:ro\""));
         assert!(std::fs::read_to_string(format!("{root}Dockerfile.flop-feed")).unwrap().contains("--bin flop-feed"));
+    }
+
+    #[test]
+    fn one_feed_per_out_dir() {
+        let d = tmp("lock");
+        let first = lock_out(&d).unwrap();
+        let e = format!("{:#}", lock_out(&d).unwrap_err());
+        assert!(e.contains("another flop-feed is writing"), "{e}");
+        drop(first);
+        lock_out(&d).unwrap();
     }
 
     #[test]

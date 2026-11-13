@@ -36,6 +36,17 @@ pub const CHANGE_REL: f64 = 0.001;
 pub const DYNAMIC_SHARE: f64 = 0.2;
 /// ... and only once it has at least this many priced snapshots.
 pub const DYNAMIC_MIN_SNAPS: usize = 24;
+/// A model whose newest snapshot is older than this is stale: none of its
+/// quotes is reported up.
+pub const STALE_MS: u64 = 30 * 60_000;
+/// The index steps only through snapshots at least this old, so a cycle
+/// still being written is complete; later arrivals for a stepped time are ignored.
+pub const STEP_LAG_MS: u64 = 2 * 60_000;
+/// Per step, a model's index input moves by at most this factor either way.
+pub const MAX_STEP_RATIO: f64 = 1.25;
+/// The method version saved in the state; a state from another version is
+/// re-linked once (see `advance`).
+pub const METHOD: u32 = 1;
 /// Snapshots of different models further apart than this are different cycles.
 const CYCLE_GAP_MS: u64 = 60_000;
 
@@ -71,6 +82,9 @@ struct Quotes {
     names: Vec<(String, String)>,
     ids: HashMap<String, u32>,
     listings: HashMap<String, u32>,
+    /// Per quote id: its provider's id.
+    prov: Vec<u32>,
+    providers: HashMap<String, u32>,
 }
 
 impl Quotes {
@@ -81,6 +95,8 @@ impl Quotes {
         let i = self.names.len() as u32;
         self.names.push((provider.to_owned(), quant.to_owned()));
         self.ids.insert(key, i);
+        let n = self.providers.len() as u32;
+        self.prov.push(*self.providers.entry(provider.to_owned()).or_insert(n));
         i
     }
 
@@ -136,14 +152,19 @@ fn dedup(rows: Vec<Row>) -> Vec<Row> {
     best.into_values().collect()
 }
 
-/// The group key of a model: its Hugging Face id (else its own id),
-/// lowercased, without a trailing date snapshot (`-0731`, `-20261017`).
-pub fn alias_key(id: &str) -> String {
-    let id = id.to_lowercase();
-    match id.rsplit_once('-') {
-        Some((stem, tail)) if [4, 6, 8].contains(&tail.len()) && tail.bytes().all(|b| b.is_ascii_digit()) && !stem.is_empty() => stem.to_owned(),
-        _ => id,
+/// The id a dated snapshot `X-<4, 6 or 8 digits>` is an alias of: `X`,
+/// only if `X` is itself a model here (same org, as it is the same prefix)
+/// and both have Hugging Face ids that are equal, or the dated one's is
+/// `X`'s plus the same suffix. Different releases (`mistral-small-2501`
+/// and `-2603`, `Qwen3-235B-A22B` and `-2507` with its own HF repo) stay apart.
+pub fn alias_of<'a>(id: &str, ids: &BTreeSet<&'a str>, hf: &HashMap<String, String>) -> Option<&'a str> {
+    let (stem, tail) = id.rsplit_once('-')?;
+    if ![4, 6, 8].contains(&tail.len()) || !tail.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
+    let x = *ids.get(stem)?;
+    let (hx, hd) = (hf.get(x)?, hf.get(id)?);
+    (hx == hd || *hd == format!("{hx}-{tail}")).then_some(x)
 }
 
 /// One demand line: Hugging Face downloads (30 days) and likes.
@@ -268,10 +289,11 @@ impl Wide {
     /// `self.state` afterwards (`index-state.json`).
     pub fn market_json(&mut self, now_ms: u64) -> Result<Value> {
         let from = now_ms.saturating_sub(HOLD_MS);
-        // Aliases: ids sharing a Hugging Face id are one model.
-        let mut groups: BTreeMap<String, Vec<&str>> = BTreeMap::new();
-        for id in self.models.keys() {
-            groups.entry(alias_key(self.hf.get(id).map_or(id.as_str(), |h| h.as_str()))).or_default().push(id);
+        // Aliases: a dated snapshot joins its undated model (`alias_of`).
+        let ids: BTreeSet<&str> = self.models.keys().map(String::as_str).collect();
+        let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for id in &ids {
+            groups.entry(alias_of(id, &ids, &self.hf).unwrap_or(id)).or_default().push(id);
         }
         let models: Vec<Model> = groups
             .into_values()
@@ -285,18 +307,47 @@ impl Wide {
                         v
                     })
                     .collect();
-                Model::group(ids, per)
+                Model::group(ids, per, &self.quotes.prov)
             })
             .collect();
-        if models.iter().all(|m| m.snaps.is_empty()) {
-            bail!("no wide collector data yet");
-        }
         advance(&models, &mut self.state, now_ms);
         let mut demand: HashMap<&str, Vec<&Demand>> = HashMap::new();
         for (m, d) in self.demand.values().flat_map(|f| &f.1) {
             demand.entry(m.as_str()).or_default().push(d);
         }
-        Ok(market(&models, &self.quotes.names, self.state.as_ref(), &demand, now_ms))
+        Ok(market(&models, &self.quotes.names, &self.quotes.prov, self.state.as_ref(), &demand, now_ms))
+    }
+}
+
+/// The market feed of one out dir: loads `index-state.json` when first
+/// needed, and again after a failure, so a bad state file stops only
+/// `market.json` (each run returns the error) until it is fixed.
+pub struct MarketFeed {
+    pub dir: PathBuf,
+    rebase: bool,
+    wide: Option<Wide>,
+}
+
+impl MarketFeed {
+    /// `rebase`: ignore any saved state once and start a new base.
+    pub fn new(dir: PathBuf, rebase: bool) -> Self {
+        Self { dir, rebase, wide: None }
+    }
+
+    /// Read new data, step the index, write `index-state.json` then `market.json`.
+    pub fn run(&mut self, out: &Path, now_ms: u64) -> Result<()> {
+        if self.wide.is_none() {
+            let state = if self.rebase { None } else { IndexState::load(&out.join("index-state.json"))? };
+            self.rebase = false;
+            self.wide = Some(Wide::with_state(state));
+        }
+        let w = self.wide.as_mut().unwrap();
+        w.update(&self.dir, now_ms)?;
+        let market = w.market_json(now_ms)?;
+        if let Some(s) = &w.state {
+            crate::feed::write_atomic(out, "index-state.json", &serde_json::to_value(s)?)?;
+        }
+        crate::feed::write_atomic(out, "market.json", &market)
     }
 }
 
@@ -313,17 +364,21 @@ struct Model<'a> {
     fetched: Vec<&'a Snap>,
     src: Vec<usize>,
     members: Vec<u64>,
-    /// Median of usable quotes, or the last one carried forward.
+    /// Median over distinct providers (held ones included), or the last one
+    /// carried forward.
     median: Vec<Option<f64>>,
+    /// At the newest snapshot: (provider, price) of each provider in the
+    /// median's set, its lowest (held) price.
+    held_now: Vec<(u32, f64)>,
     /// Whether `median` was computed at that snapshot (not carried).
     fresh: Vec<bool>,
 }
 
 /// The prices in a model's median after member `k`'s fetch `s`: every
 /// listing of every member seen up within `HOLD_DOWN_MS`, at its last up
-/// price (so a listing that is down now is held), then one per quote
-/// (provider, quantization): the lowest.
-fn held(s: &Snap, k: usize, up: &mut HashMap<(usize, u32), (u32, f64, u64)>) -> Vec<f64> {
+/// price (so a listing that is down now is held), then one per provider
+/// (across precisions, regions and aliases): its lowest. Sorted by price.
+fn held(s: &Snap, k: usize, prov: &[u32], up: &mut HashMap<(usize, u32), (u32, f64, u64)>) -> Vec<(u32, f64)> {
     for r in s.raw.iter().filter(|r| r.up) {
         if let Some(p) = r.price {
             up.insert((k, r.listing), (r.quote, p, s.at_ms));
@@ -332,11 +387,11 @@ fn held(s: &Snap, k: usize, up: &mut HashMap<(usize, u32), (u32, f64, u64)>) -> 
     up.retain(|_, (_, _, t)| *t <= s.at_ms && s.at_ms - *t <= HOLD_DOWN_MS);
     let mut low: HashMap<u32, f64> = HashMap::new();
     for (q, p, _) in up.values() {
-        let e = low.entry(*q).or_insert(*p);
+        let e = low.entry(prov[*q as usize]).or_insert(*p);
         *e = e.min(*p);
     }
-    let mut v: Vec<f64> = low.into_values().collect();
-    v.sort_by(f64::total_cmp);
+    let mut v: Vec<(u32, f64)> = low.into_iter().collect();
+    v.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
     v
 }
 
@@ -348,7 +403,7 @@ fn usable(s: &Snap) -> Vec<f64> {
 
 impl<'a> Model<'a> {
     /// `ids` shortest first; `per` each id's snapshots in time order.
-    fn group(ids: Vec<&'a str>, per: Vec<Vec<&'a Snap>>) -> Self {
+    fn group(ids: Vec<&'a str>, per: Vec<Vec<&'a Snap>>, prov: &[u32]) -> Self {
         let (mut snaps, mut fetched, mut src, mut members) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         if per.len() == 1 {
             snaps = per[0].iter().map(|s| Cow::Borrowed(*s)).collect();
@@ -368,7 +423,7 @@ impl<'a> Model<'a> {
                 members.push(live.iter().fold(0u64, |m, (j, _)| m | 1u64 << (*j).min(63)));
             }
         }
-        Self::new(ids[0], ids[1..].to_vec(), snaps, fetched, src, members)
+        Self::new(ids[0], ids[1..].to_vec(), snaps, fetched, src, members, prov)
     }
 
     /// The member ids in a bitmask from `members`.
@@ -376,20 +431,21 @@ impl<'a> Model<'a> {
         std::iter::once(self.id).chain(self.aliases.iter().copied()).enumerate().filter(|(j, _)| mask & (1u64 << (*j).min(63)) != 0).map(|(_, id)| id.to_owned()).collect()
     }
 
-    fn new(id: &'a str, aliases: Vec<&'a str>, snaps: Vec<Cow<'a, Snap>>, fetched: Vec<&'a Snap>, src: Vec<usize>, members: Vec<u64>) -> Self {
-        let (mut median, mut fresh, mut last) = (Vec::new(), Vec::new(), None);
+    #[allow(clippy::too_many_arguments)]
+    fn new(id: &'a str, aliases: Vec<&'a str>, snaps: Vec<Cow<'a, Snap>>, fetched: Vec<&'a Snap>, src: Vec<usize>, members: Vec<u64>, prov: &[u32]) -> Self {
+        let (mut median, mut fresh, mut last, mut held_now) = (Vec::new(), Vec::new(), None, Vec::new());
         // (member, listing) → (quote, last up price, when last seen up), for the hold.
         let mut up: HashMap<(usize, u32), (u32, f64, u64)> = HashMap::new();
         for (f, k) in fetched.iter().zip(&src) {
-            let u = held(f, *k, &mut up);
-            let ok = u.len() >= MIN_QUOTES;
+            held_now = held(f, *k, prov, &mut up);
+            let ok = held_now.len() >= MIN_QUOTES;
             if ok {
-                last = Some(percentile(&u, 0.5));
+                last = Some(percentile(&held_now.iter().map(|h| h.1).collect::<Vec<_>>(), 0.5));
             }
             median.push(last);
             fresh.push(ok);
         }
-        Self { id, aliases, snaps, fetched, src, members, median, fresh }
+        Self { id, aliases, snaps, fetched, src, members, median, held_now, fresh }
     }
 
     /// The median at the last snapshot at or before `t`.
@@ -457,6 +513,9 @@ pub struct IndexState {
     pub models: BTreeMap<String, Basket>,
     /// `[t_ms, level]` for the last 30 days; past 8 days, one per hour.
     pub series: Vec<(u64, f64)>,
+    /// The method version that wrote it (0: before versions were saved).
+    #[serde(default)]
+    pub method: u32,
 }
 
 impl IndexState {
@@ -477,10 +536,11 @@ impl IndexState {
 
     /// One step at snapshot `t` with the models in the index now (id →
     /// (median, alias ids listed)). Models leaving: the remaining bases are
-    /// scaled so the level at the last medians is unchanged. Then the level
-    /// is the Jevons index over the models staying. Models joining: base =
-    /// median / (level / 100). A model whose listed aliases changed leaves
-    /// and joins again in the same step.
+    /// scaled so the level at the last inputs is unchanged. Then the level
+    /// is the Jevons index over the models staying, each input being its
+    /// median with the move from its last input capped at `MAX_STEP_RATIO`.
+    /// Models joining: base = median / (level / 100). A model whose listed
+    /// aliases changed leaves and joins again in the same step.
     fn step(&mut self, t: u64, active: &BTreeMap<&str, (f64, Vec<String>)>) {
         let same = |k: &str, b: &Basket, now: &[String]| if b.members.is_empty() { now.len() == 1 && now[0] == k } else { b.members == now };
         let gone: Vec<String> = self.models.iter().filter(|(k, b)| active.get(k.as_str()).is_none_or(|a| !same(k, b, &a.1))).map(|(k, _)| k.clone()).collect();
@@ -494,14 +554,18 @@ impl IndexState {
                 self.models.values_mut().for_each(|b| b.base *= f);
             }
         }
-        // No median moved: the level stays exactly (no float drift after a rescale).
-        if self.models.iter().any(|(k, b)| active[k.as_str()].0 != b.last) {
-            let mean = self.models.iter().map(|(k, b)| (active[k.as_str()].0 / b.base).ln()).sum::<f64>() / self.models.len() as f64;
+        let input = |k: &str, b: &Basket| b.last * (active[k].0 / b.last).clamp(1.0 / MAX_STEP_RATIO, MAX_STEP_RATIO);
+        // No input moved: the level stays exactly (no float drift after a rescale).
+        if self.models.iter().any(|(k, b)| input(k, b) != b.last) {
+            let mean = self.models.iter().map(|(k, b)| (input(k, b) / b.base).ln()).sum::<f64>() / self.models.len() as f64;
             self.level = 100.0 * mean.exp();
+            let inputs: Vec<(String, f64)> = self.models.iter().map(|(k, b)| (k.clone(), input(k, b))).collect();
+            for (k, x) in inputs {
+                self.models.get_mut(&k).unwrap().last = x;
+            }
         }
         for (k, (m, members)) in active {
-            let b = self.models.entry((*k).to_owned()).or_insert_with(|| Basket { base: m / (self.level / 100.0), last: *m, members: members_field(k, members) });
-            b.last = *m;
+            self.models.entry((*k).to_owned()).or_insert_with(|| Basket { base: m / (self.level / 100.0), last: *m, members: members_field(k, members) });
         }
         self.at_ms = t;
         self.series.push((t, self.level));
@@ -548,17 +612,23 @@ fn advance(models: &[Model], state: &mut Option<IndexState>, now_ms: u64) {
         }
     }
     let t_of = |c: &Vec<(u64, usize, usize, usize)>| c.last().unwrap().0;
-    // If a model's median at the last step, recomputed from the data, is not
-    // the saved one (the method changed, e.g. quotes de-duplicated), re-link
-    // its base so the level at that step is unchanged.
-    if let Some(st) = state.as_mut() {
+    // A state from another method version: once, each model's input at the
+    // last step is recomputed from the data and its base scaled by the same
+    // ratio, so the level at that step is unchanged. Never otherwise: a
+    // stepped time is not revisited.
+    if let Some(st) = state.as_mut().filter(|st| st.method != METHOD) {
         for (k, b) in st.models.iter_mut() {
             if let Some(r) = models.iter().find(|m| m.id == k).and_then(|m| m.median_at(st.at_ms)).filter(|r| *r != b.last) {
                 b.base *= r / b.last;
                 b.last = r;
             }
         }
+        st.method = METHOD;
     }
+    // Snapshots up to the last step were used (or were late): for the index,
+    // a model in it keeps its last input until a newer snapshot.
+    let stepped = state.as_ref().map(|s| s.at_ms);
+    let cutoff = now_ms.saturating_sub(STEP_LAG_MS);
     let mut base = None;
     if state.is_none() {
         let Some(t_first) = cycles.first().map(t_of) else { return };
@@ -576,29 +646,32 @@ fn advance(models: &[Model], state: &mut Option<IndexState>, now_ms: u64) {
         }
     }
     let mut cur: Vec<Option<f64>> = vec![None; models.len()];
+    let mut old: Vec<Option<f64>> = vec![None; models.len()];
     let mut last_fresh: Vec<Option<u64>> = vec![None; models.len()];
     let mut listed: Vec<u64> = vec![0; models.len()];
-    for c in &cycles {
+    for c in cycles.iter().take_while(|c| t_of(c) <= cutoff) {
         let t = t_of(c);
+        let done = stepped.is_some_and(|s| t <= s);
         for &(_, m, i, _) in c {
             listed[m] = models[m].members[i];
             if models[m].median[i].is_some() {
-                cur[m] = models[m].median[i];
+                if done { old[m] = models[m].median[i] } else { cur[m] = models[m].median[i] }
             }
             if models[m].fresh[i] {
                 last_fresh[m] = Some(t);
             }
         }
-        if state.as_ref().is_some_and(|s| t <= s.at_ms) || base.is_some_and(|b| t < b) {
+        if done || base.is_some_and(|b| t < b) {
             continue;
         }
+        let input = |m: usize| cur[m].or_else(|| state.as_ref().and_then(|s| s.models.get(models[m].id)).map(|b| b.last)).or(old[m]);
         // In the index: a median, and a fresh one within the last day.
-        let active: BTreeMap<&str, (f64, Vec<String>)> = (0..models.len()).filter_map(|m| Some((models[m].id, (cur[m].filter(|_| last_fresh[m].is_some_and(|f| t - f <= DROP_MS))?, models[m].member_ids(listed[m]))))).collect();
+        let active: BTreeMap<&str, (f64, Vec<String>)> = (0..models.len()).filter_map(|m| Some((models[m].id, (input(m).filter(|_| last_fresh[m].is_some_and(|f| t - f <= DROP_MS))?, models[m].member_ids(listed[m]))))).collect();
         match state {
             Some(s) => s.step(t, &active),
             None => {
                 let models = active.iter().map(|(k, (m, mem))| ((*k).to_owned(), Basket { base: *m, last: *m, members: members_field(k, mem) })).collect();
-                *state = Some(IndexState { v: 1, base_ms: t, at_ms: t, level: 100.0, models, series: vec![(t, 100.0)] });
+                *state = Some(IndexState { v: 1, base_ms: t, at_ms: t, level: 100.0, models, series: vec![(t, 100.0)], method: METHOD });
             }
         }
     }
@@ -651,7 +724,8 @@ fn demand_json(m: &Model, demand: &HashMap<&str, Vec<&Demand>>) -> Value {
     json!({ "hf_downloads_30d": new.downloads, "hf_likes": new.likes, "hf_downloads_change_7d_pct": change, "as_of_ms": new.at_ms })
 }
 
-fn market(models: &[Model], names: &[(String, String)], state: Option<&IndexState>, demand: &HashMap<&str, Vec<&Demand>>, now_ms: u64) -> Value {
+#[allow(clippy::too_many_arguments)]
+fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Option<&IndexState>, demand: &HashMap<&str, Vec<&Demand>>, now_ms: u64) -> Value {
     let day_ago = now_ms.saturating_sub(DAY_MS);
     let (base, series, n_models) = match state {
         Some(s) => (Some(s.base_ms), s.series.as_slice(), s.models.len()),
@@ -666,19 +740,27 @@ fn market(models: &[Model], names: &[(String, String)], state: Option<&IndexStat
     let mut dynamic = Vec::new();
     for m in models {
         let Some(latest) = m.snaps.last() else { continue };
+        // Stale: nothing fetched for this model for 30 minutes; none of its quotes is up.
+        let stale = now_ms.saturating_sub(latest.at_ms) > STALE_MS;
+        let is_up = |r: &Row| r.up && !stale;
         // Uptime: share of the model's snapshots in the last day where the quote was listed and up.
         let recent: Vec<&Snap> = m.snaps.iter().map(|s| &**s).filter(|s| s.at_ms >= day_ago).collect();
         let uptime = |q: u32| -> (usize, usize) { (recent.iter().filter(|s| s.rows.iter().any(|r| r.quote == q && r.up)).count(), recent.len()) };
-        let u = usable(latest);
-        let thin = u.len() < MIN_QUOTES;
+        // min, max and cheapest: quotes up now. median, p25, p75: the index
+        // input's set (one price per provider, held ones included).
+        let u: Vec<f64> = if stale { Vec::new() } else { usable(latest) };
+        let h: Vec<f64> = m.held_now.iter().map(|x| x.1).collect();
+        let thin = h.len() < MIN_QUOTES;
         n_quotes += latest.rows.len();
-        n_up += latest.rows.iter().filter(|r| r.up).count();
-        let carried = *m.median.last().unwrap();
-        let Some(median) = (if thin { carried.or_else(|| (!u.is_empty()).then(|| percentile(&u, 0.5))) } else { Some(percentile(&u, 0.5)) }) else { continue };
-        let stat = |q: f64| if u.is_empty() { median } else { percentile(&u, q) };
-        let cheapest = latest.rows.iter().filter(|r| r.up).filter_map(|r| r.price.map(|p| (r.quote, p))).min_by(|a, b| a.1.total_cmp(&b.1));
+        n_up += latest.rows.iter().filter(|r| is_up(r)).count();
+        let Some(median) = m.median.last().copied().flatten().or_else(|| (!h.is_empty()).then(|| percentile(&h, 0.5))).or_else(|| (!u.is_empty()).then(|| percentile(&u, 0.5))) else { continue };
+        let spread = |q: f64| if h.is_empty() { median } else { percentile(&h, q) };
+        let range = |q: f64| if u.is_empty() { median } else { percentile(&u, q) };
+        let up_provs: BTreeSet<u32> = latest.rows.iter().filter(|r| is_up(r) && r.price.is_some()).map(|r| prov[r.quote as usize]).collect();
+        let quotes_held = m.held_now.iter().filter(|x| !up_provs.contains(&x.0)).count();
+        let cheapest = latest.rows.iter().filter(|r| is_up(r)).filter_map(|r| r.price.map(|p| (r.quote, p))).min_by(|a, b| a.1.total_cmp(&b.1));
         let mut quotes: Vec<(&Row, (usize, usize))> = latest.rows.iter().map(|r| (r, uptime(r.quote))).collect();
-        quotes.sort_by(|a, b| (!a.0.up, a.0.price.is_none()).cmp(&(!b.0.up, b.0.price.is_none())).then(a.0.price.unwrap_or(0.0).total_cmp(&b.0.price.unwrap_or(0.0))));
+        quotes.sort_by(|a, b| (!is_up(a.0), a.0.price.is_none()).cmp(&(!is_up(b.0), b.0.price.is_none())).then(a.0.price.unwrap_or(0.0).total_cmp(&b.0.price.unwrap_or(0.0))));
         let mut listed = BTreeSet::new();
         for (r, (up, of)) in &quotes {
             let p = provs.entry(names[r.quote as usize].0.as_str()).or_default();
@@ -700,15 +782,16 @@ fn market(models: &[Model], names: &[(String, String)], state: Option<&IndexStat
         out_models.push(json!({
             "id": m.id, "aliases": m.aliases, "name": name, "family": family,
             "demand": demand_json(m, demand), "sellers_added_7d": added,
-            "sellers_total": latest.rows.len(), "sellers_up": latest.rows.iter().filter(|r| r.up).count(),
-            "median": median, "p25": stat(0.25), "p75": stat(0.75), "min": stat(0.0), "max": stat(1.0),
-            "thin": thin,
+            "data_ms": latest.at_ms, "stale": stale,
+            "sellers_total": latest.rows.len(), "sellers_up": latest.rows.iter().filter(|r| is_up(r)).count(),
+            "median": median, "p25": spread(0.25), "p75": spread(0.75), "min": range(0.0), "max": range(1.0),
+            "thin": thin, "quotes_held": quotes_held,
             "cheapest": cheapest.map(|(q, p)| json!({ "provider": names[q as usize].0, "quantization": names[q as usize].1, "price": p })),
             "change_24h_pct": pct(median, m.median_at(day_ago)),
             "series": steps(&pts, MODEL_POINTS).iter().map(|p| json!([p.0, p.1])).collect::<Vec<_>>(),
             "quotes": quotes.iter().map(|(r, (up, of))| json!({
                 "provider": names[r.quote as usize].0, "quantization": names[r.quote as usize].1,
-                "price": r.price, "up": r.up, "uptime_24h_pct": (*of > 0).then(|| *up as f64 / *of as f64 * 100.0),
+                "price": r.price, "up": is_up(r), "uptime_24h_pct": (*of > 0).then(|| *up as f64 / *of as f64 * 100.0),
             })).collect::<Vec<_>>(),
         }));
         // Price changes over the last 7 days, per listing of each member id
@@ -753,10 +836,12 @@ fn market(models: &[Model], names: &[(String, String)], state: Option<&IndexStat
         .map(|(name, (ms, q, up, of, cheap))| json!({ "name": name, "models": ms.len(), "quotes": q, "uptime_24h_pct": (*of > 0).then(|| *up as f64 / *of as f64 * 100.0), "cheapest_in": cheap }))
         .collect();
     providers.sort_by(|a, b| b["models"].as_u64().cmp(&a["models"].as_u64()).then(a["name"].as_str().cmp(&b["name"].as_str())));
-    let first = models.iter().filter_map(|m| m.snaps.first()).map(|s| s.at_ms).min().unwrap_or(now_ms);
+    let first = models.iter().filter_map(|m| m.snaps.first()).map(|s| s.at_ms).min();
+    let data_ms = models.iter().filter_map(|m| m.snaps.last()).map(|s| s.at_ms).max();
     json!({
         "generated_ms": now_ms,
-        "window": { "from_ms": first, "to_ms": now_ms },
+        "data_ms": data_ms,
+        "window": { "from_ms": first, "to_ms": data_ms },
         "index": {
             "level": level, "base_ms": base,
             "change_24h_pct": level.and_then(|l| pct(l, at_or_before(series, day_ago))),
@@ -809,7 +894,7 @@ mod tests {
     fn run(dir: &Path, now: u64) -> Value {
         let mut w = Wide::default();
         w.update(dir, now).unwrap();
-        w.market_json(now).unwrap()
+        w.market_json(now + STEP_LAG_MS).unwrap()
     }
 
     fn model<'a>(v: &'a Value, id: &str) -> &'a Value {
@@ -854,7 +939,9 @@ mod tests {
         let v = run(&d, T0 + 6 * MIN);
         let a = model(&v, "x/a");
         // Two usable quotes: the median stays 2, the spread is the two left.
-        assert_eq!((a["thin"].as_bool(), a["median"].as_f64(), a["min"].as_f64(), a["max"].as_f64()), (Some(true), Some(2.0), Some(1.0), Some(4.0)));
+        assert_eq!((a["thin"].as_bool(), a["median"].as_f64(), a["min"].as_f64(), a["max"].as_f64()), (Some(false), Some(2.0), Some(1.0), Some(4.0)));
+        // C is down but held: it still counts, and the card says so.
+        assert_eq!(a["quotes_held"], 1);
         assert_eq!(a["series"], json!([[T0, 2.0], [T0 + 5 * MIN, 2.0]]));
         assert_eq!((a["sellers_total"].as_u64(), a["sellers_up"].as_u64()), (Some(3), Some(2)));
         assert_eq!(a["cheapest"], json!({ "provider": "A", "quantization": "bf16", "price": 1.0 }));
@@ -871,20 +958,20 @@ mod tests {
         let t = [T0, T0 + 5 * MIN, T0 + 25 * HOUR, T0 + 25 * HOUR + 5 * MIN];
         let mut lines = Vec::new();
         for (k, at) in t.iter().enumerate() {
-            lines.push(three("x/a", *at, 1.0, if k == 0 { 2.0 } else { 4.0 })); // doubles at t1
+            lines.push(three("x/a", *at, 1.0, if k == 0 { 2.0 } else { 2.4 })); // +20% at t1
             lines.push(three("x/b", at + 1000, 1.0, 3.0));
             lines.push(three("x/c", at + 2000, 1.0, 5.0));
             if k >= 2 {
-                lines.push(three("x/d", at + 3000, 1.0, if k == 2 { 7.0 } else { 14.0 })); // joins at t2, doubles at t3
+                lines.push(three("x/d", at + 3000, 1.0, if k == 2 { 7.0 } else { 8.4 })); // joins at t2, +20% at t3
             }
         }
         put(&d, &lines);
         let v = run(&d, t[3] + MIN);
-        let l1 = 100.0 * 2f64.powf(1.0 / 3.0);
+        let l1 = 100.0 * 1.2f64.powf(1.0 / 3.0);
         let got = levels(&v);
         assert_eq!(got.len(), 4);
         assert!(close(got[1], l1) && close(got[2], l1), "{got:?}");
-        assert!(close(got[3], l1 * 2f64.powf(0.25)), "{got:?}");
+        assert!(close(got[3], l1 * 1.2f64.powf(0.25)), "{got:?}");
         assert_eq!((v["index"]["n_models"].as_u64(), v["index"]["base_ms"].as_u64()), (Some(4), Some(T0 + 2000)));
         assert!(close(v["index"]["change_24h_pct"].as_f64().unwrap(), (got[3] / l1 - 1.0) * 100.0));
         assert!(close(model(&v, "x/a")["change_24h_pct"].as_f64().unwrap(), 0.0));
@@ -897,26 +984,25 @@ mod tests {
         let t = [T0, T0 + 5 * MIN, T0 + HOUR, T0 + 25 * HOUR + 10 * MIN, T0 + 25 * HOUR + 15 * MIN];
         let mut lines = Vec::new();
         for (k, at) in t.iter().enumerate() {
-            lines.push(three("x/a", *at, 1.0, if k == 0 { 2.0 } else { 4.0 })); // doubles at t1
-            lines.push(three("x/b", at + 1000, 1.0, if k < 4 { 3.0 } else { 6.0 })); // doubles at t4
+            lines.push(three("x/a", *at, 1.0, if k == 0 { 2.0 } else { 2.4 })); // +20% at t1
+            lines.push(three("x/b", at + 1000, 1.0, if k < 4 { 3.0 } else { 3.6 })); // +20% at t4
             lines.push(three("x/c", at + 2000, 1.0, 5.0));
             match k {
                 0 => lines.push(three("x/d", at + 3000, 1.0, 7.0)),
-                1 => lines.push(three("x/d", at + 3000, 1.0, 21.0)), // triples, then goes quiet
-                2 => lines.push(line("x/d", at + 3000, &[("A", 1.0, 0)])), // listed but thin: not fresh
+                1 => lines.push(three("x/d", at + 3000, 1.0, 7.7)), // +10%, then goes quiet
                 _ => {}
             }
         }
         put(&d, &lines);
         let v = run(&d, t[4] + MIN);
         let got = levels(&v);
-        let l1 = 100.0 * (2.0f64 * 3.0).powf(0.25);
+        let l1 = 100.0 * (1.2f64 * 1.1).powf(0.25);
         // The chart keeps both sides of each change: t0, t1, then t3 (D just
-        // dropped, level unchanged) and t4 (B doubled among the three left).
+        // dropped, level unchanged) and t4 (B up 20% among the three left).
         let times: Vec<u64> = v["index"]["series"].as_array().unwrap().iter().map(|p| p[0].as_u64().unwrap()).collect();
         assert_eq!(times, [t[0] + 3000, t[1] + 3000, t[3] + 2000, t[4] + 2000]);
         assert!(close(got[1], l1) && close(got[2], l1), "{got:?}");
-        assert!(close(got[3], l1 * 2f64.powf(1.0 / 3.0)), "{got:?}");
+        assert!(close(got[3], l1 * 1.2f64.powf(1.0 / 3.0)), "{got:?}");
         assert_eq!(v["index"]["n_models"], 3);
     }
 
@@ -1002,7 +1088,8 @@ mod tests {
         // Nothing at all: an error, not a panic.
         let mut w = Wide::default();
         w.update(&d.join("missing"), T0).unwrap();
-        assert!(w.market_json(T0).is_err());
+        let v = w.market_json(T0).unwrap();
+        assert_eq!((v["models"].clone(), v["data_ms"].clone(), v["index"]["level"].clone(), v["index"]["base_ms"].clone()), (json!([]), Value::Null, Value::Null, Value::Null));
     }
 
     #[test]
@@ -1035,31 +1122,31 @@ mod tests {
     fn a_restart_after_a_gap_keeps_base_and_level() {
         let (d, out) = (tmp("restart"), tmp("restart-out"));
         let cycle = |at: u64, a: f64| vec![three("x/a", at, 1.0, a), three("x/b", at + 1000, 1.0, 3.0), three("x/c", at + 2000, 1.0, 5.0)];
-        put(&d, &[cycle(T0, 2.0), cycle(T0 + 5 * MIN, 4.0)].concat());
+        put(&d, &[cycle(T0, 2.0), cycle(T0 + 5 * MIN, 2.4)].concat());
         let mut w = Wide::default();
         w.update(&d, T0 + 6 * MIN).unwrap();
-        w.market_json(T0 + 6 * MIN).unwrap();
-        let l1 = 100.0 * 2f64.powf(1.0 / 3.0);
+        w.market_json(T0 + 6 * MIN + STEP_LAG_MS).unwrap();
+        let l1 = 100.0 * 1.2f64.powf(1.0 / 3.0);
         assert!(close(w.state.as_ref().unwrap().level, l1));
         let saved = reload(&w, &out);
         assert_eq!(saved, w.state);
         // The feed is down for 6 hours while prices move; a new process
         // continues from the saved bases.
-        put(&d, &[cycle(T0 + 3 * HOUR, 8.0), cycle(T0 + 6 * HOUR, 6.0)].concat());
+        put(&d, &[cycle(T0 + 3 * HOUR, 2.88), cycle(T0 + 6 * HOUR, 2.7)].concat());
         let mut again = Wide::with_state(saved);
         again.update(&d, T0 + 6 * HOUR + MIN).unwrap();
-        let v = again.market_json(T0 + 6 * HOUR + MIN).unwrap();
+        let v = again.market_json(T0 + 6 * HOUR + MIN + STEP_LAG_MS).unwrap();
         assert_eq!(v["index"]["base_ms"], T0 + 2000);
-        // Level from the bases alone: A at 6 vs base 2, B and C flat.
-        assert!(close(v["index"]["level"].as_f64().unwrap(), 100.0 * 3f64.powf(1.0 / 3.0)));
+        // Level from the bases alone: A at 2.7 vs base 2, B and C flat.
+        assert!(close(v["index"]["level"].as_f64().unwrap(), 100.0 * 1.35f64.powf(1.0 / 3.0)));
         // The same as a process that never stopped.
         w.update(&d, T0 + 6 * HOUR + MIN).unwrap();
-        let cont = w.market_json(T0 + 6 * HOUR + MIN).unwrap();
+        let cont = w.market_json(T0 + 6 * HOUR + MIN + STEP_LAG_MS).unwrap();
         assert!(close(cont["index"]["level"].as_f64().unwrap(), v["index"]["level"].as_f64().unwrap()));
         assert_eq!(cont["index"]["series"], v["index"]["series"]);
         // Running again over the same data changes nothing.
         let st = again.state.clone();
-        again.market_json(T0 + 6 * HOUR + 2 * MIN).unwrap();
+        again.market_json(T0 + 6 * HOUR + 2 * MIN + STEP_LAG_MS).unwrap();
         assert_eq!(again.state, st);
     }
 
@@ -1070,17 +1157,17 @@ mod tests {
         put(&d, &cycle(T0, 2.0));
         let mut w = Wide::default();
         w.update(&d, T0 + MIN).unwrap();
-        w.market_json(T0 + MIN).unwrap();
+        w.market_json(T0 + MIN + STEP_LAG_MS).unwrap();
         let saved = reload(&w, &out);
         // 40 days on: the first day file is past the 30 days held.
         let later = T0 + 40 * DAY_MS;
-        put(&d, &cycle(later, 4.0));
+        put(&d, &cycle(later, 2.4));
         let mut w = Wide::with_state(saved);
         w.update(&d, later + MIN).unwrap();
         assert_eq!(w.models["x/a"].len(), 1);
-        let v = w.market_json(later + MIN).unwrap();
+        let v = w.market_json(later + MIN + STEP_LAG_MS).unwrap();
         assert_eq!(v["index"]["base_ms"], T0 + 2000);
-        assert!(close(v["index"]["level"].as_f64().unwrap(), 100.0 * 2f64.powf(1.0 / 3.0)));
+        assert!(close(v["index"]["level"].as_f64().unwrap(), 100.0 * 1.2f64.powf(1.0 / 3.0)));
         // Old series points age out with the data; the base does not.
         assert_eq!(v["index"]["series"].as_array().unwrap().len(), 1);
         // Without the state the same data would be a new base at 100.
@@ -1104,10 +1191,34 @@ mod tests {
 
     #[test]
     fn dated_snapshots_are_one_model() {
-        assert_eq!(alias_key("deepseek-ai/DeepSeek-V4-Flash-0731"), "deepseek-ai/deepseek-v4-flash");
-        assert_eq!(alias_key("deepseek/deepseek-v4.1-flash-20261017"), "deepseek/deepseek-v4.1-flash");
-        assert_eq!(alias_key("qwen/qwen3-14b"), "qwen/qwen3-14b");
-        assert_eq!(alias_key("x/model-12"), "x/model-12");
+        // Real hf-map.tsv rows (2026-11-13), lowercased as read, plus the
+        // reviewer's negative cases.
+        let hf: HashMap<String, String> = [
+            ("deepseek/deepseek-v4-flash", "deepseek-ai/deepseek-v4-flash"),
+            ("deepseek/deepseek-v4-flash-0731", "deepseek-ai/deepseek-v4-flash-0731"),
+            ("deepseek/deepseek-v4-pro", "deepseek-ai/deepseek-v4-pro"),
+            ("deepseek/deepseek-v4-pro-0813", "deepseek-ai/deepseek-v4-pro-0813"),
+            ("deepseek/deepseek-v4.1-flash", "deepseek-ai/deepseek-v4.1-flash"),
+            ("deepseek/deepseek-v4.1-flash-1017", "deepseek-ai/deepseek-v4.1-flash-1017"),
+            ("x/same", "x/same-weights"),
+            ("x/same-20261017", "x/same-weights"),
+            ("mistralai/mistral-small-2501", "mistralai/mistral-small-24b-instruct-2501"),
+            ("mistralai/mistral-small-2603", "mistralai/mistral-small-4-2603"),
+            ("qwen/qwen3-235b-a22b", "qwen/qwen3-235b-a22b"),
+            ("qwen/qwen3-235b-a22b-2507", "qwen/qwen3-235b-a22b-instruct-2507"),
+            ("x/nohf-0731", "x/nohf-0731"),
+        ]
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        .into_iter()
+        .collect();
+        let ids: BTreeSet<&str> = hf.keys().map(String::as_str).chain(["x/nohf"]).collect();
+        for (dated, base) in [("deepseek/deepseek-v4-flash-0731", "deepseek/deepseek-v4-flash"), ("deepseek/deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro"), ("deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v4.1-flash"), ("x/same-20261017", "x/same")] {
+            assert_eq!(alias_of(dated, &ids, &hf), Some(base), "{dated}");
+        }
+        // Different releases: no undated id, a different HF repo, or no HF id.
+        for id in ["mistralai/mistral-small-2501", "mistralai/mistral-small-2603", "qwen/qwen3-235b-a22b-2507", "x/nohf-0731", "deepseek/deepseek-v4-flash", "qwen/qwen3-235b-a22b"] {
+            assert_eq!(alias_of(id, &ids, &hf), None, "{id}");
+        }
         let d = tmp("alias");
         std::fs::write(d.join("hf-map.tsv"), "x/flash\tX/Flash\tx/flash-1\nx/flash-0731\tX/Flash-0731\tx/flash-2\nx/other\tX/Other\tx/o\nbad line\n").unwrap();
         let cyc = |at: u64, alias: bool| {
@@ -1165,16 +1276,17 @@ mod tests {
         put(&d, &[cycle(T0, 2.0), cycle(T0 + 5 * MIN, 4.0)].concat());
         let mut w = Wide::default();
         w.update(&d, T0 + 6 * MIN).unwrap();
-        w.market_json(T0 + 6 * MIN).unwrap();
+        w.market_json(T0 + 6 * MIN + STEP_LAG_MS).unwrap();
         // A state saved by an older method: x/a's last median was 3, not 4.
         let mut st = w.state.clone().unwrap();
+        st.method = 0;
         let b = st.models.get_mut("x/a").unwrap();
         (b.base, b.last) = (b.base * 0.75, 3.0);
         let level = st.level;
         put(&d, &cycle(T0 + 10 * MIN, 4.0));
         let mut w = Wide::with_state(Some(st));
         w.update(&d, T0 + 11 * MIN).unwrap();
-        let v = w.market_json(T0 + 11 * MIN).unwrap();
+        let v = w.market_json(T0 + 11 * MIN + STEP_LAG_MS).unwrap();
         assert!(close(v["index"]["level"].as_f64().unwrap(), level));
         assert!(close(w.state.unwrap().models["x/a"].base, 1.0 * 4.0 / 3.0 * 0.75 * 2.0));
     }
@@ -1248,6 +1360,105 @@ mod tests {
     }
 
     #[test]
+    fn a_quiet_collector_shows_as_stale() {
+        let d = tmp("stale");
+        put(&d, &[three("x/a", T0, 1.0, 2.0), three("x/b", T0 + 40 * MIN, 1.0, 2.0)]);
+        let v = run(&d, T0 + 40 * MIN + MIN);
+        assert_eq!((v["data_ms"].as_u64(), v["window"]["to_ms"].as_u64()), (Some(T0 + 40 * MIN), Some(T0 + 40 * MIN)));
+        let a = model(&v, "x/a");
+        assert_eq!((a["data_ms"].as_u64(), a["stale"].as_bool(), a["sellers_up"].as_u64(), a["cheapest"].clone()), (Some(T0), Some(true), Some(0), Value::Null));
+        assert!(a["quotes"].as_array().unwrap().iter().all(|q| q["up"] == false));
+        assert_eq!(model(&v, "x/b")["stale"], false);
+        assert_eq!(v["index"]["n_quotes_up"], 3);
+    }
+
+    #[test]
+    fn a_provider_counts_once() {
+        let d = tmp("provider");
+        // One provider in three regions and two precisions: one seller, thin.
+        let rows: Vec<Value> = [("p/us", "fp8", 1.0), ("p/eu", "fp8", 1.1), ("p/x", "bf16", 3.0)]
+            .iter()
+            .map(|(tag, q, x)| json!({ "provider": "P", "tag": tag, "quantization": q, "prompt": x / 1e6, "completion": x / 1e6, "status": 0 }))
+            .collect();
+        let l = json!({ "at_ms": T0, "model": "x/a", "rows": rows }).to_string();
+        put(&d, &[l, line("x/a", T0 + 5 * MIN, &[("P", 1.0, 0), ("Q", 2.0, 0)]), three("x/b", T0 + 1000, 1.0, 1.0)]);
+        let v = run(&d, T0 + 6 * MIN);
+        let a = model(&v, "x/a");
+        // The listing keeps every quote; the median set is one price per provider.
+        assert_eq!((a["thin"].as_bool(), a["sellers_total"].as_u64()), (Some(true), Some(2)));
+        assert_eq!(v["index"]["n_models"], 1);
+        assert_eq!(a["median"], 1.5);
+    }
+
+    #[test]
+    fn one_model_moves_the_index_by_at_most_a_quarter_per_step() {
+        let d = tmp("cap");
+        // A's median goes 2 → 10 (one absurd jump) and stays.
+        let lines: Vec<String> = (0..10u64).flat_map(|k| [three("x/a", T0 + k * 5 * MIN, 1.0, if k == 0 { 2.0 } else { 10.0 }), three("x/b", T0 + k * 5 * MIN + 1000, 1.0, 3.0)]).collect();
+        put(&d, &lines);
+        let mut w = Wide::default();
+        w.update(&d, T0 + HOUR).unwrap();
+        w.market_json(T0 + HOUR).unwrap();
+        let st = w.state.unwrap();
+        let got: Vec<f64> = st.series.iter().map(|p| p.1).collect();
+        // Input 2 → 2.5 → 3.125 …, capped at 1.25× per step; the level moves by √1.25 a step.
+        for w in got.windows(2) {
+            assert!(w[1] / w[0] <= MAX_STEP_RATIO.sqrt() + 1e-12, "{got:?}");
+        }
+        assert!(close(got[1], 100.0 * 1.25f64.sqrt()));
+        // It catches up: 2 × 1.25^8 > 10.
+        assert_eq!(st.models["x/a"].last, 10.0);
+        assert!(close(*got.last().unwrap(), 100.0 * 5f64.sqrt()));
+    }
+
+    #[test]
+    fn late_snapshots_never_restep_the_index() {
+        let (d, out) = (tmp("late"), tmp("late-out"));
+        let cycle = |at: u64, a: f64| vec![three("x/a", at, 1.0, a), three("x/b", at + 1000, 1.0, 3.0)];
+        put(&d, &[cycle(T0, 2.0), cycle(T0 + 5 * MIN, 2.2)].concat());
+        // At +6 min the second cycle is under 2 minutes old: not stepped yet.
+        let mut w = Wide::default();
+        w.update(&d, T0 + 6 * MIN).unwrap();
+        w.market_json(T0 + 6 * MIN).unwrap();
+        assert_eq!(w.state.as_ref().unwrap().at_ms, T0 + 1000);
+        w.market_json(T0 + 8 * MIN).unwrap();
+        let st = w.state.clone().unwrap();
+        assert_eq!(st.at_ms, T0 + 5 * MIN + 1000);
+        // A snapshot for an already-stepped time arrives late (x/a at +3 min, at 2.6).
+        put(&d, &[three("x/a", T0 + 3 * MIN, 1.0, 2.6)]);
+        let mut again = Wide::with_state(reload(&w, &out));
+        again.update(&d, T0 + 9 * MIN).unwrap();
+        again.market_json(T0 + 9 * MIN).unwrap();
+        assert_eq!(again.state.as_ref().unwrap(), &st);
+        // The next real cycle steps from the saved inputs, not from the late one.
+        put(&d, &cycle(T0 + 10 * MIN, 2.2));
+        again.update(&d, T0 + 13 * MIN).unwrap();
+        again.market_json(T0 + 13 * MIN).unwrap();
+        assert_eq!(again.state.as_ref().unwrap().level, st.level);
+    }
+
+    #[test]
+    fn a_bad_state_stops_only_the_market_file() {
+        let (d, out) = (tmp("bad-state"), tmp("bad-state-out"));
+        put(&d, &[three("x/a", T0, 1.0, 2.0)]);
+        std::fs::write(out.join("index-state.json"), "{").unwrap();
+        let mut f = MarketFeed::new(d.clone(), false);
+        for _ in 0..2 {
+            let e = format!("{:#}", f.run(&out, T0 + 5 * MIN).unwrap_err());
+            assert!(e.contains("--rebase"), "{e}");
+            assert!(!out.join("market.json").exists());
+        }
+        // Fixed (removed): the next run starts a base.
+        std::fs::remove_file(out.join("index-state.json")).unwrap();
+        f.run(&out, T0 + 5 * MIN).unwrap();
+        assert!(out.join("market.json").exists() && out.join("index-state.json").exists());
+        // --rebase over a bad file starts a fresh base at once.
+        std::fs::write(out.join("index-state.json"), "{").unwrap();
+        MarketFeed::new(d, true).run(&out, T0 + 5 * MIN).unwrap();
+        assert!(IndexState::load(&out.join("index-state.json")).unwrap().is_some());
+    }
+
+    #[test]
     fn names_and_families() {
         let want = [
             ("qwen/qwen3.8-27b", "Qwen3.8 27B", "Qwen"),
@@ -1279,7 +1490,9 @@ mod tests {
         // Mistral lists three regional endpoints of one (provider, quantization): one quote.
         assert_eq!((i["n_quotes"].as_u64(), i["n_quotes_up"].as_u64()), (Some(25), Some(22)));
         assert_eq!((i["change_24h_pct"].clone(), i["change_7d_pct"].clone()), (Value::Null, Value::Null));
-        assert_eq!(v["window"], json!({ "from_ms": 1_794_558_705_679u64, "to_ms": now }));
+        // The window ends at the newest snapshot read, not at write time.
+        assert_eq!(v["window"], json!({ "from_ms": 1_794_558_705_679u64, "to_ms": 1_794_559_021_841u64 }));
+        assert_eq!((v["data_ms"].as_u64(), v["generated_ms"].as_u64()), (Some(1_794_559_021_841), Some(now + STEP_LAG_MS)));
         let q = model(&v, "qwen/qwen3.8-27b");
         assert_eq!((q["name"].as_str(), q["sellers_total"].as_u64(), q["sellers_up"].as_u64(), q["thin"].as_bool()), (Some("Qwen3.8 27B"), Some(22), Some(19), Some(false)));
         assert!(close(q["median"].as_f64().unwrap(), 0.296875));

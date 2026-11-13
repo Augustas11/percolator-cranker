@@ -5,27 +5,21 @@
 //!   flop-feed <bots.log> <or-prices dir> <out dir> --oracle <pubkey> [--wide <dir> [--rebase]] [--loop <seconds>]
 //!
 //! With --wide, the index state is kept in <out dir>/index-state.json; an
-//! unreadable one stops the feed unless --rebase starts a fresh base.
+//! unreadable one stops only market.json (logged each run) until it is
+//! fixed or --rebase starts a fresh base. One feed per out dir (lock file).
 
 use anyhow::{bail, Context, Result};
-use flop_index::feed::{write_atomic, Feed};
-use flop_index::wide::{IndexState, Wide};
+use flop_index::feed::{lock_out, write_atomic, Feed};
+use flop_index::wide::MarketFeed;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const USAGE: &str = "usage: flop-feed <bots.log> <or-prices dir> <out dir> --oracle <pubkey> [--wide <dir> [--rebase]] [--loop <seconds>]";
 
-fn once(feed: &mut Feed, wide: &mut Option<(Wide, PathBuf)>, log: &Path, or_dir: &Path, out: &Path) -> Result<()> {
+fn once(feed: &mut Feed, wide: &mut Option<MarketFeed>, log: &Path, or_dir: &Path, out: &Path) -> Result<()> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
     // The market file does not wait for a push line, nor the push files for it.
-    let market = wide.as_mut().map(|(w, dir)| -> Result<()> {
-        w.update(dir, now)?;
-        let market = w.market_json(now)?;
-        if let Some(s) = &w.state {
-            write_atomic(out, "index-state.json", &serde_json::to_value(s)?)?;
-        }
-        write_atomic(out, "market.json", &market)
-    });
+    let market = wide.as_mut().map(|w| w.run(out, now).context("market.json not written"));
     let (latest, history) = feed.build(log, or_dir, now)?;
     write_atomic(out, "history.json", &history)?;
     write_atomic(out, "latest.json", &latest)?;
@@ -62,11 +56,9 @@ fn main() -> Result<()> {
     if rebase && wide_dir.is_none() {
         bail!("--rebase needs --wide");
     }
-    let mut wide = match wide_dir {
-        // Never re-base silently: a state file that is there must load.
-        Some(d) => Some((Wide::with_state(if rebase { None } else { IndexState::load(&out.join("index-state.json"))? }), d)),
-        None => None,
-    };
+    let _lock = lock_out(&out)?;
+    // Never re-base silently: a state file that is there must load.
+    let mut wide = wide_dir.map(|d| MarketFeed::new(d, rebase));
     let Some(every) = every else { return once(&mut feed, &mut wide, &log, &or_dir, &out) };
     if every == 0 {
         bail!("--loop needs at least 1 second");

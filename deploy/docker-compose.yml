@@ -109,13 +109,15 @@ services:
   # reads the FLOP market's push log, the OpenRouter recorder and the wide
   # collector, writes latest.json, history.json and market.json to
   # COMPUTE_FEED_DIR, which indexer-proxy serves at /compute-feed/.
-  # Opt-in: --profile compute-feed.
+  # Opt-in: --profile compute-feed. Compose cannot chown a bind mount: create
+  # the out dir once, owned by the service user:
+  #   install -d -o "$LAUNCH_UID" -g "$LAUNCH_GID" /opt/drip/compute-feed
   compute-feed:
     build: { context: .., dockerfile: deploy/Dockerfile.flop-feed }
     image: flop-feed:local
     restart: unless-stopped
     user: "${LAUNCH_UID:?set LAUNCH_UID}:${LAUNCH_GID:?set LAUNCH_GID}"
-    command: ["/flop-run/bots.log", "/or-prices", "/feed", "--oracle", "${FLOP_ORACLE_PUBKEY:-}", "--wide", "/or-prices-wide", "--loop", "60"]
+    command: ["/flop-run/bots.log", "/or-prices", "/feed", "--oracle", "${FLOP_ORACLE_PUBKEY:?set FLOP_ORACLE_PUBKEY (the FLOP oracle authority pubkey)}", "--wide", "/or-prices-wide", "--loop", "60"]
     volumes:
       - "${FLOP_RUN_DIR:-/opt/drip/flop-devnet}/bots.log:/flop-run/bots.log:ro"
       - "${OR_PRICES_DIR:-/opt/drip/or-prices}:/or-prices:ro"
