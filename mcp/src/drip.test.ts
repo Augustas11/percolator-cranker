@@ -334,6 +334,19 @@ describe("marketOverrides", () => {
     expect(drip.cfg.market.toBase58()).toBe(new Drip({ DRIP_MARKET: "" }).cfg.market.toBase58());
   });
 
+  it("defaults to the devnet compute market", () => {
+    const cfg = new Drip({}).cfg;
+    expect(cfg.market.toBase58()).toBe("uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J");
+    expect(new Drip({}).symbol).toBe("COMPUTE-PERP");
+    expect(new Drip({ DRIP_SYMBOL: " SOL-PERP " }).symbol).toBe("SOL-PERP");
+    expect(cfg.mint.toBase58()).toBe("4NS7ozkPTEisCTSeigw33vjjWkWZ7NechuPddhXnA5Zf");
+    expect(cfg.lpPortfolio.toBase58()).toBe("GcS4f5uCiYozfEtHzmttMKkHab2ympTasA9MvHashhSZ");
+    expect(cfg.matcherProgram?.toBase58()).toBe("8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE");
+    expect(cfg.matcherContext?.toBase58()).toBe("C2uacd9rM16jMBJuseqLByDeVorD6eacaJQKR4seHczq");
+    expect(new Drip({ DRIP_MATCHER_PROGRAM: "8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE" }).cfg.matcherContext?.toBase58())
+      .toBe("C2uacd9rM16jMBJuseqLByDeVorD6eacaJQKR4seHczq");
+  });
+
   it("points the MCP at another market from env", () => {
     const [market, mint, lp, ctx, program] = Array.from({ length: 5 }, () => Keypair.generate().publicKey.toBase58());
     const drip = new Drip({ DRIP_MARKET: market, DRIP_MINT: mint, DRIP_LP_PORTFOLIO: lp, DRIP_MATCHER_CONTEXT: ctx, DRIP_MATCHER_PROGRAM: program });

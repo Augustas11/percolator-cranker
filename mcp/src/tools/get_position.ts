@@ -16,7 +16,7 @@ export default tool({
       wallet_usdc: units(balance), wallet_usdc_atoms: balance.toString(), portfolio: pf?.key.toBase58() ?? null,
       capital: units(capital), capital_atoms: capital.toString(), engine_pnl: units(pnl), engine_pnl_atoms: pnl.toString(),
       equity: units(capital + pnl), equity_atoms: (capital + pnl).toString(), mark_price: units(market.asset0.effectivePrice),
-      position: leg && size ? { symbol: "SOL-PERP", side: leg.side, size_sol: units(size), size_atoms: size.toString() } : null,
+      position: leg && size ? { symbol: drip.symbol, side: leg.side, size_sol: units(size), size_atoms: size.toString() } : null,
     };
   },
 });

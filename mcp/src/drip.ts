@@ -90,12 +90,23 @@ export function checkMatcher(state: ReturnType<typeof parseMatcher>, signedSize:
   if (abs(next) > state.inventoryCap && abs(next) >= abs(state.inventory)) throw new Error("Trade would exceed the LP inventory cap without reducing risk");
 }
 
+/// The built-in market is the devnet compute perp (FLOP oracle). The frontend
+/// config still defaults to the retired SOL-PERP market, so override it here.
+export const computeMarket = {
+  market: new PublicKey("uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J"),
+  mint: new PublicKey("4NS7ozkPTEisCTSeigw33vjjWkWZ7NechuPddhXnA5Zf"),
+  lpPortfolio: new PublicKey("GcS4f5uCiYozfEtHzmttMKkHab2ympTasA9MvHashhSZ"),
+  matcherProgram: new PublicKey("8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE"),
+  matcherContext: new PublicKey("C2uacd9rM16jMBJuseqLByDeVorD6eacaJQKR4seHczq"),
+};
+export const marketDefaults = { ...devnetConfig, ...computeMarket };
+
 /// Market addresses from DRIP_* env, over the frontend defaults. The defaults are
 /// baked at build time (import.meta.env is empty under node), so a market relaunch
 /// would otherwise need a code change. A relaunch sets the full set (market, mint,
 /// LP portfolio, matcher pair). DRIP_MATCHER_PROGRAM / DRIP_MATCHER_CONTEXT = none
 /// disables trading; the matcher program and context are set together or not at all.
-export function marketOverrides(env: NodeJS.ProcessEnv, defaults: Partial<typeof devnetConfig> = devnetConfig) {
+export function marketOverrides(env: NodeJS.ProcessEnv, defaults: Partial<typeof devnetConfig> = marketDefaults) {
   const raw = (name: string) => env[name]?.trim() || undefined;
   const key = (name: string) => {
     const value = raw(name);
@@ -129,11 +140,13 @@ export class Drip {
   readonly cfg;
   readonly conn: Connection;
   readonly apiUrl: string;
+  readonly symbol: string;
   readonly guard;
   private agent?: ReturnType<typeof loadKeypair>;
 
   constructor(private env: NodeJS.ProcessEnv = process.env) {
-    this.cfg = { ...devnetConfig, ...marketOverrides(env), rpcUrl: env.DRIP_RPC_URL || "https://api.devnet.solana.com" };
+    this.cfg = { ...marketDefaults, ...marketOverrides(env), rpcUrl: env.DRIP_RPC_URL || "https://api.devnet.solana.com" };
+    this.symbol = env.DRIP_SYMBOL?.trim() || "COMPUTE-PERP";
     this.apiUrl = (env.DRIP_API_URL || "https://drip-devnet.vercel.app").replace(/\/$/, "");
     this.conn = new Connection(this.cfg.rpcUrl, "confirmed");
     this.guard = genesisGuard(this.conn);
