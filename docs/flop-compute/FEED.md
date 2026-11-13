@@ -134,8 +134,20 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
   (provider, quantization): the usable one with the lowest price, else an up
   one. A provider listing several regional endpoints counts once. Totals
   count after this.
+- **Hold.** A quote that goes down, loses its price or drops out of the
+  listing keeps counting in its model's median, at the last price it was up
+  at, for 6 hours after it was last seen up. If it comes back, it counts at
+  its new price at once; if not, it leaves the median after 6 hours. Why:
+  on the first day of data every one of the 36 model moves behind the 10
+  largest 5-minute index moves was a seller flapping down or up, so the
+  median jumped to a neighbouring price with no price change. Unlike the
+  perp's hold there is no confirm period: most flaps here last 5 to 30
+  minutes, which a 1-hour confirm would not cover, and one quote held in a
+  median of many cannot move a reference index the way it could a mark.
+  The hold feeds the index and each model's `series`; the card's `median`,
+  `p25`..`max` and `quotes` show what is listed now.
 - **Model median.** At each fetch of a model, the median of its usable
-  quotes (mean of the middle two for an even count). Percentiles interpolate
+  quotes (with held ones) (mean of the middle two for an even count). Percentiles interpolate
   linearly between the sorted prices. With fewer than 3 usable quotes the
   last median is carried forward, and `thin` is true while that is the case
   now. On the card, a thin model shows the carried median (or, if it never

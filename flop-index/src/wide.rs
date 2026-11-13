@@ -21,6 +21,9 @@ pub const FULL_RES_MS: u64 = 8 * DAY_MS;
 pub const MIN_QUOTES: usize = 3;
 /// A model without a fresh median for longer than this leaves the index.
 pub const DROP_MS: u64 = DAY_MS;
+/// A quote that goes down, unpriced or unlisted still counts in its model's
+/// median, at its last up price, for this long.
+pub const HOLD_DOWN_MS: u64 = 6 * 3_600_000;
 /// Chart points: index, and per model.
 pub const INDEX_POINTS: usize = 500;
 pub const MODEL_POINTS: usize = 200;
@@ -302,6 +305,20 @@ struct Model<'a> {
     fresh: Vec<bool>,
 }
 
+/// The prices in a model's median at `s`: its usable quotes, plus each quote
+/// seen up within `HOLD_DOWN_MS` that is not usable now, at its last up price.
+fn held(s: &Snap, up: &mut HashMap<u32, (f64, u64)>) -> Vec<f64> {
+    for r in s.rows.iter().filter(|r| r.up) {
+        if let Some(p) = r.price {
+            up.insert(r.quote, (p, s.at_ms));
+        }
+    }
+    up.retain(|_, (_, t)| *t <= s.at_ms && s.at_ms - *t <= HOLD_DOWN_MS);
+    let mut v: Vec<f64> = up.values().map(|(p, _)| *p).collect();
+    v.sort_by(f64::total_cmp);
+    v
+}
+
 fn usable(s: &Snap) -> Vec<f64> {
     let mut v: Vec<f64> = s.rows.iter().filter(|r| r.up).filter_map(|r| r.price).collect();
     v.sort_by(f64::total_cmp);
@@ -338,8 +355,10 @@ impl<'a> Model<'a> {
 
     fn new(id: &'a str, aliases: Vec<&'a str>, snaps: Vec<Cow<'a, Snap>>, src: Vec<usize>, members: Vec<u64>) -> Self {
         let (mut median, mut fresh, mut last) = (Vec::new(), Vec::new(), None);
+        // Quote → (last up price, when last seen up), for the hold.
+        let mut up: HashMap<u32, (f64, u64)> = HashMap::new();
         for s in &snaps {
-            let u = usable(s);
+            let u = held(s, &mut up);
             let ok = u.len() >= MIN_QUOTES;
             if ok {
                 last = Some(percentile(&u, 0.5));
@@ -1134,6 +1153,40 @@ mod tests {
         let v = w.market_json(T0 + 11 * MIN).unwrap();
         assert!(close(v["index"]["level"].as_f64().unwrap(), level));
         assert!(close(w.state.unwrap().models["x/a"].base, 1.0 * 4.0 / 3.0 * 0.75 * 2.0));
+    }
+
+    #[test]
+    fn a_seller_going_down_is_held_for_six_hours() {
+        let d = tmp("hold");
+        // Four sellers: 1, 2, 3, 10. D (10) flaps down and back, then leaves.
+        let snap = |at: u64, d_status: Option<i64>| {
+            let mut rows = vec![("A", 1.0, 0), ("B", 2.0, 0), ("C", 3.0, 0)];
+            if let Some(st) = d_status {
+                rows.push(("D", 10.0, st));
+            }
+            line("x/a", at, &rows)
+        };
+        put(&d, &[
+            snap(T0, Some(0)),
+            snap(T0 + 5 * MIN, Some(-2)), // down
+            snap(T0 + 10 * MIN, None),    // unlisted
+            snap(T0 + 15 * MIN, Some(0)), // back
+            snap(T0 + 20 * MIN, None),    // gone for good
+            snap(T0 + 6 * HOUR + 10 * MIN, None), // last up at +15 min: still held
+            snap(T0 + 6 * HOUR + 20 * MIN, None),
+            three("x/b", T0 + 1000, 1.0, 1.0),
+        ]);
+        let v = run(&d, T0 + 6 * HOUR + 26 * MIN);
+        let a = model(&v, "x/a");
+        // Median of 1, 2, 3, 10 is 2.5 while D counts; 2 once it has been gone over 6 h.
+        assert_eq!(a["series"], json!([[T0, 2.5], [T0 + 6 * HOUR + 10 * MIN, 2.5], [T0 + 6 * HOUR + 20 * MIN, 2.0]]));
+        // The card's spread is what is listed up now.
+        assert_eq!((a["sellers_up"].as_u64(), a["max"].as_f64()), (Some(3), Some(3.0)));
+        // The index moves only when D has really left.
+        let l = levels(&v);
+        assert_eq!(l.first(), Some(&100.0));
+        assert!(close(*l.last().unwrap(), 100.0 * (2.0f64 / 2.5).sqrt()), "{l:?}");
+        assert!(l[..l.len() - 1].iter().all(|x| *x == 100.0), "{l:?}");
     }
 
     #[test]
