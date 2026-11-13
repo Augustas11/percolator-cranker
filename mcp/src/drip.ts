@@ -1,8 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { Connection, Keypair, Transaction, VersionedTransaction } from "@solana/web3.js";
-import type { PublicKey, TransactionInstruction } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
+import type { TransactionInstruction } from "@solana/web3.js";
 import { devnetConfig } from "../../frontend/src/chain/config";
 import { parseMarket, parsePortfolio } from "../../frontend/src/chain/accounts";
 import { i128, u64, u128 } from "../../frontend/src/chain/bytes";
@@ -90,6 +90,33 @@ export function checkMatcher(state: ReturnType<typeof parseMatcher>, signedSize:
   if (abs(next) > state.inventoryCap && abs(next) >= abs(state.inventory)) throw new Error("Trade would exceed the LP inventory cap without reducing risk");
 }
 
+/// Market addresses from DRIP_* env, over the frontend defaults. The defaults are
+/// baked at build time (import.meta.env is empty under node), so a market relaunch
+/// would otherwise need a code change. DRIP_MATCHER_CONTEXT=none disables trading.
+export function marketOverrides(env: NodeJS.ProcessEnv) {
+  const key = (name: string) => {
+    const value = env[name]?.trim();
+    return value ? new PublicKey(value) : undefined;
+  };
+  const out: Partial<typeof devnetConfig> = {};
+  const programId = key("DRIP_PROGRAM_ID"), market = key("DRIP_MARKET");
+  const mint = key("DRIP_MINT"), lpPortfolio = key("DRIP_LP_PORTFOLIO");
+  if (programId) out.programId = programId;
+  if (market) out.market = market;
+  if (mint) out.mint = mint;
+  if (lpPortfolio) out.lpPortfolio = lpPortfolio;
+  const ctx = env.DRIP_MATCHER_CONTEXT?.trim();
+  if (ctx === "none") {
+    out.matcherProgram = undefined;
+    out.matcherContext = undefined;
+  } else if (ctx) {
+    out.matcherContext = new PublicKey(ctx);
+    const program = key("DRIP_MATCHER_PROGRAM");
+    if (program) out.matcherProgram = program;
+  }
+  return out;
+}
+
 export class Drip {
   readonly cfg;
   readonly conn: Connection;
@@ -98,7 +125,7 @@ export class Drip {
   private agent?: ReturnType<typeof loadKeypair>;
 
   constructor(private env: NodeJS.ProcessEnv = process.env) {
-    this.cfg = { ...devnetConfig, rpcUrl: env.DRIP_RPC_URL || "https://api.devnet.solana.com" };
+    this.cfg = { ...devnetConfig, ...marketOverrides(env), rpcUrl: env.DRIP_RPC_URL || "https://api.devnet.solana.com" };
     this.apiUrl = (env.DRIP_API_URL || "https://drip-devnet.vercel.app").replace(/\/$/, "");
     this.conn = new Connection(this.cfg.rpcUrl, "confirmed");
     this.guard = genesisGuard(this.conn);

@@ -5,7 +5,7 @@ import { Keypair, SystemProgram } from "@solana/web3.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { atoms, checkMatcher, DEVNET_GENESIS, Drip, genesisGuard, loadKeypair, parseMatcher, redactRpc, safeError } from "./drip";
+import { atoms, checkMatcher, DEVNET_GENESIS, Drip, genesisGuard, loadKeypair, marketOverrides, parseMatcher, redactRpc, safeError } from "./drip";
 import { createServer } from "./index";
 import { tools as registeredTools } from "./tools";
 import * as tx from "../../frontend/src/chain/tx";
@@ -324,5 +324,30 @@ describe("MCP", () => {
       }
       expect(account).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
     } finally { await client.close(); await server.close(); }
+  });
+});
+
+describe("marketOverrides", () => {
+  it("keeps the defaults when no DRIP_* market env is set", () => {
+    expect(marketOverrides({})).toEqual({});
+    const drip = new Drip({});
+    expect(drip.cfg.market.toBase58()).toBe(new Drip({ DRIP_MARKET: "" }).cfg.market.toBase58());
+  });
+
+  it("points the MCP at another market from env", () => {
+    const [market, mint, lp, ctx, program] = Array.from({ length: 5 }, () => Keypair.generate().publicKey.toBase58());
+    const drip = new Drip({ DRIP_MARKET: market, DRIP_MINT: mint, DRIP_LP_PORTFOLIO: lp, DRIP_MATCHER_CONTEXT: ctx, DRIP_MATCHER_PROGRAM: program });
+    expect(drip.cfg.market.toBase58()).toBe(market);
+    expect(drip.cfg.mint.toBase58()).toBe(mint);
+    expect(drip.cfg.lpPortfolio.toBase58()).toBe(lp);
+    expect(drip.cfg.matcherContext?.toBase58()).toBe(ctx);
+    expect(drip.cfg.matcherProgram?.toBase58()).toBe(program);
+  });
+
+  it("disables trading with DRIP_MATCHER_CONTEXT=none and rejects bad keys", () => {
+    const drip = new Drip({ DRIP_MATCHER_CONTEXT: "none" });
+    expect(drip.cfg.matcherContext).toBeUndefined();
+    expect(drip.cfg.matcherProgram).toBeUndefined();
+    expect(() => new Drip({ DRIP_MARKET: "not-a-key" })).toThrow();
   });
 });
