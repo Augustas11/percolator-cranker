@@ -6,9 +6,9 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// History covers the last 7 days.
@@ -19,6 +19,10 @@ pub const MAX_POINTS: usize = 600;
 pub const MAX_CHANGES: usize = 500;
 /// A recorder silence longer than this is a gap (as `record-or-status`).
 pub const GAP_MS: u64 = 15 * 60_000;
+/// A push line landed further in the future than this is ignored.
+pub const MAX_FUTURE_MS: u64 = 5 * 60_000;
+/// Log lines longer than this are skipped unread (a push line is ~5 KB).
+pub const MAX_LINE: usize = 1 << 20;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Push {
@@ -28,53 +32,120 @@ struct Push {
 }
 
 /// The push log, read incrementally: `update` reads only bytes after the
-/// last complete line it saw, so a loop reads the big log once.
-#[derive(Default)]
+/// last complete line it saw, so a loop reads the big log once. Only lines
+/// naming `oracle` count. The feed trusts the log file: it does not check
+/// signatures (`staging verify-push-log` does).
 pub struct PushLog {
+    oracle: String,
     offset: u64,
+    inode: Option<u64>,
     pushes: Vec<Push>,
+    seen: HashSet<String>,
     latest: Option<Value>,
+}
+
+#[cfg(unix)]
+fn inode(m: &std::fs::Metadata) -> Option<u64> {
+    std::os::unix::fs::MetadataExt::ino(m).into()
+}
+#[cfg(not(unix))]
+fn inode(_: &std::fs::Metadata) -> Option<u64> {
+    None
 }
 
 fn has(line: &[u8], pat: &[u8]) -> bool {
     line.windows(pat.len()).any(|w| w == pat)
 }
 
-impl PushLog {
-    /// Read new complete lines. A shorter file than last time (rotated or
-    /// truncated) starts over. A last line without its newline is left for
-    /// the next call.
-    pub fn update(&mut self, path: &Path) -> Result<()> {
-        let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
-        let len = f.metadata()?.len();
-        if len < self.offset {
-            *self = Self::default();
+/// One log line read by `read_line`.
+enum Line {
+    /// A complete line, in the buffer.
+    Full(usize),
+    /// A complete line over `MAX_LINE`, consumed but not kept.
+    TooLong(usize),
+    /// End of the file, or a last line still being written: wait for more.
+    Partial,
+}
+
+fn read_line(r: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<Line> {
+    buf.clear();
+    let n = r.by_ref().take(MAX_LINE as u64 + 1).read_until(b'\n', buf)?;
+    if buf.last() == Some(&b'\n') {
+        return Ok(Line::Full(n));
+    }
+    if n <= MAX_LINE {
+        return Ok(Line::Partial);
+    }
+    // Too long: skip to the end of the line without keeping it.
+    buf.clear();
+    let mut total = n;
+    loop {
+        let chunk = r.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(Line::Partial);
         }
+        let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        r.consume(take);
+        total += take;
+        if done {
+            return Ok(Line::TooLong(total));
+        }
+    }
+}
+
+impl PushLog {
+    pub fn new(oracle: &str) -> Self {
+        Self { oracle: oracle.to_owned(), offset: 0, inode: None, pushes: Vec::new(), seen: HashSet::new(), latest: None }
+    }
+
+    /// Read new complete lines. A file that got shorter or is a new file
+    /// (rotated) is read from its start; pushes already read are kept and
+    /// de-duplicated by signature. A last line without its newline is left
+    /// for the next call.
+    pub fn update(&mut self, path: &Path, now_ms: u64) -> Result<()> {
+        let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
+        let meta = f.metadata()?;
+        let (len, ino) = (meta.len(), inode(&meta));
+        if len < self.offset || (self.inode.is_some() && ino != self.inode) {
+            self.offset = 0;
+        }
+        self.inode = ino;
         f.seek(SeekFrom::Start(self.offset))?;
         let mut r = BufReader::new(f.take(len - self.offset));
         let mut buf = Vec::new();
         loop {
-            buf.clear();
-            let n = r.read_until(b'\n', &mut buf)?;
-            if n == 0 || buf.last() != Some(&b'\n') {
-                break;
+            match read_line(&mut r, &mut buf)? {
+                Line::Partial => break,
+                Line::TooLong(n) => self.offset += n as u64,
+                Line::Full(n) => {
+                    self.offset += n as u64;
+                    self.ingest(&buf, now_ms);
+                }
             }
-            self.offset += n as u64;
-            self.ingest(&buf);
         }
         Ok(())
     }
 
-    fn ingest(&mut self, line: &[u8]) {
+    fn ingest(&mut self, line: &[u8], now_ms: u64) {
         if !has(line, b"\"event\":\"flop_push\"") {
             return;
         }
         let Ok(v) = serde_json::from_slice::<Value>(line) else { return };
-        if v["event"] != "flop_push" {
+        if v["event"] != "flop_push" || v["oracle"].as_str() != Some(self.oracle.as_str()) {
             return;
         }
         let (Some(landed_ms), Some(mark_e6)) = (v["landed_ms"].as_u64(), v["mark_e6"].as_u64()) else { return };
+        if landed_ms > now_ms + MAX_FUTURE_MS {
+            return;
+        }
         let sig = v["sig"].as_str().unwrap_or_default().to_owned();
+        let key = if sig.is_empty() { format!("{landed_ms}:{mark_e6}") } else { sig.clone() };
+        if !self.seen.insert(key) {
+            return;
+        }
         self.pushes.push(Push { landed_ms, mark_e6, sig });
         if self.latest.as_ref().and_then(|l| l["landed_ms"].as_u64()).is_none_or(|t| landed_ms >= t) {
             self.latest = Some(v);
@@ -85,6 +156,7 @@ impl PushLog {
     fn prune(&mut self, from_ms: u64) {
         self.pushes.retain(|p| p.landed_ms >= from_ms);
         self.pushes.sort_by_key(|p| p.landed_ms);
+        self.seen = self.pushes.iter().map(|p| if p.sig.is_empty() { format!("{}:{}", p.landed_ms, p.mark_e6) } else { p.sig.clone() }).collect();
     }
 }
 
@@ -128,7 +200,8 @@ fn read_snaps(path: &Path) -> Result<Vec<Snap>> {
             rows.into_iter()
                 .filter_map(|row| {
                     let priced = matches!((row.prompt, row.completion), (Some(p), Some(c)) if p.is_finite() && c.is_finite() && p >= 0.0 && c >= 0.0 && p + c > 0.0);
-                    Some((row.provider?, row.quantization.unwrap_or_else(|| "unknown".into()), priced && row.status == Some(0)))
+                    // The pusher reads a missing status as 0 (up).
+                    Some((row.provider?, row.quantization.unwrap_or_else(|| "unknown".into()), priced && row.status.unwrap_or(0) == 0))
                 })
                 .collect()
         });
@@ -257,18 +330,29 @@ pub fn latest_json(line: &Value, now_ms: u64) -> Value {
     })
 }
 
-/// At most `max` points, the last push in each equal time bucket.
+/// Chart points. The mark is a step, so the first and last push plus both
+/// sides of every change draw it exactly. If that is over `max`, each equal
+/// time slice keeps its lowest and highest push, so spikes stay visible.
 fn downsample(pushes: &[Push], max: usize) -> Vec<&Push> {
-    if pushes.len() <= max {
-        return pushes.iter().collect();
+    let n = pushes.len();
+    let mut keep: Vec<usize> = (0..n).filter(|&i| i == 0 || i + 1 == n || pushes[i - 1].mark_e6 != pushes[i].mark_e6 || pushes[i + 1].mark_e6 != pushes[i].mark_e6).collect();
+    if keep.len() > max {
+        let (t0, t1) = (pushes[0].landed_ms, pushes[n - 1].landed_ms);
+        let width = (t1 - t0) / (max as u64 / 2).max(1) + 1;
+        let mut by: BTreeMap<u64, (usize, usize)> = BTreeMap::new();
+        for (i, p) in pushes.iter().enumerate() {
+            let e = by.entry((p.landed_ms - t0) / width).or_insert((i, i));
+            if p.mark_e6 < pushes[e.0].mark_e6 {
+                e.0 = i;
+            }
+            if p.mark_e6 > pushes[e.1].mark_e6 {
+                e.1 = i;
+            }
+        }
+        keep = by.into_values().flat_map(|(a, b)| [a.min(b), a.max(b)]).collect();
+        keep.dedup();
     }
-    let (t0, t1) = (pushes[0].landed_ms, pushes[pushes.len() - 1].landed_ms);
-    let width = (t1 - t0) / max as u64 + 1;
-    let mut by: BTreeMap<u64, &Push> = BTreeMap::new();
-    for p in pushes {
-        by.insert((p.landed_ms - t0) / width, p);
-    }
-    by.into_values().collect()
+    keep.into_iter().map(|i| &pushes[i]).collect()
 }
 
 fn spans(snaps: &[&Snap], tiers: &[&str], now_ms: u64) -> (Vec<Value>, Vec<Value>) {
@@ -325,22 +409,28 @@ fn history_json(pushes: &[Push], snaps: &[&Snap], tiers: &[&str], from_ms: u64, 
     let (outages, recorder_gaps) = spans(snaps, tiers, now_ms);
     json!({
         "v": 1, "generated_ms": now_ms, "from_ms": from_ms, "to_ms": now_ms,
+        "high": pushes.iter().map(|p| p.mark_e6).max().map(usd),
+        "low": pushes.iter().map(|p| p.mark_e6).min().map(usd),
         "points": points, "changes": changes, "outages": outages, "recorder_gaps": recorder_gaps,
     })
 }
 
 /// The feed's state across runs of `--loop`.
-#[derive(Default)]
 pub struct Feed {
     pub log: PushLog,
     pub recorder: Recorder,
 }
 
 impl Feed {
+    /// A feed of the push lines signed for `oracle` (the oracle authority pubkey).
+    pub fn new(oracle: &str) -> Self {
+        Self { log: PushLog::new(oracle), recorder: Recorder::default() }
+    }
+
     /// Read what is new and build (`latest.json`, `history.json`).
     pub fn build(&mut self, log: &Path, or_dir: &Path, now_ms: u64) -> Result<(Value, Value)> {
         let from_ms = now_ms.saturating_sub(WINDOW_MS);
-        self.log.update(log)?;
+        self.log.update(log, now_ms)?;
         self.log.prune(from_ms);
         self.recorder.update(or_dir, from_ms)?;
         let line = self.log.latest.as_ref().context("no flop_push line in the log yet")?;
@@ -357,8 +447,10 @@ impl Feed {
 /// Write `<dir>/<name>` atomically: a temp file in the same directory, then rename.
 pub fn write_atomic(dir: &Path, name: &str, v: &Value) -> Result<()> {
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".{name}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec(v)?).with_context(|| format!("write {}", tmp.display()))?;
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let mut f = File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
+    f.write_all(&serde_json::to_vec(v)?)?;
+    f.sync_all()?;
     std::fs::rename(&tmp, dir.join(name))?;
     Ok(())
 }
@@ -434,31 +526,95 @@ mod tests {
         writeln!(f, "{}", push(NOW - 300_000, 300_000)).unwrap();
         write!(f, "{}", &push(NOW, 310_000)[..200]).unwrap(); // torn last line
         f.flush().unwrap();
-        let mut log = PushLog::default();
-        log.update(&p).unwrap();
+        let mut log = PushLog::new("FLMp");
+        log.update(&p, NOW).unwrap();
         assert_eq!(log.pushes.len(), 2);
         let off = log.offset;
         assert_eq!(off, std::fs::read(&p).unwrap().iter().rposition(|b| *b == b'\n').unwrap() as u64 + 1);
         // The rest of the torn line arrives: only it is read.
         writeln!(f, "{}", &push(NOW, 310_000)[200..]).unwrap();
-        log.update(&p).unwrap();
+        log.update(&p, NOW).unwrap();
         assert_eq!(log.pushes.len(), 3);
         assert_eq!(log.latest.as_ref().unwrap()["mark_e6"], 310_000);
-        // Rotation: a shorter file starts over.
-        std::fs::write(&p, format!("{}\n", push(NOW, 320_000))).unwrap();
-        log.update(&p).unwrap();
-        assert_eq!(log.pushes.len(), 1);
-        assert_eq!(log.latest.as_ref().unwrap()["mark_e6"], 320_000);
     }
 
     #[test]
-    fn history_downsamples_and_lists_changes() {
-        let pushes: Vec<Push> = (0..2000).map(|i| Push { landed_ms: NOW - WINDOW_MS + i * 240_000, mark_e6: if i < 1000 { 300_000 } else { 310_000 }, sig: format!("s{i}") }).collect();
+    fn rotation_keeps_history_and_dedupes_by_sig() {
+        let d = tmp("rotate");
+        let p = d.join("bots.log");
+        std::fs::write(&p, format!("{}\n{}\n{}\n", push(NOW - 900_000, 300_000), push(NOW - 600_000, 300_000), push(NOW - 300_000, 300_000))).unwrap();
+        let mut log = PushLog::new("FLMp");
+        log.update(&p, NOW).unwrap();
+        // Shorter file holding one line already read and a new one.
+        std::fs::write(&p, format!("{}\n{}\n", push(NOW - 300_000, 300_000), push(NOW, 320_000))).unwrap();
+        log.update(&p, NOW).unwrap();
+        assert_eq!(log.pushes.iter().map(|p| p.landed_ms).collect::<Vec<_>>(), vec![NOW - 900_000, NOW - 600_000, NOW - 300_000, NOW]);
+        // A new file (new inode) as long as the old offset: read from its start too.
+        let fresh = d.join("bots.log.new");
+        std::fs::write(&fresh, format!("{}\n{}\n", push(NOW, 320_000), push(NOW + 60_000, 330_000))).unwrap();
+        std::fs::rename(&fresh, &p).unwrap();
+        log.update(&p, NOW + 60_000).unwrap();
+        assert_eq!(log.pushes.len(), 5);
+        assert_eq!(log.latest.as_ref().unwrap()["mark_e6"], 330_000);
+    }
+
+    #[test]
+    fn only_the_expected_oracle_and_no_future_lines() {
+        let d = tmp("oracle");
+        let p = d.join("bots.log");
+        let forged = push(NOW - 60_000, 1).replace("\"oracle\":\"FLMp\"", "\"oracle\":\"Evil\"");
+        std::fs::write(&p, format!("{}\n{forged}\n{}\n{}\n", push(NOW - 120_000, 300_000), push(NOW + MAX_FUTURE_MS + 1, 2), push(NOW + MAX_FUTURE_MS, 310_000))).unwrap();
+        let mut log = PushLog::new("FLMp");
+        log.update(&p, NOW).unwrap();
+        assert_eq!(log.pushes.iter().map(|p| p.mark_e6).collect::<Vec<_>>(), vec![300_000, 310_000]);
+        assert_eq!(log.latest.as_ref().unwrap()["mark_e6"], 310_000);
+    }
+
+    #[test]
+    fn over_long_lines_are_skipped() {
+        let d = tmp("long");
+        let p = d.join("bots.log");
+        let long = format!("{{\"event\":\"flop_push\",\"pad\":\"{}\"}}", "x".repeat(MAX_LINE + 10));
+        let mut f = File::create(&p).unwrap();
+        writeln!(f, "{long}").unwrap();
+        writeln!(f, "{}", push(NOW, 300_000)).unwrap();
+        write!(f, "{long}").unwrap(); // long and not finished yet
+        f.flush().unwrap();
+        let mut log = PushLog::new("FLMp");
+        log.update(&p, NOW).unwrap();
+        assert_eq!(log.pushes.len(), 1);
+        assert_eq!(log.offset as usize, long.len() + 1 + push(NOW, 300_000).len() + 1);
+        writeln!(f).unwrap();
+        writeln!(f, "{}", push(NOW + 1000, 310_000)).unwrap();
+        log.update(&p, NOW).unwrap();
+        assert_eq!(log.pushes.len(), 2);
+    }
+
+    #[test]
+    fn history_keeps_every_step_and_spike() {
+        // One short spike among 2000 flat pushes.
+        let pushes: Vec<Push> = (0..2000u64).map(|i| Push { landed_ms: NOW - WINDOW_MS + i * 240_000, mark_e6: match i { 0..1000 => 300_000, 1000 => 900_000, _ => 310_000 }, sig: format!("s{i}") }).collect();
         let h = history_json(&pushes, &[], &["bf16"], NOW - WINDOW_MS, NOW);
-        let pts = h["points"].as_array().unwrap();
-        assert!(pts.len() <= MAX_POINTS && pts.len() > MAX_POINTS / 2, "{}", pts.len());
-        assert_eq!(pts.last().unwrap()[0], pushes[1999].landed_ms);
-        assert_eq!(h["changes"], json!([{ "t_ms": pushes[1000].landed_ms, "from": 0.3, "to": 0.31, "sig": "s1000" }]));
+        let pts: Vec<(u64, f64)> = h["points"].as_array().unwrap().iter().map(|p| (p[0].as_u64().unwrap(), p[1].as_f64().unwrap())).collect();
+        let t = |i: usize| pushes[i].landed_ms;
+        assert_eq!(pts, vec![(t(0), 0.3), (t(999), 0.3), (t(1000), 0.9), (t(1001), 0.31), (t(1999), 0.31)]);
+        assert_eq!((h["high"].as_f64(), h["low"].as_f64()), (Some(0.9), Some(0.3)));
+        assert_eq!(h["changes"][0], json!({ "t_ms": t(1000), "from": 0.3, "to": 0.9, "sig": "s1000" }));
+        assert_eq!(h["changes"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn many_changes_bucket_by_low_and_high() {
+        // Every push changes; a spike must survive the slicing.
+        let pushes: Vec<Push> = (0..2000u64).map(|i| Push { landed_ms: NOW - WINDOW_MS + i * 240_000, mark_e6: if i == 777 { 5_000_000 } else { 300_000 + i % 2 }, sig: format!("s{i}") }).collect();
+        let pts = downsample(&pushes, MAX_POINTS);
+        assert!(pts.len() <= MAX_POINTS, "{}", pts.len());
+        assert!(pts.iter().any(|p| p.mark_e6 == 5_000_000));
+        assert!(pts.windows(2).all(|w| w[0].landed_ms < w[1].landed_ms));
+        assert_eq!(pts.first().unwrap().landed_ms, pushes[0].landed_ms);
+        // Flat history: no NaN-prone output, just the ends.
+        let flat: Vec<Push> = (0..3u64).map(|i| Push { landed_ms: i, mark_e6: 1, sig: String::new() }).collect();
+        assert_eq!(downsample(&flat, MAX_POINTS).len(), 2);
     }
 
     #[test]
@@ -478,6 +634,15 @@ mod tests {
             json!({ "provider": "GMICloud", "quantization": "bf16", "from_ms": t0 + 1_200_000, "to_ms": null }),
         ]);
         assert_eq!(gaps, vec![json!({ "from_ms": t0 + 1_200_000, "to_ms": t0 + 3_000_000 })]);
+        // A null status is up, as the pusher reads it.
+        let nulls = rec(t0, 0).replace("\"status\":0", "\"status\":null");
+        let d2 = tmp("rec-null");
+        std::fs::write(d2.join(format!("{}.jsonl", day(t0))), format!("{nulls}\n{}\n", rec(t0 + 300_000, 0).replace("\"status\":0", "\"status\":null"))).unwrap();
+        let mut r2 = Recorder::default();
+        r2.update(&d2, NOW - WINDOW_MS).unwrap();
+        let snaps = r2.snaps(NOW - WINDOW_MS);
+        assert!(snaps[0].sellers.as_ref().unwrap().iter().filter(|s| s.0 != "Darkbloom").all(|s| s.2));
+        assert!(spans(&snaps, &["bf16"], t0 + 300_000).0.is_empty());
         // A missing directory is no data.
         r.update(&d.join("nope"), 0).unwrap();
         assert!(r.snaps(0).is_empty());
@@ -487,17 +652,33 @@ mod tests {
     fn build_writes_both_files_atomically() {
         let d = tmp("build");
         std::fs::write(d.join("bots.log"), format!("{}\n{}\n", push(NOW - 300_000, 300_000), push(NOW, 303_551))).unwrap();
-        let mut feed = Feed::default();
+        let mut feed = Feed::new("FLMp");
         let (l, h) = feed.build(&d.join("bots.log"), &d.join("or-prices"), NOW + 1000).unwrap();
         assert_eq!(l["landed_ms"], NOW);
         assert_eq!(h["points"].as_array().unwrap().len(), 2);
         write_atomic(&d.join("out"), "latest.json", &l).unwrap();
         let back: Value = serde_json::from_slice(&std::fs::read(d.join("out/latest.json")).unwrap()).unwrap();
         assert_eq!(back, l);
-        assert!(!d.join("out/.latest.json.tmp").exists());
+        assert!(std::fs::read_dir(d.join("out")).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
         // No push yet: an error, not a panic.
         std::fs::write(d.join("empty.log"), "hello\n").unwrap();
-        assert!(Feed::default().build(&d.join("empty.log"), &d, NOW).is_err());
+        assert!(Feed::new("FLMp").build(&d.join("empty.log"), &d, NOW).is_err());
+    }
+
+    #[test]
+    fn deploy_serves_the_feed_read_only() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../deploy/");
+        let nginx = std::fs::read_to_string(format!("{root}indexer-nginx.conf")).unwrap();
+        let route = &nginx[nginx.find("location /compute-feed/ {").expect("nginx route")..];
+        let route = &route[..route.find("\n    }").unwrap()];
+        for want in ["limit_except GET { deny all; ", "alias /srv/compute-feed/;", "Cache-Control \"no-store\""] {
+            assert!(route.contains(want), "{want}");
+        }
+        let compose = std::fs::read_to_string(format!("{root}docker-compose.yml")).unwrap();
+        assert!(compose.contains(":/srv/compute-feed:ro\""));
+        assert!(compose.contains("dockerfile: deploy/Dockerfile.flop-feed"));
+        assert!(compose.contains("\"--oracle\", \"${FLOP_ORACLE_PUBKEY:-}\""));
+        assert!(std::fs::read_to_string(format!("{root}Dockerfile.flop-feed")).unwrap().contains("--bin flop-feed"));
     }
 
     #[test]

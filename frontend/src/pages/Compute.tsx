@@ -22,14 +22,17 @@ function Chart({ history }: { history: ComputeHistory }) {
   const { points, from_ms: from, to_ms: to } = history;
   if (points.length === 0) return <p className="note">No prices in the last 7 days.</p>;
   const values = points.map(p => p[1]);
-  let lo = Math.min(...values), hi = Math.max(...values);
-  if (hi - lo < hi * 0.01) { lo -= hi * 0.01; hi += hi * 0.01; }
+  const high = history.high ?? Math.max(...values), low = history.low ?? Math.min(...values);
+  // A flat (or near-flat) history gets a band around it, so the scale never divides by zero.
+  const band = Math.max(Math.abs(high) * 0.01, 1e-6);
+  let lo = Math.min(low, ...values), hi = Math.max(high, ...values);
+  if (hi - lo < band) { lo -= band; hi += band; }
   const W = 640, H = 200, pad = 12, span = Math.max(1, to - from);
   const x = (t: number) => Math.min(W, Math.max(0, (t - from) / span * W));
   const y = (v: number) => H - pad - (v - lo) / (hi - lo) * (H - 2 * pad);
   // The mark is a step: it holds until the next push changes it.
   const d = points.map(([t, v], i) => i === 0 ? `M${x(t)} ${y(v)}` : `H${x(t)} V${y(v)}`).join(" ") + ` H${x(points[points.length - 1][0])}`;
-  const label = `Price over the last 7 days: from ${money(values[0])} to ${money(values[values.length - 1])}, low ${money(Math.min(...values))}, high ${money(Math.max(...values))}.`
+  const label = `Price over the last 7 days: from ${money(values[0])} to ${money(values[values.length - 1])}, low ${money(low)}, high ${money(high)}.`
     + (history.outages.length ? ` ${history.outages.length} seller outage(s) marked.` : "");
   return <figure className="compute-chart">
     <svg role="img" aria-label={label} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
@@ -37,7 +40,7 @@ function Chart({ history }: { history: ComputeHistory }) {
       {history.outages.map(o => <rect key={`${o.provider}-${o.quantization}-${o.from_ms}`} className="chart-outage" x={x(o.from_ms)} y={0} width={Math.max(1, x(o.to_ms ?? to) - x(o.from_ms))} height={H} />)}
       <path d={d} className="chart-line" vectorEffect="non-scaling-stroke" />
     </svg>
-    <figcaption className="chart-axis"><span>{when(from)}</span><span>high {money(Math.max(...values))} · low {money(Math.min(...values))}</span><span>{when(to)}</span></figcaption>
+    <figcaption className="chart-axis"><span>{when(from)}</span><span>high {money(high)} · low {money(low)}</span><span>{when(to)}</span></figcaption>
   </figure>;
 }
 
@@ -53,15 +56,27 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
     setHistory(null);
     setError("");
     if (!feed) return;
-    const refresh = () => Promise.all([feed.latest(), feed.history()]).then(
-      ([l, h]) => { if (active) { setLatest(l); setHistory(h); setError(""); setNow(Date.now()); } },
-      e => { if (active) { setError(e instanceof Error ? e.message : "price feed request failed"); setNow(Date.now()); } });
+    // Settled separately: a failed history.json must not hide a fresh latest.json.
+    const refresh = () => Promise.allSettled([feed.latest(), feed.history()]).then(([l, h]) => {
+      if (!active) return;
+      if (l.status === "fulfilled") setLatest(l.value);
+      if (h.status === "fulfilled") setHistory(h.value);
+      const failed = [l, h].find(r => r.status === "rejected");
+      setError(failed ? (failed.reason instanceof Error ? failed.reason.message : "price feed request failed") : "");
+      setNow(Date.now());
+    });
     void refresh();
     const timer = setInterval(() => void refresh(), REFRESH_MS);
     return () => { active = false; clearInterval(timer); };
   }, [feed]);
 
-  const stale = latest !== null && now - latest.landed_ms > STALE_MS;
+  // Stale if the feed's last push is old by the feed's own clock, the feed
+  // itself stopped updating, or the push claims a time after the feed's.
+  const staleWhy = !latest ? null
+    : now - latest.generated_ms > STALE_MS ? "The price feed has not updated for over 30 minutes."
+    : latest.landed_ms > latest.generated_ms + 5 * 60_000 ? "The latest price has a time in the future."
+    : latest.generated_ms - latest.landed_ms > STALE_MS ? "No new price for over 30 minutes." : null;
+  const openrouter = latest?.source === "openrouter";
   const inTable = latest ? [
     ...latest.pricing_set.map(r => ({ ...r, used: r.priced as number | null })),
     ...latest.sellers.filter(s => s.tier && !s.in_set).map(s => ({ provider: s.provider, quantization: s.quantization, listed: s.blended, used: null, up: s.up })),
@@ -79,7 +94,7 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
         : <>
           <div className="compute-price"><strong>{money(latest.mark_usd)}</strong><span>per 1M tokens</span></div>
           <p className="note">Updated {ago(latest.landed_ms, now)} ({when(latest.landed_ms)}).
-            {stale && <> <span className="badge compute-stale">stale</span> No new price for over 30 minutes.</>}</p>
+            {staleWhy && <> <span className="badge compute-stale">stale</span> {staleWhy}</>}</p>
           {error && <p role="status" className="note">Could not refresh ({error}). Showing the last price received.</p>}
         </>}
     </section>
@@ -122,17 +137,23 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
           ["From FLOP's own gateway", flop.gateway_share == null ? "—" : `${Math.round(flop.gateway_share * 100)}%`],
         ] as const).map(([label, value]) => <div key={label}><div className="fact-label">{label}</div><div className="fact-value">{value}</div></div>)}</div>
         {flop.stale && <p className="note">Not computed right now: {flop.stale}.</p>}
-        <p>Today this is FLOP's listed rate, not a traded price. It does not set the price above.</p>
+        {openrouter ? <p>Today this is FLOP's listed rate, not a traded price. It does not set the price above.</p>
+          : <p>This sets the price above right now, converted to USD at a fixed stand-in rate.</p>}
       </section>}
 
       <section aria-labelledby="compute-how-heading">
         <h2 id="compute-how-heading">How the price is made</h2>
         <ul>
-          <li>Source: OpenRouter's public seller list for Qwen3.8-27B, read every 5 minutes.</li>
-          <li>Each seller's price mixes input and output {latest.blend_in_out}:1. Cheaper sellers weigh more (1 ÷ price²), as OpenRouter routes by default.</li>
-          <li>Only sellers that are up count: bf16 first; with fewer than 2, fp16, then both, then all.</li>
-          <li>With 3 or more sellers, a price under half the median counts as half the median. Now: {latest.clamp ?? "unknown"}.</li>
-          <li>No fresh list for 30 minutes: no new price.</li>
+          {openrouter ? <>
+            <li>Source: OpenRouter's public seller list for Qwen3.8-27B, read every 5 minutes.</li>
+            <li>Each seller's price mixes input and output {latest.blend_in_out}:1. Cheaper sellers weigh more (1 ÷ price²), as OpenRouter routes by default.</li>
+            <li>Only sellers that are up count: bf16 first; with fewer than 2, fp16, then both, then all.</li>
+            <li>With 3 or more sellers, a price under half the median counts as half the median. Now: {latest.clamp ?? "unknown"}.</li>
+            <li>No fresh list for 30 minutes: no new price.</li>
+          </> : <>
+            <li>Source right now: FLOP's on-chain price ({latest.source ?? "unknown"}), converted to USD at a fixed stand-in rate, not a market rate.</li>
+            <li>The seller table shows the last OpenRouter list in this push, if any; it does not set this price.</li>
+          </>}
           {latest.sig && <li>Each price is written to a Solana devnet test market. Latest: <a href={txUrl(latest.sig)} target="_blank" rel="noreferrer">{short(latest.sig)}</a>.</li>}
           <li>Every price is logged as a signed line; <code>staging verify-push-log</code> recomputes it from the logged sellers.</li>
           <li>Test market, test tokens. Independent of Flop Labs.</li>

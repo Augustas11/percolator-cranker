@@ -31,7 +31,7 @@ export class MockComputeFeedClient implements ComputeFeedClient {
     const from = this.now - 168 * HOUR;
     const points: [number, number][] = Array.from({ length: 168 }, (_, i) => [from + i * HOUR, i < 140 ? 0.311224 : 0.303551]);
     return {
-      v: 1, generated_ms: this.now, from_ms: from, to_ms: this.now, points,
+      v: 1, generated_ms: this.now, from_ms: from, to_ms: this.now, high: 0.311224, low: 0.303551, points,
       changes: [{ t_ms: from + 140 * HOUR, from: 0.311224, to: 0.303551, sig: "mock-change-signature" }],
       outages: [{ provider: "GMICloud", quantization: "bf16", from_ms: from + 139 * HOUR, to_ms: null }],
       recorder_gaps: [],

@@ -33,6 +33,9 @@ export interface ComputeHistory {
   generated_ms: number;
   from_ms: number;
   to_ms: number;
+  /** Highest and lowest mark over every push in the window (null when none). */
+  high: number | null;
+  low: number | null;
   points: [number, number][];
   changes: { t_ms: number; from: number; to: number; sig: string }[];
   outages: { provider: string; quantization: string; from_ms: number; to_ms: number | null }[];

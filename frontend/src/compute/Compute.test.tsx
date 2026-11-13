@@ -91,3 +91,49 @@ test("shows the repo link only when configured", async () => {
     expect(container.querySelector('a[href="https://example.invalid/repo"]')).not.toBeNull();
   } finally { site.computeRepo = repo; }
 });
+
+test("is stale when the feed itself stopped or the push time is in the future", async () => {
+  const feed = new MockComputeFeedClient();
+  const base = await feed.latest();
+  const old = Date.now() - 31 * 60_000;
+  vi.spyOn(feed, "latest").mockResolvedValue({ ...base, generated_ms: old, landed_ms: old - 60_000 });
+  let container = await render(feed);
+  expect(container.querySelector(".compute-stale")?.textContent).toBe("stale");
+  expect(container.textContent).toContain("The price feed has not updated for over 30 minutes.");
+  await cleanup?.();
+  vi.spyOn(feed, "latest").mockResolvedValue({ ...base, landed_ms: base.generated_ms + 6 * 60_000 });
+  container = await render(feed);
+  expect(container.textContent).toContain("The latest price has a time in the future.");
+});
+
+test("a failed history.json still shows a fresh latest.json", async () => {
+  const feed = new MockComputeFeedClient();
+  vi.spyOn(feed, "history").mockRejectedValue(new Error("price feed 404"));
+  const container = await render(feed);
+  expect(container.querySelector(".compute-price strong")?.textContent).toBe("$0.3036");
+  expect(container.textContent).toContain("No history yet.");
+  expect(container.textContent).toContain("Could not refresh (price feed 404).");
+});
+
+test("chart uses the feed's high and low and survives a flat history", async () => {
+  const feed = new MockComputeFeedClient();
+  const h = await feed.history();
+  vi.spyOn(feed, "history").mockResolvedValue({ ...h, high: 0.9, low: 0.3 });
+  let container = await render(feed);
+  expect(container.querySelector(".chart-axis")?.textContent).toContain("high $0.9000 · low $0.3000");
+  await cleanup?.();
+  vi.spyOn(feed, "history").mockResolvedValue({ ...h, high: 0, low: 0, points: [[h.from_ms, 0], [h.to_ms, 0]], outages: [] });
+  container = await render(feed);
+  expect(container.querySelector(".chart-line")?.getAttribute("d")).not.toContain("NaN");
+});
+
+test("a flop_standin price explains its own source", async () => {
+  const feed = new MockComputeFeedClient();
+  const base = await feed.latest();
+  vi.spyOn(feed, "latest").mockResolvedValue({ ...base, source: "flop_standin" });
+  const container = await render(feed);
+  const how = container.querySelector('[aria-labelledby="compute-how-heading"]')!;
+  expect(how.textContent).toContain("Source right now: FLOP's on-chain price (flop_standin)");
+  expect(how.textContent).not.toContain("OpenRouter's public seller list");
+  expect(container.querySelector('[aria-labelledby="compute-flop-heading"]')!.textContent).toContain("This sets the price above right now");
+});
