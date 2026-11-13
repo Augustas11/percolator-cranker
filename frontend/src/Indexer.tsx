@@ -12,6 +12,45 @@ export const fixed = (value: string) => {
 export const UNREACHABLE = "The indexer is unreachable right now. Try again in a minute.";
 export const OTHER_MARKET = `The indexer reads a different market, not ${PERP.name}.`;
 
+const usdFormat = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+
+/**
+ * Open interest as text: USD and units when both are above zero, either one alone when only it is, null when neither.
+ * The indexer's USD figure can read 0 while units are open (no price at the last change), so a zero USD is left out.
+ */
+export function openInterestText(usdAtoms: string | null | undefined, units: number | null | undefined) {
+  const usd = usdAtoms == null ? NaN : fixed(usdAtoms);
+  const u = units ?? NaN;
+  const parts = [Number.isFinite(usd) && usd > 0 ? usdFormat.format(usd) : null, Number.isFinite(u) && u > 0 ? `${number(u)} ${PERP.unitShort}` : null].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+/** Open units on the market's first asset from /stats, or null. */
+export function openUnits(stats: Stats | null | undefined) {
+  const oi = stats ? Object.values(stats.open_interest ?? {})[0] : undefined;
+  const u = oi ? fixed(oi.long_q) : NaN;
+  return Number.isFinite(u) ? u : null;
+}
+
+/**
+ * The same-market guard: reads /stats every 30 s and hands back the indexer only while it serves this market.
+ * `indexer` is null until the first read confirms the market, and stays null when it reads another one.
+ */
+export function useMarketGuard(indexer: IndexerClient | null, market = devnetConfig.market.toBase58()) {
+  const [stats, setStats] = useState<Stats | null>(null);
+  useEffect(() => {
+    let active = true;
+    setStats(null);
+    if (!indexer) return;
+    const run = async () => { try { const s = await indexer.stats(); if (active) setStats(s); } catch { /* keep the last read */ } };
+    void run();
+    const timer = setInterval(() => void run(), 30_000);
+    return () => { active = false; clearInterval(timer); };
+  }, [indexer]);
+  const same = stats !== null && stats.market === market;
+  return { stats: same ? stats : null, wrongMarket: stats !== null && !same, indexer: same ? indexer : null };
+}
+
 export type OwnFill = Fills["fills"][number] & { portfolio: string };
 
 export interface TradeIndexer {

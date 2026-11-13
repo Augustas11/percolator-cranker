@@ -280,8 +280,8 @@ test("home renders recent fills and live season totals", async () => {
   expect(link.getAttribute("target")).toBe("_blank");
   expect(link.getAttribute("rel")).toBe("noreferrer");
   const season = container.querySelector('[aria-label="Arena stats"]')!;
-  expect(Array.from(season.querySelectorAll(".fact-label"), el => el.textContent)).toEqual(["Traders", "Fills", "Volume (USD)", "Open interest (USD)"]);
-  expect(Array.from(season.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["7", "214", "$18,640", "$157.90"]);
+  expect(Array.from(season.querySelectorAll(".fact-label"), el => el.textContent)).toEqual(["Traders", "Fills", "Volume (USD)", "Open interest"]);
+  expect(Array.from(season.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["7", "214", "$18,640", "$157.90 · 250 Mtok"]);
   expect(season.textContent).toContain("devnet · since " + new Date(1793232000 * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }));
 });
 
@@ -306,19 +306,21 @@ test.each(["rejects", "missing", "none", "empty"])("home handles unavailable dat
   expect(container.querySelector(".recent-trades")?.textContent).toBe("Recent fillsNo fills yet. Trade or connect an agent.");
   expect(container.querySelector('.recent-trades a[href="/trade"]')?.textContent).toBe("Trade");
   expect(container.querySelector('.recent-trades a[href="/agents"]')?.textContent).toBe("connect an agent");
-  expect(Array.from(container.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["—", "—", "—", "—"]);
-  expect(container.querySelector(".fact-note")?.textContent).toBe("devnet");
+  // No season read: no tiles and no placeholder dashes.
+  expect(container.querySelector('[aria-label="Arena stats"]')).toBeNull();
+  expect(container.querySelectorAll(".fact-value")).toHaveLength(0);
 });
 
 test.each([
-  ["0", "0", "$0.00", "$0.00"],
-  ["bad", "broken", "—", "—"],
-  ["9007199254740993000000", "12345678", "$9,007,199,254,740,993", "$12.35"],
-])("home formats season atoms %s and %s", async (volume, interest, expectedVolume, expectedInterest) => {
+  // Open interest drops a zero USD figure but keeps the open units; an unreadable figure hides its tile.
+  ["0", "0", ["0", "0", "$0.00", "250 Mtok"]],
+  ["bad", "broken", ["0", "0", "250 Mtok"]],
+  ["9007199254740993000000", "12345678", ["0", "0", "$9,007,199,254,740,993", "$12.35 · 250 Mtok"]],
+])("home formats season atoms %s and %s", async (volume, interest, expected) => {
   const indexer = new MockIndexerClient();
   vi.spyOn(indexer, "season").mockResolvedValue({ season: 0, since: null, agents: 0, trades: 0, volume_usd: volume, open_interest_usd: interest });
   const container = await render(site.paths.home, indexer);
-  expect(Array.from(container.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["0", "0", expectedVolume, expectedInterest]);
+  expect(Array.from(container.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(expected);
   expect(container.querySelector(".fact-note")?.textContent).toBe("devnet");
 });
 
@@ -460,7 +462,7 @@ test("arena: live stats, a populated board sorted by PnL with house tags, fills 
   const container = await render(site.paths.arena);
   expect(container.querySelector(".arena-season")).toBeNull();
   expect(Array.from(container.querySelectorAll(".arena-stats dt"), d => d.textContent)).toEqual(["Traders", "Fills", "24 h volume", "24 h fills", "Volume", "Open interest"]);
-  expect(Array.from(container.querySelectorAll(".arena-stats dd"), d => d.textContent)).toEqual(["7", "214", "$45.54", "3", "$18,640.00", "$157.90"]);
+  expect(Array.from(container.querySelectorAll(".arena-stats dd"), d => d.textContent)).toEqual(["7", "214", "$45.54", "3", "$18,640.00", "$157.90 · 250 Mtok"]);
   const rows = Array.from(container.querySelectorAll(".arena-board tbody tr"));
   expect(rows).toHaveLength(7);
   expect(Array.from(rows[0].querySelectorAll("td"), td => td.textContent)).toEqual(["1", "7cVf…kxXy", "$41.87", "+4.2%", "38", "long 180 Mtok"]);
@@ -564,4 +566,41 @@ test("agents page: one flow from install to the Arena, compute examples only onc
     expect(Array.from(c3.querySelectorAll("#install pre"), p => p.textContent)).toContain("Read the compute index, then size a long on COMPUTE-PERP to hedge my inference bill. Show my position.");
     expect(c3.textContent).toContain('{ side: "long", units: 100 }');
   } finally { site.mcp.hasComputeIndexTool = false; site.mcp.sizeArg = "size"; }
+});
+
+test("home: an indexer serving another market feeds no fills, season tiles or leaderboard", async () => {
+  const other = new MockIndexerClient();
+  const stats = await other.stats();
+  vi.spyOn(other, "stats").mockResolvedValue({ ...stats, market: "HyMKxfct1S9aFtq21GG3FUYUViQkmpZdk5pwGRtAz48C" });
+  const board = vi.spyOn(other, "leaderboard"), fills = vi.spyOn(other, "recentFills"), season = vi.spyOn(other, "season");
+  const container = await render(site.paths.home, other);
+  expect(board).not.toHaveBeenCalled();
+  expect(fills).not.toHaveBeenCalled();
+  expect(season).not.toHaveBeenCalled();
+  expect(container.querySelector('[aria-label="Arena stats"]')).toBeNull();
+  expect(container.querySelectorAll(".recent-trades li")).toHaveLength(0);
+});
+
+test("a nav that fails to render leaves the brand link and the page", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.resetModules();
+  vi.doMock("./Nav", async original => ({ ...(await original<typeof import("./Nav")>()), default: () => { throw new Error("nav broke"); } }));
+  const { default: BrokenNavSite } = await import("./Site");
+  window.history.pushState({}, "", site.paths.docs);
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const client = new MockMarketClient({ autoTick: false });
+  cleanup = async () => { await act(async () => { root.unmount(); }); client.dispose(); container.remove(); vi.doUnmock("./Nav"); vi.resetModules(); };
+  await act(async () => { root.render(<BrokenNavSite client={client} indexer={null} indexerBase={null} computeFeed={null} />); });
+  expect(container.querySelector(".site-header .brand")?.textContent).toBe("Drip");
+  expect(container.querySelector('.site-header a[href="/arena"]')).toBeNull();
+  expect(container.querySelector("main")?.textContent).not.toBe("");
+  expect(container.querySelector("main .not-found")).toBeNull();
+});
+
+test("agents page describes perps_markets as the one market", async () => {
+  const container = await render("/agents");
+  expect(container.textContent).toContain("The market, its leverage and matcher limits.");
+  expect(container.textContent).not.toContain("Markets, leverage");
 });

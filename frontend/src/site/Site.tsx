@@ -63,9 +63,10 @@ export default function Site({ client, indexer, indexerBase = null, computeFeed 
       <div className="site-spotlight" />
       <img className="site-watermark" src="/brand/d-mark.svg" alt="" />
     </div>
-    <Nav />
+    {/* A failure in the nav or footer leaves a plain link home instead of a blank page. */}
+    <PageBoundary path={path} fallback={<header className="site-header"><nav className="site-nav" aria-label="Main"><Link className="brand" to="/">Drip</Link></nav></header>}><Nav /></PageBoundary>
     {tradeMounted && <div hidden={path !== site.paths.trade}><PageBoundary path={site.paths.trade}><App client={client} indexer={indexer} computeFeed={computeFeed} requestedSide={requestedSide} sideRequest={sideRequest} /></PageBoundary></div>}
     {path !== site.paths.trade && <main className={path === site.paths.home ? "site-home" : "site-page"}><PageBoundary path={path}>{page}</PageBoundary></main>}
-    <Footer />
+    <PageBoundary path={path} fallback={null}><Footer /></PageBoundary>
   </div>;
 }

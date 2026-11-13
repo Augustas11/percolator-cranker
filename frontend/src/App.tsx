@@ -7,7 +7,7 @@ import { site } from "./site/config";
 import type { IndexerClient } from "./indexer/client";
 import type { ComputeFeedClient } from "./compute/client";
 import { useComputeFeed, latestStale, marketStale, modelStale } from "./compute/useFeed";
-import { OTHER_MARKET, OwnFills, UNREACHABLE, entryFromFills, fixed, number as num, useTradeIndexer } from "./Indexer";
+import { OTHER_MARKET, OwnFills, UNREACHABLE, entryFromFills, fixed, number as num, openInterestText, openUnits, useTradeIndexer } from "./Indexer";
 import { DRIP_BELOW_SOL, claimFaucet, faucetHealth } from "./faucet";
 import type { FaucetHealth } from "./faucet";
 import type { TradeIndexer } from "./Indexer";
@@ -156,6 +156,7 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
   useEffect(() => { if (requestedSide) setSide(requestedSide); }, [requestedSide, sideRequest]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [errorDetails, setErrorDetails] = useState("");
   const [notice, setNotice] = useState("");
   const [bookTab, setBookTab] = useState<"quotes" | "trades">("quotes");
   const [bottomTab, setBottomTab] = useState<"positions" | "fills" | "account">("positions");
@@ -207,8 +208,7 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
   // Market bar: each stat only when its source has a value.
   const change = history ? change24h(markSeries, chartTo) : null;
   const same = idx.sameMarket === true;
-  const oi = same && idx.stats ? Object.values(idx.stats.open_interest)[0] : undefined;
-  const oiUsd = same && idx.season ? usdAtoms(idx.season.open_interest_usd) : null;
+  const oi = same ? openInterestText(idx.season?.open_interest_usd, openUnits(idx.stats)) : null;
   const vol24 = same && idx.stats?.volume_24h != null ? usdAtoms(idx.stats.volume_24h) : null;
   const fills24 = same && Number.isSafeInteger(idx.stats?.fills_24h) ? idx.stats!.fills_24h! : null;
   const volAll = same && vol24 === null && idx.season ? usdAtoms(idx.season.volume_usd) : null;
@@ -220,7 +220,7 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
     ...(vol24 !== null ? [["24 h volume", vol24] as Stat] : []),
     ...(fills24 !== null ? [["24 h fills", num(fills24)] as Stat] : []),
     ...(volAll !== null ? [["Volume (all time)", volAll] as Stat] : []),
-    ...(oi ? [["Open interest", <>{oiUsd ?? ""}{oiUsd ? " · " : ""}{num(fixed(oi.long_q))} {PERP.unitShort}</>] as Stat] : []),
+    ...(oi ? [["Open interest", oi] as Stat] : []),
   ];
 
   // The open position. Entry and PnL only from a real source: the client, or the wallet's own executed fills.
@@ -240,9 +240,15 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
   async function call(action: () => Promise<unknown>) {
     setPending(true);
     setError("");
+    setErrorDetails("");
     setNotice("");
     try { await action(); }
-    catch (err) { setError(err instanceof Error ? err.message : "The request failed. Try again."); }
+    catch (err) {
+      setError(err instanceof Error ? err.message : "The request failed. Try again.");
+      // Chain failures carry the raw text; it stays one click away.
+      const details = (err as { details?: unknown })?.details;
+      if (typeof details === "string" && details && details !== (err as Error).message) setErrorDetails(details);
+    }
     finally { setPending(false); void funds.reload(); }
   }
 
@@ -299,7 +305,9 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
         {historyStale && <p className="tx-warn" role="status">{historyStale}</p>}
         {markSeries.length >= 2 ? <FeedBoundary name="Price chart" data={history}><PriceChart mark={markSeries} index={indexSeries} routed={routedSeries} from={chartFrom} to={chartTo} /></FeedBoundary>
           : feed.failed.history || computeFeed === null ? <p className="tx-chart-empty" role="status">The price history is unreachable right now.</p>
-          : history !== null ? <p className="tx-chart-empty" role="status">No mark has been pushed yet.</p>
+          : history !== null ? <p className="tx-chart-empty" role="status">{markSeries.length === 1
+            ? `One mark pushed so far: ${perpPrice(markSeries[0][1])} at ${new Date(markSeries[0][0]).toLocaleString("en-GB", { timeZone: "UTC", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} UTC. The chart starts with the second.`
+            : "No mark has been pushed yet."}</p>
           : <div className="tx-chart-skel" aria-busy="true" aria-label="Loading the price history" />}
       </section>
 
@@ -347,6 +355,7 @@ export default function App({ client, indexer, computeFeed = null, requestedSide
             ? <button type="button" className={`tx-submit ${side}`} disabled={tradeOff || !!paused} onClick={open}>{side === "long" ? "Open long" : "Open short"}</button>
             : <button type="button" className="tx-submit" title="Connect wallet" onClick={() => void call(() => client.connect())}>Connect wallet</button>}
           <p className="error" role="status">{error}</p>
+          {errorDetails && <details className="tx-error-details"><summary>Details</summary><pre>{errorDetails}</pre></details>}
           <p className="trade-note">Test tokens</p>
         </fieldset>
 

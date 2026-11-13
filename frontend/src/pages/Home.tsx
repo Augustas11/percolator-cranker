@@ -4,6 +4,7 @@ import { useSnapshot } from "../App";
 import { PERP, perpPrice, perpSubtitle } from "../market/types";
 import type { MarketClient } from "../market/types";
 import Leaderboard from "../arena/Leaderboard";
+import { openInterestText, openUnits, useMarketGuard } from "../Indexer";
 import { seasonLine } from "./Arena";
 import { site } from "../site/config";
 import { Link } from "../site/router";
@@ -37,7 +38,7 @@ function usd(atoms: string) {
       ? ((absolute + 500_000n) / 1_000_000n).toLocaleString("en-US")
       : `${(absolute + 5_000n) / 10_000n / 100n}.${((absolute + 5_000n) / 10_000n % 100n).toString().padStart(2, "0")}`;
     return `${negative ? "-" : ""}$${amount}`;
-  } catch { return "—"; }
+  } catch { return null; }
 }
 
 function ago(time: number | null) {
@@ -78,7 +79,10 @@ function ComputeCard({ market, mark, markAgo, sellersUp, sellers }: { market: Co
   </div>;
 }
 
-export default function Home({ client, indexer, computeFeed = null }: { client: MarketClient; indexer: IndexerClient | null; indexerBase?: string | null; computeFeed?: ComputeFeedClient | null }) {
+export default function Home({ client, indexer: anyIndexer, computeFeed = null }: { client: MarketClient; indexer: IndexerClient | null; indexerBase?: string | null; computeFeed?: ComputeFeedClient | null }) {
+  // Only an indexer that serves COMPUTE-PERP feeds the fills, the season tiles and the leaderboard.
+  const guard = useMarketGuard(anyIndexer);
+  const indexer = guard.indexer;
   const compute = useComputeFeed(computeFeed, { history: false });
   const typical = compute.market ? typicalPrice(compute.market) : null;
   const { mark } = useSnapshot(client);
@@ -112,7 +116,9 @@ export default function Home({ client, indexer, computeFeed = null }: { client: 
     const timer = window.setInterval(load, 30_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [indexer]);
-  const tiles = [["Traders", season?.agents.toLocaleString("en-US") ?? "—"], ["Fills", season?.trades.toLocaleString("en-US") ?? "—"], ["Volume (USD)", season ? usd(season.volume_usd) : "—"], ["Open interest (USD)", season ? usd(season.open_interest_usd) : "—"]];
+  // Each tile only with a value; with no season read there are no tiles at all.
+  const oi = season ? openInterestText(season.open_interest_usd, openUnits(guard.stats)) : null;
+  const tiles = season ? [["Traders", season.agents.toLocaleString("en-US")], ["Fills", season.trades.toLocaleString("en-US")], ["Volume (USD)", usd(season.volume_usd)], ["Open interest", oi]].filter((t): t is [string, string] => t[1] != null) : [];
   const season0 = seasonLine();
   const since = season?.since == null ? "—" : new Date(season.since * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   return <>
@@ -151,7 +157,7 @@ export default function Home({ client, indexer, computeFeed = null }: { client: 
           <div className="market-actions"><Link className="button-link" to="/trade?side=long">Long</Link><Link className="button-link short" to="/trade?side=short">Short</Link></div>
       </div>
     </div></section>
-    <section className="home-facts home-container" aria-label="Arena stats"><div className="facts-grid">{tiles.map(([label, value]) => <div key={label}><div className="fact-label">{label}</div><div className="fact-value">{value}</div></div>)}</div><p className="fact-note">{site.arena.season !== null ? `Season ${site.arena.season} · ` : ""}devnet{season?.since != null ? ` · since ${since}` : ""}</p></section>
+    {tiles.length > 0 && <section className="home-facts home-container" aria-label="Arena stats"><div className="facts-grid">{tiles.map(([label, value]) => <div key={label}><div className="fact-label">{label}</div><div className="fact-value">{value}</div></div>)}</div><p className="fact-note">{site.arena.season !== null ? `Season ${site.arena.season} · ` : ""}devnet{season?.since != null ? ` · since ${since}` : ""}</p></section>}
     <section className="home-why home-container" aria-labelledby="why-title"><h2 id="why-title">Why Drip</h2><ul className="home-steps">
       <li><h3>Every seller, not one</h3><p>{compute.market ? `${count(compute.market.index.n_quotes_up)} quotes up from ${count(compute.market.index.n_providers)} providers, read every 5 minutes.` : "Every seller of every major open model, read every 5 minutes."} You see the cheapest and the dearest, not a list price.</p></li>
       <li><h3>Quoted in what you pay</h3><p>COMPUTE-PERP is priced in USD per 1M tokens, the unit on an inference bill.</p></li>

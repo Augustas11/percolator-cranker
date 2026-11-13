@@ -91,8 +91,22 @@ it.each(["long", "short"] as const)("closes a %s using exact bigint size and sur
   expect(client.getSnapshot().fills).toHaveLength(0);
   await expect(client.openPosition("long", 1, 6)).rejects.toThrow(/leverage/);
   send.mockRejectedValue(new SendTransactionError({ action: "send", signature: "", transactionMessage: "simulation failed", logs: ["first", "matcher rejected"] }));
-  await expect(client.openPosition("long", 1, 2)).rejects.toThrow(/matcher rejected/);
+  await expect(client.openPosition("long", 1, 2)).rejects.toMatchObject({ message: "The network rejected the transaction before sending it.", details: expect.stringContaining("matcher rejected") });
   expect(client.getSnapshot().fills).toHaveLength(0);
+});
+
+it("starts with no leverage figure and refuses a trade until the market account is read", async () => {
+  client = new DevnetMarketClient({ ...devnetConfig, matcherProgram: undefined, matcherContext: undefined });
+  expect(client.getSnapshot().market.maxLeverage).toBeNaN();
+  await client.connect();
+  expect(client.getSnapshot().market.maxLeverage).toBeGreaterThanOrEqual(1);
+  // A refresh that has not read the market yet leaves the figure unset.
+  vi.spyOn(client as unknown as { refresh(): Promise<void> }, "refresh").mockResolvedValue();
+  (client as unknown as { snapshot: { market: { maxLeverage: number } } }).snapshot.market.maxLeverage = NaN;
+  const failure = client.openPosition("long", 1, 1).then(() => null, (e: Error) => e.message);
+  const message = await failure;
+  expect(message).toBe("The market account has not been read yet. Try again in a moment.");
+  expect(message).not.toContain("NaN");
 });
 
 it("ignores positive PnL when computing health", async () => {
