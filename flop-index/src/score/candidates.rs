@@ -12,16 +12,17 @@ pub const ALL: &[(&str, fn() -> Box<dyn Rule>)] = &[
     ("hold-2h", || Box::new(Hold(Holder::new(2 * HOUR_MS, SPEC.hold_confirm_s * 1000)))),
     ("hold-6h", || Box::new(Hold(Holder::new(6 * HOUR_MS, SPEC.hold_confirm_s * 1000)))),
     ("hold-12h", || Box::new(Hold(Holder::new(12 * HOUR_MS, SPEC.hold_confirm_s * 1000)))),
-    ("all-median", || Box::new(AllSellers { holder: Holder::new(0, 0), weighting: "median" })),
-    ("all-median-hold6h", || Box::new(AllSellers { holder: Holder::new(6 * HOUR_MS, SPEC.hold_confirm_s * 1000), weighting: "median" })),
-    ("all-invsq-hold6h", || Box::new(AllSellers { holder: Holder::new(6 * HOUR_MS, SPEC.hold_confirm_s * 1000), weighting: "inverse_square" })),
+    ("all-median", || Box::new(AllSellers { holder: Holder::new(0, 0), weighting: "median", fallback: false })),
+    ("all-median-hold6h", || Box::new(AllSellers { holder: Holder::new(6 * HOUR_MS, SPEC.hold_confirm_s * 1000), weighting: "median", fallback: false })),
+    ("wide", || Box::new(AllSellers { holder: Holder::new(6 * HOUR_MS, SPEC.hold_confirm_s * 1000), weighting: "median", fallback: true })),
+    ("all-invsq-hold6h", || Box::new(AllSellers { holder: Holder::new(6 * HOUR_MS, SPEC.hold_confirm_s * 1000), weighting: "inverse_square", fallback: false })),
 ];
 
 /// Every up seller of the model, any precision, one price per provider (its
 /// lowest), combined by `weighting`; with an optional hold for sellers that
 /// go offline. Scratch candidate for widening the settlement price.
 #[derive(Clone)]
-pub struct AllSellers { holder: Holder, weighting: &'static str }
+pub struct AllSellers { holder: Holder, weighting: &'static str, fallback: bool }
 impl Rule for AllSellers {
     fn step(&mut self, at_ms: u64, endpoints: &[OrEndpoint]) -> Option<f64> {
         let (eps, _) = self.holder.apply(at_ms, endpoints);
@@ -31,7 +32,10 @@ impl Rule for AllSellers {
             let x = best.entry(e.provider.clone()).or_insert(b);
             if b < *x { *x = b; }
         }
-        if best.len() < 3 { return None; }
+        if best.len() < 3 {
+            // Too few sellers for a median: `fallback` uses the live rule, else hold.
+            return if self.fallback { crate::spec_quote(&eps, at_ms).ok().map(|q| q.usd_e6 as f64 / 1e6) } else { None };
+        }
         let mut v: Vec<f64> = best.into_values().collect();
         if self.weighting != "median" {
             // the live clamp: under half the median counts as half the median
