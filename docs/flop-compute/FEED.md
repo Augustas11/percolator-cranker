@@ -134,7 +134,7 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
   (provider, quantization): the usable one with the lowest price, else an up
   one. A provider listing several regional endpoints counts once. Totals
   count after this.
-- **Hold.** A quote that goes down, loses its price or drops out of the
+- **Hold.** A listing that goes down, loses its price or drops out of the
   listing keeps counting in its model's median, at the last price it was up
   at, for 6 hours after it was last seen up. If it comes back, it counts at
   its new price at once; if not, it leaves the median after 6 hours. Why:
@@ -144,7 +144,9 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
   perp's hold there is no confirm period: most flaps here last 5 to 30
   minutes, which a 1-hour confirm would not cover, and one quote held in a
   median of many cannot move a reference index the way it could a mark.
-  The hold feeds the index and each model's `series`; the card's `median`,
+  The hold is per listing too; the median then takes one price per
+  (provider, quantization), the lowest. The hold feeds the index and each
+  model's `series`; the card's `median`,
   `p25`..`max` and `quotes` show what is listed now.
 - **Model median.** At each fetch of a model, the median of its usable
   quotes (with held ones) (mean of the middle two for an even count). Percentiles interpolate
@@ -183,8 +185,13 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
 - **Uptime.** `uptime_24h_pct` is the share of the model's fetches in the
   last 24 h where the quote was listed and up. A fetch that did not list it
   counts as down; times the model was not fetched do not count.
-- **Changes.** A quote's price changed if it differs from its last price by
-  more than 0.1%. A quote that changed in more than 20% of its priced
+- **Changes.** Price history is kept per listing as fetched: (OpenRouter
+  model id, provider, endpoint tag), before alias merging. A listing's price
+  changed if it differs from that listing's last price by more than 0.1%.
+  Its first appearance is never a change, and a listing back from down at
+  the same price is not one. Two alias listings of one provider at
+  different prices are two prices, not a change: the merged model shows the
+  lower, and which one is lower or up does not emit a change. A quote that changed in more than 20% of its priced
   fetches over 7 days, with at least 24 priced fetches, is a dynamic pricer: it goes in `dynamic`, not
   `changes`.
 - **Names.** `name` is the id after `/`, hyphens as spaces, version dots

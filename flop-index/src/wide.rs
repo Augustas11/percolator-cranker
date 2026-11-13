@@ -42,6 +42,9 @@ const CYCLE_GAP_MS: u64 = 60_000;
 #[derive(Clone, Copy, Debug)]
 struct Row {
     quote: u32,
+    /// The listing in its own model id: the tag (else provider and
+    /// quantization). Price history is per listing, before any merging.
+    listing: u32,
     /// Blended USD per 1M tokens, if both prices are usable.
     price: Option<f64>,
     up: bool,
@@ -50,7 +53,10 @@ struct Row {
 #[derive(Clone, Debug)]
 struct Snap {
     at_ms: u64,
+    /// One row per quote (provider, quantization).
     rows: Vec<Row>,
+    /// Every listing as fetched (empty in a merged alias snapshot).
+    raw: Vec<Row>,
 }
 
 struct DayFile {
@@ -64,6 +70,7 @@ struct DayFile {
 struct Quotes {
     names: Vec<(String, String)>,
     ids: HashMap<String, u32>,
+    listings: HashMap<String, u32>,
 }
 
 impl Quotes {
@@ -75,6 +82,11 @@ impl Quotes {
         self.names.push((provider.to_owned(), quant.to_owned()));
         self.ids.insert(key, i);
         i
+    }
+
+    fn listing(&mut self, key: String) -> u32 {
+        let n = self.listings.len() as u32;
+        *self.listings.entry(key).or_insert(n)
     }
 }
 
@@ -97,12 +109,13 @@ fn read_day(path: &Path, quotes: &mut Quotes) -> Result<Vec<Snap>> {
                 let provider = r["provider"].as_str()?;
                 let quant = r["quantization"].as_str().unwrap_or("unknown");
                 let key = format!("{provider}\u{0}{quant}");
+                let listing = quotes.listing(r["tag"].as_str().map(String::from).unwrap_or_else(|| key.clone()));
                 // A missing status reads as 0 (up), as in the pusher.
                 let up = r["status"].is_null() || r["status"].as_i64() == Some(0);
-                Some(Row { quote: quotes.id(key, provider, quant), price: blend(r["prompt"].as_f64(), r["completion"].as_f64()), up })
+                Some(Row { quote: quotes.id(key, provider, quant), listing, price: blend(r["prompt"].as_f64(), r["completion"].as_f64()), up })
             })
-            .collect();
-        out.push(Snap { at_ms, rows: dedup(rows) });
+            .collect::<Vec<Row>>();
+        out.push(Snap { at_ms, rows: dedup(rows.clone()), raw: rows });
     }
     out.sort_by_key(|s| s.at_ms);
     Ok(out)
@@ -295,8 +308,9 @@ struct Model<'a> {
     /// For a group, each member fetch gives a snapshot of every member's
     /// latest listing (within a day), merged by (provider, quantization).
     snaps: Vec<Cow<'a, Snap>>,
-    /// Per snapshot: which member was fetched, and the bitmask of members
-    /// listed in it.
+    /// Per snapshot: the member's own fetch behind it, which member that
+    /// is, and the bitmask of members listed in it.
+    fetched: Vec<&'a Snap>,
     src: Vec<usize>,
     members: Vec<u64>,
     /// Median of usable quotes, or the last one carried forward.
@@ -305,16 +319,23 @@ struct Model<'a> {
     fresh: Vec<bool>,
 }
 
-/// The prices in a model's median at `s`: its usable quotes, plus each quote
-/// seen up within `HOLD_DOWN_MS` that is not usable now, at its last up price.
-fn held(s: &Snap, up: &mut HashMap<u32, (f64, u64)>) -> Vec<f64> {
-    for r in s.rows.iter().filter(|r| r.up) {
+/// The prices in a model's median after member `k`'s fetch `s`: every
+/// listing of every member seen up within `HOLD_DOWN_MS`, at its last up
+/// price (so a listing that is down now is held), then one per quote
+/// (provider, quantization): the lowest.
+fn held(s: &Snap, k: usize, up: &mut HashMap<(usize, u32), (u32, f64, u64)>) -> Vec<f64> {
+    for r in s.raw.iter().filter(|r| r.up) {
         if let Some(p) = r.price {
-            up.insert(r.quote, (p, s.at_ms));
+            up.insert((k, r.listing), (r.quote, p, s.at_ms));
         }
     }
-    up.retain(|_, (_, t)| *t <= s.at_ms && s.at_ms - *t <= HOLD_DOWN_MS);
-    let mut v: Vec<f64> = up.values().map(|(p, _)| *p).collect();
+    up.retain(|_, (_, _, t)| *t <= s.at_ms && s.at_ms - *t <= HOLD_DOWN_MS);
+    let mut low: HashMap<u32, f64> = HashMap::new();
+    for (q, p, _) in up.values() {
+        let e = low.entry(*q).or_insert(*p);
+        *e = e.min(*p);
+    }
+    let mut v: Vec<f64> = low.into_values().collect();
     v.sort_by(f64::total_cmp);
     v
 }
@@ -328,9 +349,10 @@ fn usable(s: &Snap) -> Vec<f64> {
 impl<'a> Model<'a> {
     /// `ids` shortest first; `per` each id's snapshots in time order.
     fn group(ids: Vec<&'a str>, per: Vec<Vec<&'a Snap>>) -> Self {
-        let (mut snaps, mut src, mut members) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut snaps, mut fetched, mut src, mut members) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         if per.len() == 1 {
             snaps = per[0].iter().map(|s| Cow::Borrowed(*s)).collect();
+            fetched = per[0].clone();
             src = vec![0; snaps.len()];
             members = vec![1; snaps.len()];
         } else {
@@ -340,12 +362,13 @@ impl<'a> Model<'a> {
             for (t, k, s) in ev {
                 latest[k] = Some(s);
                 let live: Vec<(usize, &Snap)> = latest.iter().enumerate().filter_map(|(j, l)| l.filter(|l| t - l.at_ms <= DROP_MS).map(|l| (j, l))).collect();
-                snaps.push(Cow::Owned(Snap { at_ms: t, rows: dedup(live.iter().flat_map(|(_, l)| l.rows.iter().copied()).collect()) }));
+                snaps.push(Cow::Owned(Snap { at_ms: t, rows: dedup(live.iter().flat_map(|(_, l)| l.rows.iter().copied()).collect()), raw: Vec::new() }));
+                fetched.push(s);
                 src.push(k);
                 members.push(live.iter().fold(0u64, |m, (j, _)| m | 1u64 << (*j).min(63)));
             }
         }
-        Self::new(ids[0], ids[1..].to_vec(), snaps, src, members)
+        Self::new(ids[0], ids[1..].to_vec(), snaps, fetched, src, members)
     }
 
     /// The member ids in a bitmask from `members`.
@@ -353,12 +376,12 @@ impl<'a> Model<'a> {
         std::iter::once(self.id).chain(self.aliases.iter().copied()).enumerate().filter(|(j, _)| mask & (1u64 << (*j).min(63)) != 0).map(|(_, id)| id.to_owned()).collect()
     }
 
-    fn new(id: &'a str, aliases: Vec<&'a str>, snaps: Vec<Cow<'a, Snap>>, src: Vec<usize>, members: Vec<u64>) -> Self {
+    fn new(id: &'a str, aliases: Vec<&'a str>, snaps: Vec<Cow<'a, Snap>>, fetched: Vec<&'a Snap>, src: Vec<usize>, members: Vec<u64>) -> Self {
         let (mut median, mut fresh, mut last) = (Vec::new(), Vec::new(), None);
-        // Quote → (last up price, when last seen up), for the hold.
-        let mut up: HashMap<u32, (f64, u64)> = HashMap::new();
-        for s in &snaps {
-            let u = held(s, &mut up);
+        // (member, listing) → (quote, last up price, when last seen up), for the hold.
+        let mut up: HashMap<(usize, u32), (u32, f64, u64)> = HashMap::new();
+        for (f, k) in fetched.iter().zip(&src) {
+            let u = held(f, *k, &mut up);
             let ok = u.len() >= MIN_QUOTES;
             if ok {
                 last = Some(percentile(&u, 0.5));
@@ -366,7 +389,7 @@ impl<'a> Model<'a> {
             median.push(last);
             fresh.push(ok);
         }
-        Self { id, aliases, snaps, src, members, median, fresh }
+        Self { id, aliases, snaps, fetched, src, members, median, fresh }
     }
 
     /// The median at the last snapshot at or before `t`.
@@ -688,25 +711,26 @@ fn market(models: &[Model], names: &[(String, String)], state: Option<&IndexStat
                 "price": r.price, "up": r.up, "uptime_24h_pct": (*of > 0).then(|| *up as f64 / *of as f64 * 100.0),
             })).collect::<Vec<_>>(),
         }));
-        // Price changes per quote over the last 7 days.
-        let mut last: HashMap<u32, f64> = HashMap::new();
-        // Quote → (snapshots priced, changes (at, from, to), min, max).
-        type Per = (usize, Vec<(u64, f64, f64)>, f64, f64);
-        let mut per: BTreeMap<u32, Per> = BTreeMap::new();
-        for s in m.snaps.iter().filter(|s| s.at_ms >= now_ms.saturating_sub(CHANGES_MS)) {
-            for r in &s.rows {
+        // Price changes over the last 7 days, per listing of each member id
+        // as fetched (never across aliases): its first price is not a change.
+        let mut last: HashMap<(usize, u32), f64> = HashMap::new();
+        // (member, listing) → (quote, snapshots priced, changes (at, from, to), min, max).
+        type Per = (u32, usize, Vec<(u64, f64, f64)>, f64, f64);
+        let mut per: BTreeMap<(usize, u32), Per> = BTreeMap::new();
+        for (f, k) in m.fetched.iter().zip(&m.src).filter(|(f, _)| f.at_ms >= now_ms.saturating_sub(CHANGES_MS)) {
+            for r in &f.raw {
                 let Some(p) = r.price else { continue };
-                let e = per.entry(r.quote).or_insert((0, Vec::new(), p, p));
-                e.0 += 1;
-                (e.2, e.3) = (e.2.min(p), e.3.max(p));
-                if let Some(old) = last.insert(r.quote, p) {
+                let e = per.entry((*k, r.listing)).or_insert((r.quote, 0, Vec::new(), p, p));
+                e.1 += 1;
+                (e.3, e.4) = (e.3.min(p), e.4.max(p));
+                if let Some(old) = last.insert((*k, r.listing), p) {
                     if (p - old).abs() > CHANGE_REL * old {
-                        e.1.push((s.at_ms, old, p));
+                        e.2.push((f.at_ms, old, p));
                     }
                 }
             }
         }
-        for (q, (snaps, ch, lo, hi)) in per {
+        for (q, snaps, ch, lo, hi) in per.into_values() {
             if snaps >= DYNAMIC_MIN_SNAPS && ch.len() as f64 > DYNAMIC_SHARE * snaps as f64 {
                 dynamic.push(json!({
                     "model": m.id, "provider": names[q as usize].0, "quantization": names[q as usize].1,
@@ -1187,6 +1211,40 @@ mod tests {
         assert_eq!(l.first(), Some(&100.0));
         assert!(close(*l.last().unwrap(), 100.0 * (2.0f64 / 2.5).sqrt()), "{l:?}");
         assert!(l[..l.len() - 1].iter().all(|x| *x == 100.0), "{l:?}");
+    }
+
+    /// 2026-11-13 09:40-09:50: AtlasCloud lists the plain id at 0.16 and the
+    /// dated alias at 0.232; the plain listing goes down, then both. Merging
+    /// used to show 0.16 → 0.232 → 0.16 as two changes.
+    #[test]
+    fn alias_listings_never_make_changes() {
+        let d = tmp("alias-changes");
+        std::fs::write(d.join("hf-map.tsv"), "x/flash\tX/Flash\nx/flash-1017\tX/Flash-1017\n").unwrap();
+        let t = [T0, T0 + 5 * MIN, T0 + 10 * MIN, T0 + 15 * MIN];
+        let atlas_plain = [0, -2, -2, 0];
+        let atlas_dated = [0, 0, -2, 0];
+        let mut lines = Vec::new();
+        for k in 0..4 {
+            lines.push(line("x/flash", t[k], &[("AtlasCloud", 0.16, atlas_plain[k]), ("B", 0.1, 0), ("C", 1.0, 0)]));
+            // D first appears on the alias at the second fetch, and reprices once for real.
+            let mut dated = vec![("AtlasCloud", 0.232, atlas_dated[k]), ("B", 0.1, 0)];
+            if k >= 1 {
+                dated.push(("D", if k < 3 { 3.0 } else { 2.7 }, 0));
+            }
+            lines.push(line("x/flash-1017", t[k] + 1000, &dated));
+        }
+        lines.push(three("x/other", T0 + 2000, 1.0, 1.0));
+        put(&d, &lines);
+        let v = run(&d, T0 + 16 * MIN);
+        assert_eq!(v["changes"], json!([{ "at_ms": t[3] + 1000, "model": "x/flash", "provider": "D", "quantization": "bf16", "from": 3.0, "to": 2.7 }]));
+        // The model shows the lower of the two AtlasCloud listings.
+        let atlas = model(&v, "x/flash")["quotes"].as_array().unwrap().iter().find(|q| q["provider"] == "AtlasCloud").unwrap().clone();
+        assert_eq!(atlas["price"], 0.16);
+        // The index input does not flip either: AtlasCloud sits at the median
+        // and stays at 0.16 (held while down); only D joining moves it.
+        let series: Vec<f64> = model(&v, "x/flash")["series"].as_array().unwrap().iter().map(|p| p[1].as_f64().unwrap()).collect();
+        assert_eq!(series.len(), 4, "{series:?}");
+        assert!(close(series[0], 0.16) && close(series[1], 0.16) && close(series[2], 0.58) && close(series[3], 0.58), "{series:?}");
     }
 
     #[test]
