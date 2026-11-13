@@ -11,6 +11,7 @@ percolator = { git = "https://github.com/Augustas11/percolator", rev = "b7751935
 percolator-prog = { path = "../repo-prog" }
 solana-sdk = "1.18"
 solana-client = "1.18"
+solana-account-decoder = "1.18"
 bytemuck = { version = "1.14", features = ["derive", "min_const_generics"] }
 anyhow = "1"
 serde_json = "1"
