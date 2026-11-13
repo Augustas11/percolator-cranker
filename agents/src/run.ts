@@ -2,11 +2,11 @@ import { readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { config, runAgent } from "./agent";
 import { connect } from "./mcp";
-import { strategies } from "./strategies";
+import { houseStrategies, strategies } from "./strategies";
 
 export function agentEnvs(names: string[], env: NodeJS.ProcessEnv): NodeJS.ProcessEnv[] {
-  if (!names.length || names.some(name => !Object.hasOwn(strategies, name))) {
-    throw new Error(`Choose strategies: ${Object.keys(strategies).join(", ")}`);
+  if (!names.length || names.some(name => !Object.hasOwn(strategies, name) && !Object.hasOwn(houseStrategies, name))) {
+    throw new Error(`Choose strategies: ${[...Object.keys(strategies), ...Object.keys(houseStrategies)].join(", ")}`);
   }
   if (new Set(names).size !== names.length) throw new Error("Duplicate strategy names");
   const wallets = new Set<string>();
@@ -28,6 +28,7 @@ export function agentEnvs(names: string[], env: NodeJS.ProcessEnv): NodeJS.Proce
 async function main() {
   const names = (process.argv[2] ?? "").split(",").filter(Boolean);
   const envs = agentEnvs(names, process.env);
+  const built = names.map(name => Object.hasOwn(strategies, name) ? strategies[name] : houseStrategies[name](process.env));
   const stop = new AbortController();
   const cfg = config(process.env, stop.signal);
   let terminated = false;
@@ -35,10 +36,10 @@ async function main() {
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   try {
-    const results = await Promise.allSettled(names.map(async (name, i) => {
+    const results = await Promise.allSettled(built.map(async (strategy, i) => {
       try {
         const mcp = await connect(envs[i]);
-        await runAgent(strategies[name], cfg, mcp);
+        await runAgent(strategy, cfg, mcp);
       } catch (error) {
         stop.abort();
         throw error;
