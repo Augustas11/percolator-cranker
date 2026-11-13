@@ -2349,6 +2349,7 @@ dependencies = [
  "percolator",
  "percolator-prog",
  "serde_json",
+ "solana-account-decoder",
  "solana-client",
  "solana-sdk",
 ]
