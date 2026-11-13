@@ -37,11 +37,13 @@ pusher").
   in `<out dir>/index-state.json`.
 - `--rebase` (with `--wide`): ignore any saved index state and start a new
   base. Only for a deliberate re-base; the level then means something new.
-- `--compute <file>` (with `--wide`, optional): G_n per token from FLOP's
-  model registry, one `<openrouter id> <G_n per token>` per line, `#`
-  comments. Added to (or overriding) the built-in entries
-  `qwen/qwen3.8-27b 52` and `qwen/qwen3-8b 17` (SPEC.md, INDEX.md). Read
-  once at start; a bad line stops the feed.
+- `--compute <file>` (with `--wide`, optional): one entry per line, `#`
+  comments: `<openrouter id> <G_n per token>` (FLOP's registry value) or
+  `<openrouter id> active_params <count>` (a mixture-of-experts model's
+  active parameters). Added to (or overriding) the built-in entries
+  `qwen/qwen3.8-27b 52` and `qwen/qwen3-8b 17` (SPEC.md, INDEX.md) and
+  FLOP's DeepSeek-V3 anchor (below). Read once at start; a bad line stops
+  the feed.
 - `--flop-gn-price <FLOP per G_n>` (with `--wide`, optional): FLOP's price
   of one G_n, for `flop.implied_flop_usd`.
 - `out dir`: gets `latest.json`, `history.json` and, with `--wide`,
@@ -127,13 +129,13 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
 | `index.series` | `[t_ms, level]`, at most 500; both sides of every change |
 | `models[]` | Per model, most up sellers first: `id` (shortest id of its alias group), `aliases` (the other ids), `name`, `family`, `data_ms` (its newest snapshot), `stale` (that is over 30 minutes old: no quote is reported up), `sellers_total`, `sellers_up`, `median`, `p25`, `p75` (over the index input's set, below), `min`, `max` (over quotes up now), `thin`, `quotes_held` (providers in the median's set held at their last up price), `cheapest` (`provider`, `quantization`, `price`; null if no quote is up and priced), `change_24h_pct` (same set as `median`), `demand` (below), `sellers_added_7d`, `series` (`[t_ms, median]`, at most 200), `quotes[]` (`provider`, `quantization`, `price` or null, `up`, `uptime_24h_pct`), cheapest first, unpriced next, down last |
 | `models[].demand` | From the newest demand line of the model (or an alias): `hf_downloads_30d`, `hf_likes`, `as_of_ms`, and `hf_downloads_change_7d_pct` against the newest line at least 6 days older (null without one). All null without demand data. |
-| `models[].compute` | `params` (newest known count from the demand lines, or null), `gn_per_token`, `source`: `flop_registry`, `2x_params`, or null when neither is known (then every G_n field of the model is null) |
+| `models[].compute` | `params` (newest known count from the demand lines, or null), `active_params` (from `--compute` or the id, or null), `gn_per_token`, `basis`: `flop_registry`, `2x_active_params`, `2x_params_dense`, or null when unknown (then every G_n field of the model is null). `source` repeats `basis` for older readers. |
 | `models[].usd_per_bn_gn` | `median` in USD per billion G_n; `usd_per_bn_gn_min`, `usd_per_bn_gn_max` likewise from `min`, `max` |
 | `models[].mix` | `chat_3_1`, `avg_15_1`, `agent_150_1`: USD per 1M tokens at 3:1, 15:1, 150:1 input:output (`avg_15_1` = `median`); null with no set |
 | `models[].out_in_ratio` | Median completion ÷ prompt price over the median's set; null if none has a prompt price above 0 |
 | `models[].sellers_added_7d` | Quotes (provider, quantization) listed now that were not listed in the snapshot 7 days ago; null without data that old. Sellers adding a model is a supply-side read of demand. |
 | `models` (empty) | With no wide data yet the file is still written, with `models: []`, null `data_ms`, `level` and `base_ms` |
-| `compute_price` | `median_usd_per_bn_gn`, `p25`, `p75` of `usd_per_bn_gn` over models that are not `thin` and have one, and their count `n_models`; null with none |
+| `compute_price` | `median_usd_per_bn_gn`, `p25`, `p75` of `usd_per_bn_gn` over models that are not `thin` and have one, and their count `n_models`; `n_unknown` counts the models not `thin` left out for lack of a G_n figure; null with none |
 | `mixes` | `chat_3_1`, `avg_15_1`, `agent_150_1`: the median of the models' `mix` (models not `thin`) |
 | `out_in_ratio_median` | The median of the models' `out_in_ratio` (models not `thin`) |
 | `flop` | `gn_price_flop` (from `--flop-gn-price`, or null), `basis_model` (`qwen/qwen3.8-27b`), `implied_flop_usd` (null without both) |
@@ -244,18 +246,34 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
   They measure interest in the open weights (people downloading the model
   to run it themselves), not paid API usage on OpenRouter or anywhere
   else.
-- **Compute units.** G_n per token is FLOP's registry value where the
-  model has one (`source: flop_registry`), else 2 × parameters / 1e9
-  (`2x_params`), with the parameter count from Hugging Face. 2 × params is
-  FLOP's accounting convention for the work in one token (about one
-  multiply and one add per weight), not a measurement of what a token costs
-  to serve: it counts every weight of a mixture-of-experts model, not only
-  the active ones, and ignores attention, batching and hardware. It puts
-  listed prices on one scale; it is not a cost.
+- **Compute units.** FLOP meters work in G_n. Its spec (yellowpaper R4.2)
+  counts active parameters (mixture-of-experts aware) plus an attention term
+  and the embedding, with published anchors Llama-3-8B 16, Llama-3-70B 140
+  and DeepSeek-V3 74 G_n per token; the exact formula is not published
+  ([flop-labs/yellowpaper#18](https://github.com/flop-labs/yellowpaper/issues/18),
+  [#55](https://github.com/flop-labs/yellowpaper/issues/55)). So where FLOP
+  gives no figure, ours is 2 × active parameters / 1e9: a lower bound that
+  leaves out the attention term, which grows with context length. It puts
+  listed prices on one scale; it is not a serving cost. `compute.basis`
+  says which rule each model uses, first match wins:
+  1. `flop_registry`: FLOP's value from `--compute` or built in. The
+     DeepSeek-V3 anchor (74) applies to `deepseek/deepseek-chat-v3.1`,
+     `deepseek/deepseek-v3.2` and `deepseek/deepseek-r1-0528` only when
+     their Hugging Face parameter count is within 1% of DeepSeek-V3's 685B.
+  2. `2x_active_params`: active parameters from `--compute`, else from an
+     id carrying `-a<N>b` (`qwen3.5-397b-a17b` → 17e9, so 34 G_n per token).
+  3. `2x_params_dense`: 2 × the Hugging Face parameter count, only up to
+     100B weights.
+  4. null: over 100B weights with no known active count. Such a model is
+     almost certainly sparse, so we do not guess; it is left out of
+     `compute_price` and counted in `n_unknown`. DeepSeek V4, GLM, Kimi and
+     MiniMax are here until FLOP or their makers give an active count.
   - `usd_per_bn_gn` = median (USD per 1M tokens) / (G_n per token × 1e6) × 1e9.
-    Qwen3.8-27B on 2026-11-13: $0.296875 / (52 × 1e6) × 1e9 = $5.709 per
-    billion G_n. Qwen3.5-9B (9,653,104,368 params, so 19.306 G_n per
-    token): $0.103125 / 19.306e6 × 1e9 = $5.342.
+    Qwen3.8-27B on 2026-11-13 (registry, 52): $0.296875 / 52e6 × 1e9 =
+    $5.709 per billion G_n. DeepSeek V3.2 (685,355,329,792 params, anchor
+    74): $0.278125 / 74e6 × 1e9 = $3.758. Qwen3.5-397B-A17B (34):
+    $0.7609375 / 34e6 × 1e9 = $22.38. Qwen3.5-9B (dense, 9,653,104,368
+    params, so 19.306): $0.103125 / 19.306e6 × 1e9 = $5.342.
   - `mix` at r:1 = (r × prompt + completion) / (r + 1) × 1e6 for each
     provider in the median's set (its price is the one picked at 15:1), then
     the median. The middle Qwen3.5-9B quote, $0.10 in and $0.15 out per 1M:

@@ -192,23 +192,47 @@ pub const BASIS_MODEL: &str = "qwen/qwen3.8-27b";
 /// INDEX.md), by OpenRouter id. Qwen2.5-0.5B (2) has no OpenRouter id here.
 const REGISTRY: [(&str, f64); 2] = [("qwen/qwen3.8-27b", 52.0), ("qwen/qwen3-8b", 17.0)];
 
-/// Compute-unit settings: registry G_n per token by model id, and FLOP's
-/// price in FLOP per G_n (if given).
+/// FLOP's published anchor DeepSeek-V3 → 74 G_n per token (yellowpaper
+/// R4.2, flop-labs/yellowpaper#18: 685B weights, about 37B active), for
+/// these ids only when their Hugging Face parameter count is DeepSeek-V3's.
+const V3_ANCHOR: (f64, f64) = (74.0, 685e9);
+const V3_IDS: [&str; 3] = ["deepseek/deepseek-chat-v3.1", "deepseek/deepseek-v3.2", "deepseek/deepseek-r1-0528"];
+/// A parameter count within this share of the anchor's matches it.
+const ANCHOR_TOL: f64 = 0.01;
+/// Without a known active count, 2 × params is used only up to this many
+/// weights: a model over it is almost certainly sparse.
+pub const DENSE_MAX_PARAMS: u64 = 100_000_000_000;
+
+/// Compute-unit settings: registry G_n per token and active parameter
+/// counts by model id, and FLOP's price in FLOP per G_n (if given).
 #[derive(Clone, Debug)]
 pub struct Compute {
     pub registry: HashMap<String, f64>,
+    pub active_params: HashMap<String, u64>,
     pub gn_price_flop: Option<f64>,
 }
 
 impl Default for Compute {
     fn default() -> Self {
-        Self { registry: REGISTRY.iter().map(|(id, g)| (id.to_string(), *g)).collect(), gn_price_flop: None }
+        Self { registry: REGISTRY.iter().map(|(id, g)| (id.to_string(), *g)).collect(), active_params: HashMap::new(), gn_price_flop: None }
     }
 }
 
+/// Active parameters from an id that carries `-a<N>b` after its size, as
+/// in `qwen3.5-397b-a17b` (17e9) or `qwen3-30b-a3b-instruct-2507` (3e9).
+pub fn active_from_id(id: &str) -> Option<u64> {
+    let name = id.rsplit('/').next()?;
+    name.split('-').skip(1).find_map(|w| {
+        let n = w.strip_prefix('a')?.strip_suffix('b')?;
+        let v: f64 = n.parse().ok().filter(|_| n.bytes().all(|b| b.is_ascii_digit() || b == b'.'))?;
+        (v > 0.0).then(|| (v * 1e9).round() as u64)
+    })
+}
+
 impl Compute {
-    /// Add (or override) registry entries from a file: `<model id> <G_n per
-    /// token>` per line, `#` comments. A bad line is an error.
+    /// Add (or override) entries from a file, `#` comments, one per line:
+    /// `<model id> <G_n per token>` (registry) or `<model id> active_params
+    /// <count>`. A bad line is an error.
     pub fn read_registry(&mut self, path: &Path) -> Result<()> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         for (i, l) in text.lines().enumerate() {
@@ -216,16 +240,40 @@ impl Compute {
             if l.is_empty() {
                 continue;
             }
-            let mut f = l.split_whitespace();
-            let (Some(id), Some(g), None) = (f.next(), f.next().and_then(|g| g.parse::<f64>().ok()), f.next()) else {
-                bail!("{}:{}: want `<model id> <G_n per token>`", path.display(), i + 1)
-            };
-            if !(g.is_finite() && g > 0.0) {
-                bail!("{}:{}: G_n per token must be > 0", path.display(), i + 1);
+            let f: Vec<&str> = l.split_whitespace().collect();
+            match f[..] {
+                [id, "active_params", n] => {
+                    let n = n.parse::<u64>().ok().filter(|n| *n > 0).with_context(|| format!("{}:{}: active_params must be a whole number > 0", path.display(), i + 1))?;
+                    self.active_params.insert(id.to_owned(), n);
+                }
+                [id, g] => {
+                    let g = g.parse::<f64>().ok().filter(|g| g.is_finite() && *g > 0.0).with_context(|| format!("{}:{}: G_n per token must be a number > 0", path.display(), i + 1))?;
+                    self.registry.insert(id.to_owned(), g);
+                }
+                _ => bail!("{}:{}: want `<model id> <G_n per token>` or `<model id> active_params <count>`", path.display(), i + 1),
             }
-            self.registry.insert(id.to_owned(), g);
         }
         Ok(())
+    }
+
+    /// (G_n per token, active params, basis) for a model's ids (shortest
+    /// first) and its parameter count, in this order: the registry (FLOP's
+    /// anchors included), 2 × active params (table, else from the id), 2 ×
+    /// params for a dense-sized model, else unknown.
+    pub fn gn(&self, ids: &[&str], params: Option<u64>) -> (Option<f64>, Option<u64>, Option<&'static str>) {
+        let active = ids.iter().find_map(|id| self.active_params.get(*id).copied()).or_else(|| ids.iter().find_map(|id| active_from_id(id)));
+        let anchor = || ids.iter().any(|id| V3_IDS.contains(id)) && params.is_some_and(|p| (p as f64 / V3_ANCHOR.1 - 1.0).abs() <= ANCHOR_TOL);
+        if let Some(g) = ids.iter().find_map(|id| self.registry.get(*id)) {
+            return (Some(*g), active, Some("flop_registry"));
+        }
+        if anchor() {
+            return (Some(V3_ANCHOR.0), active, Some("flop_registry"));
+        }
+        match (active, params) {
+            (Some(a), _) => (Some(2.0 * a as f64 / 1e9), Some(a), Some("2x_active_params")),
+            (None, Some(p)) if p <= DENSE_MAX_PARAMS => (Some(2.0 * p as f64 / 1e9), None, Some("2x_params_dense")),
+            _ => (None, None, None),
+        }
     }
 }
 
@@ -827,7 +875,7 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
     let mut dynamic = Vec::new();
     // Over non-thin models: USD per bn G_n, mixes, completion ÷ prompt.
     let (mut per_gn, mut mixes, mut ratios) = (Vec::new(), [Vec::new(), Vec::new(), Vec::new()], Vec::new());
-    let mut basis_gn = None;
+    let (mut basis_gn, mut n_unknown) = (None, 0);
     for m in models {
         let Some(latest) = m.snaps.last() else { continue };
         // Stale: nothing fetched for this model for 30 minutes; none of its quotes is up.
@@ -865,18 +913,16 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
         }
         let pts: Vec<(u64, f64)> = m.snaps.iter().zip(&m.median).filter_map(|(s, v)| Some((s.at_ms, (*v)?))).collect();
         let (name, family) = name_family(m.id);
-        // Compute units: G_n per token from the registry, else 2 × params.
+        // Compute units: G_n per token (`Compute::gn`).
         let ids = || std::iter::once(m.id).chain(m.aliases.iter().copied());
         let params = ids().filter_map(|id| demand.get(id)).flatten().filter(|d| d.params.is_some()).max_by_key(|d| d.at_ms).and_then(|d| d.params);
-        let (gn, source) = match ids().find_map(|id| compute.registry.get(id)) {
-            Some(g) => (Some(*g), Some("flop_registry")),
-            None => (params.map(|n| 2.0 * n as f64 / 1e9), params.map(|_| "2x_params")),
-        };
+        let (gn, active, basis) = compute.gn(&ids().collect::<Vec<_>>(), params);
         let per_bn = |usd_per_m: f64| gn.map(|g| usd_per_bn_gn(usd_per_m, g));
         let mix_at: Vec<Option<f64>> = MIXES.iter().map(|r| mix_median(&m.held_now, *r)).collect();
         let out_in = out_in_ratio(&m.held_now);
         if !thin {
             per_gn.extend(per_bn(median));
+            n_unknown += usize::from(gn.is_none());
             for (v, x) in mixes.iter_mut().zip(&mix_at) {
                 v.extend(*x);
             }
@@ -896,7 +942,7 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
             "sellers_total": latest.rows.len(), "sellers_up": latest.rows.iter().filter(|r| is_up(r)).count(),
             "median": median, "p25": spread(0.25), "p75": spread(0.75), "min": range(0.0), "max": range(1.0),
             "thin": thin, "quotes_held": quotes_held,
-            "compute": { "params": params, "gn_per_token": gn, "source": source },
+            "compute": { "params": params, "active_params": active, "gn_per_token": gn, "basis": basis, "source": basis },
             "usd_per_bn_gn": per_bn(median), "usd_per_bn_gn_min": per_bn(range(0.0)), "usd_per_bn_gn_max": per_bn(range(1.0)),
             "mix": { "chat_3_1": mix_at[0], "avg_15_1": mix_at[1], "agent_150_1": mix_at[2] },
             "out_in_ratio": out_in,
@@ -964,7 +1010,7 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
             "series": steps(series, INDEX_POINTS).iter().map(|p| json!([p.0, p.1])).collect::<Vec<_>>(),
         },
         "compute_price": {
-            "median_usd_per_bn_gn": quantile(&mut per_gn, 0.5), "p25": quantile(&mut per_gn, 0.25), "p75": quantile(&mut per_gn, 0.75), "n_models": per_gn.len(),
+            "median_usd_per_bn_gn": quantile(&mut per_gn, 0.5), "p25": quantile(&mut per_gn, 0.25), "p75": quantile(&mut per_gn, 0.75), "n_models": per_gn.len(), "n_unknown": n_unknown,
         },
         "mixes": { "chat_3_1": quantile(&mut mixes[0], 0.5), "avg_15_1": quantile(&mut mixes[1], 0.5), "agent_150_1": quantile(&mut mixes[2], 0.5) },
         "out_in_ratio_median": quantile(&mut ratios, 0.5),
@@ -1635,7 +1681,7 @@ mod tests {
 
         let q = model(&v, "qwen/qwen3.8-27b");
         assert!(close(q["median"].as_f64().unwrap(), 0.25));
-        assert_eq!(q["compute"], json!({ "params": null, "gn_per_token": 52.0, "source": "flop_registry" }));
+        assert_eq!(q["compute"], json!({ "params": null, "active_params": null, "gn_per_token": 52.0, "basis": "flop_registry", "source": "flop_registry" }));
         assert!(close(q["usd_per_bn_gn"].as_f64().unwrap(), 0.25 / 52.0 * 1e3));
         assert!(close(q["usd_per_bn_gn_min"].as_f64().unwrap(), 0.15625 / 52.0 * 1e3));
         assert!(close(q["usd_per_bn_gn_max"].as_f64().unwrap(), 0.28125 / 52.0 * 1e3));
@@ -1645,18 +1691,19 @@ mod tests {
         assert!(close(q["out_in_ratio"].as_f64().unwrap(), 10.0));
 
         let b = model(&v, "x/b");
-        assert_eq!(b["compute"], json!({ "params": 7_000_000_000u64, "gn_per_token": 14.0, "source": "2x_params" }));
+        assert_eq!(b["compute"], json!({ "params": 7_000_000_000u64, "active_params": null, "gn_per_token": 14.0, "basis": "2x_params_dense", "source": "2x_params_dense" }));
         assert!(close(b["usd_per_bn_gn"].as_f64().unwrap(), 1.0 / 14.0 * 1e3));
         assert_eq!((b["mix"]["chat_3_1"].as_f64(), b["out_in_ratio"].as_f64()), (Some(1.0), Some(1.0)));
         let c = model(&v, "x/c");
-        assert_eq!((c["compute"].clone(), c["usd_per_bn_gn"].clone()), (json!({ "params": null, "gn_per_token": null, "source": null }), Value::Null));
+        assert_eq!((c["compute"].clone(), c["usd_per_bn_gn"].clone()), (json!({ "params": null, "active_params": null, "gn_per_token": null, "basis": null, "source": null }), Value::Null));
         // x/d is thin: it has a value but is left out of the totals.
         let x = model(&v, "x/d");
         assert_eq!((x["thin"].as_bool(), x["usd_per_bn_gn"].as_f64().map(|u| close(u, 1e3))), (Some(true), Some(true)));
 
         // Over the non-thin models with a value: 4.8077 and 71.43.
         let cp = &v["compute_price"];
-        assert_eq!(cp["n_models"], 2);
+        // x/c has no G_n: left out and counted.
+        assert_eq!((cp["n_models"].as_u64(), cp["n_unknown"].as_u64()), (Some(2), Some(1)));
         assert!(close(cp["median_usd_per_bn_gn"].as_f64().unwrap(), (0.25 / 52.0 * 1e3 + 1e3 / 14.0) / 2.0));
         assert!(close(cp["p25"].as_f64().unwrap(), 0.25 / 52.0 * 1e3 + 0.25 * (1e3 / 14.0 - 0.25 / 52.0 * 1e3)));
         // Medians of the model medians (qwen, x/b, x/c): x/b and x/c are 1.
@@ -1672,10 +1719,54 @@ mod tests {
         let mut cfg = Compute::default();
         cfg.read_registry(&f).unwrap();
         assert_eq!((cfg.registry["x/c"], cfg.registry["qwen/qwen3.8-27b"], cfg.registry["qwen/qwen3-8b"]), (4.0, 50.0, 17.0));
-        for bad in ["x/c", "x/c four", "x/c 0", "x/c 4 5"] {
+        for bad in ["x/c", "x/c four", "x/c 0", "x/c 4 5", "x/c active_params 1.5", "x/c active_params 0"] {
             std::fs::write(&f, bad).unwrap();
             assert!(Compute::default().read_registry(&f).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn active_params_from_ids() {
+        for (id, n) in [
+            ("qwen/qwen3.5-397b-a17b", Some(17e9)), ("qwen/qwen3.6-35b-a3b", Some(3e9)), ("google/gemma-4-26b-a4b-it", Some(4e9)),
+            ("nvidia/nemotron-3-ultra-550b-a55b", Some(55e9)), ("qwen/qwen3.8-2.4t-a95b", Some(95e9)), ("reflection/beam-1.0-501b-a23b", Some(23e9)),
+            ("qwen/qwen3-30b-a3b-instruct-2507", Some(3e9)), ("x/m-30b-a2.5b", Some(2.5e9)),
+            ("qwen/qwen3.8-27b", None), ("a/ab-8b", None), ("x/a3b", None), ("x/m-ab", None), ("x/m-a0b", None), ("x/m-a-3b", None),
+        ] {
+            assert_eq!(active_from_id(id), n.map(|n: f64| n as u64), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_compute_basis_in_order() {
+        let mut c = Compute::default();
+        let g = |c: &Compute, ids: &[&str], p: Option<u64>| c.gn(ids, p);
+        // Dense fallback only up to 100B weights; over it, unknown.
+        assert_eq!(g(&c, &["x/dense"], Some(DENSE_MAX_PARAMS)), (Some(200.0), None, Some("2x_params_dense")));
+        assert_eq!(g(&c, &["x/big"], Some(DENSE_MAX_PARAMS + 1)), (None, None, None));
+        assert_eq!(g(&c, &["x/none"], None), (None, None, None));
+        // An `-a<N>b` id: 2 × active, whatever the total.
+        assert_eq!(g(&c, &["x/m-397b-a17b"], Some(397_000_000_000)), (Some(34.0), Some(17_000_000_000), Some("2x_active_params")));
+        // FLOP's DeepSeek-V3 anchor, only at its parameter count.
+        assert_eq!(g(&c, &["deepseek/deepseek-v3.2"], Some(685_355_329_792)), (Some(74.0), None, Some("flop_registry")));
+        assert_eq!(g(&c, &["deepseek/deepseek-r1-0528"], Some(684_531_386_000)).0, Some(74.0));
+        assert_eq!(g(&c, &["deepseek/deepseek-v3.2"], Some(763_205_315_794)), (None, None, None));
+        assert_eq!(g(&c, &["deepseek/deepseek-v3.2"], None), (None, None, None));
+        assert_eq!(g(&c, &["deepseek/deepseek-v4.1-flash"], Some(685_000_000_000)), (None, None, None));
+        // The table's active count beats the id's; the registry beats both.
+        c.active_params.insert("x/m-397b-a17b".into(), 20_000_000_000);
+        assert_eq!(g(&c, &["x/m-397b-a17b"], None).0, Some(40.0));
+        c.registry.insert("x/m-397b-a17b".into(), 50.0);
+        assert_eq!(g(&c, &["x/m-397b-a17b"], None), (Some(50.0), Some(20_000_000_000), Some("flop_registry")));
+        // A registry file entry overrides the anchor.
+        c.registry.insert("deepseek/deepseek-v3.2".into(), 80.0);
+        assert_eq!(g(&c, &["deepseek/deepseek-v3.2"], Some(685_355_329_792)).0, Some(80.0));
+        // A file sets both kinds.
+        let f = tmp("compute-file").join("c.tsv");
+        std::fs::write(&f, "z/k active_params 32000000000 # from the model card\nz/k2 9\n").unwrap();
+        let mut c = Compute::default();
+        c.read_registry(&f).unwrap();
+        assert_eq!((g(&c, &["z/k"], Some(1_000_000_000_000)).0, c.registry["z/k2"]), (Some(64.0), 9.0));
     }
 
     /// Real collector lines (2026-11-13), three models, plus junk.
@@ -1696,10 +1787,10 @@ mod tests {
         assert_eq!((q["name"].as_str(), q["sellers_total"].as_u64(), q["sellers_up"].as_u64(), q["thin"].as_bool()), (Some("Qwen3.8 27B"), Some(22), Some(19), Some(false)));
         assert!(close(q["median"].as_f64().unwrap(), 0.296875));
         // 52 G_n per token (registry): 0.296875 / 52e6 × 1e9 = $5.709 per billion G_n.
-        assert_eq!(q["compute"], json!({ "params": null, "gn_per_token": 52.0, "source": "flop_registry" }));
+        assert_eq!(q["compute"], json!({ "params": null, "active_params": null, "gn_per_token": 52.0, "basis": "flop_registry", "source": "flop_registry" }));
         assert!(close(q["usd_per_bn_gn"].as_f64().unwrap(), 0.296875 / 52.0 * 1e3));
         assert_eq!(model(&v, "qwen/qwen3-14b")["usd_per_bn_gn"], Value::Null);
-        assert_eq!((v["compute_price"]["n_models"].as_u64(), v["flop"]["implied_flop_usd"].clone()), (Some(1), Value::Null));
+        assert_eq!((v["compute_price"]["n_models"].as_u64(), v["compute_price"]["n_unknown"].as_u64(), v["flop"]["implied_flop_usd"].clone()), (Some(1), Some(0), Value::Null));
         assert!(close(q["min"].as_f64().unwrap(), 0.1146875) && close(q["max"].as_f64().unwrap(), 1.02125));
         assert_eq!(q["cheapest"]["provider"], "Chutes");
         let qs = q["quotes"].as_array().unwrap();
