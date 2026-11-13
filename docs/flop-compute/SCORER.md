@@ -118,6 +118,27 @@ $0.311 to $1.911. Since 2026-11-12 a pair is not clamped and the same
 relisting gives $0.268. Test:
 `the_live_bf16_pair_relisting_at_10x_no_longer_lifts_the_mark`.
 
+## Hold candidates, recorder data so far (2026-11-13, not a gate result)
+
+`hold-2h`, `hold-6h`, `hold-12h`: SPEC with a missing endpoint held at its
+last up price (SPEC.md, "Missing endpoints"). On daily pins they equal `spec`
+(snapshots are 24 h apart). On the recorder's first 539 snapshots
+(2026-11-11 11:08 to 11-13, one model, `--split all`, seed 1):
+
+| Rule | gain | se | down | jump |
+|---|---|---|---|---|
+| hold-2h | +0.005 | 0.007 | +0.035 | -0.0005 |
+| hold-6h | +0.346 | 0.215 | +0.178 | -0.0007 |
+| hold-12h | +0.366 | 0.228 | +0.188 | -0.0007 |
+
+All with the 1 h confirm. The jump part is slightly worse for every length;
+not yet explained. The "down" scenario downs endpoints at their current
+price, so these gains say nothing about a provider that lists a new price
+and then goes down: add that scenario before choosing.
+
+Three days, so no rule clears 2 x se and there is no held-out split yet.
+Rerun on a pin of the first full week (complete 2026-11-18) before choosing.
+
 ## Adding a candidate
 
 Write a struct implementing `Rule` in `flop-index/src/score/candidates.rs`
