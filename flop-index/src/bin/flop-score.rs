@@ -73,6 +73,20 @@ fn run(args: &[String]) -> Result<()> {
     part("follow", r.follow, r.base.follow, r.cand.follow);
     part("reference", r.reference, r.base.reference, r.cand.reference);
     part("ex-ref", r.ex_reference, r.base.ex_reference(), r.cand.ex_reference());
+    // Liveliness: distinct marks the candidate produced over the data (6 decimals).
+    let mut distinct = std::collections::BTreeSet::new();
+    let (mut steps, mut holds) = (0u64, 0u64);
+    for sr in &series {
+        let mut r = rules::by_name(&rule).expect("checked");
+        for sn in &sr.snaps {
+            steps += 1;
+            match r.step(sn.at_ms, &sn.endpoints).filter(|m| m.is_finite() && *m > 0.0) {
+                Some(m) => { distinct.insert((m * 1e6).round() as u64); }
+                None => holds += 1,
+            }
+        }
+    }
+    println!("distinct {}  holds {}/{}  check {}", distinct.len(), holds, steps, if score::v2() { "v2 (phantom, attacks, follow, leave-one-out)" } else { "v1" });
     println!("days {}..{}  series {}  snapshots {snaps}  data {} (MANIFEST sha256 {manifest})", day(r.first_day), day(r.last_day), series.len(), data_dir.display());
     let gate = if r.passes() { "above" } else { "not above" };
     let note = if split == Split::Heldout { "" } else { " (the gate counts only --split heldout)" };

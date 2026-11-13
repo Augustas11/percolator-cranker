@@ -12,7 +12,37 @@ pub const ALL: &[(&str, fn() -> Box<dyn Rule>)] = &[
     ("hold-2h", || Box::new(Hold(Holder::new(2 * HOUR_MS, SPEC.hold_confirm_s * 1000)))),
     ("hold-6h", || Box::new(Hold(Holder::new(6 * HOUR_MS, SPEC.hold_confirm_s * 1000)))),
     ("hold-12h", || Box::new(Hold(Holder::new(12 * HOUR_MS, SPEC.hold_confirm_s * 1000)))),
+    ("all-median", || Box::new(AllSellers { holder: Holder::new(0, 0), weighting: "median" })),
+    ("all-median-hold6h", || Box::new(AllSellers { holder: Holder::new(6 * HOUR_MS, SPEC.hold_confirm_s * 1000), weighting: "median" })),
+    ("all-invsq-hold6h", || Box::new(AllSellers { holder: Holder::new(6 * HOUR_MS, SPEC.hold_confirm_s * 1000), weighting: "inverse_square" })),
 ];
+
+/// Every up seller of the model, any precision, one price per provider (its
+/// lowest), combined by `weighting`; with an optional hold for sellers that
+/// go offline. Scratch candidate for widening the settlement price.
+#[derive(Clone)]
+pub struct AllSellers { holder: Holder, weighting: &'static str }
+impl Rule for AllSellers {
+    fn step(&mut self, at_ms: u64, endpoints: &[OrEndpoint]) -> Option<f64> {
+        let (eps, _) = self.holder.apply(at_ms, endpoints);
+        let mut best = std::collections::BTreeMap::<String, f64>::new();
+        for e in up(&eps) {
+            let b = blend(e);
+            let x = best.entry(e.provider.clone()).or_insert(b);
+            if b < *x { *x = b; }
+        }
+        if best.len() < 3 { return None; }
+        let mut v: Vec<f64> = best.into_values().collect();
+        if self.weighting != "median" {
+            // the live clamp: under half the median counts as half the median
+            let mut s = v.clone(); s.sort_by(f64::total_cmp);
+            let floor = 0.5 * combine(&s, "median").ok()?;
+            for x in v.iter_mut() { if *x < floor { *x = floor; } }
+        }
+        combine(&v, self.weighting).ok()
+    }
+    fn clone_box(&self) -> Box<dyn Rule> { Box::new(self.clone()) }
+}
 
 const HOUR_MS: u64 = 3_600_000;
 

@@ -218,6 +218,14 @@ fn attacked(at: &Attack, eps: &[crate::OrEndpoint]) -> Vec<crate::OrEndpoint> {
     v
 }
 
+/// Check v2 (swarm run 2026-11-13), on with FLOP_SCORE_V2=1: the jump slot is
+/// "phantom" (moves with no repricing behind them) and the reference slot is
+/// leave-one-provider-out sensitivity. Neither compares the mark to a median,
+/// so a median rule gets no free pass.
+pub fn v2() -> bool {
+    std::env::var_os("FLOP_SCORE_V2").is_some()
+}
+
 fn providers(eps: &[crate::OrEndpoint]) -> usize {
     up(eps).map(|e| e.provider.as_str()).collect::<BTreeSet<_>>().len()
 }
@@ -241,14 +249,55 @@ fn run_series(proto: &dyn Rule, s: &Series, seed: u64, pool: &[String], out: &mu
     let mut last = None;
     let mut marks = Vec::with_capacity(snaps.len());
     let mut saved: BTreeMap<usize, (Box<dyn Rule>, Option<f64>)> = BTreeMap::new();
+    let v2 = v2();
+    // v2 only, computed in the clean pass from the rule's state just before
+    // each step (neither compares the mark to any reference price):
+    // - phantom: the part of this step's move that comes from availability
+    //   alone. The counterfactual keeps the previous snapshot's set of up
+    //   sellers and applies this snapshot's prices to them.
+    // - loo: how far the mark moves when one seller's price is doubled or
+    //   halved for one step, averaged over sellers (every 6th scored step).
+    let mut loo: Vec<Option<f64>> = vec![None; snaps.len()];
+    let mut phantom: Vec<Option<f64>> = vec![None; snaps.len()];
+    let mut prev_scored: Option<usize> = None;
     for (i, sn) in snaps.iter().enumerate() {
         if anchor_at.contains(&i) {
             saved.insert(i, (rule.clone_box(), last));
         }
+        let pre = (v2 && scored[i]).then(|| (rule.clone_box(), last));
         if let Some(m) = rule.step(sn.at_ms, &sn.endpoints).filter(|m| m.is_finite() && *m > 0.0) {
             last = Some(m);
         }
         marks.push(last);
+        if let Some((pre, pre_last)) = pre {
+            let ok = |r: Option<f64>| r.filter(|m| m.is_finite() && *m > 0.0).or(pre_last);
+            if let Some(pi) = prev_scored {
+                let now: BTreeMap<(&str, &str), &crate::OrEndpoint> = sn.endpoints.iter().map(|e| ((e.provider.as_str(), e.quantization.as_str()), e)).collect();
+                let cf: Vec<crate::OrEndpoint> = snaps[pi]
+                    .endpoints
+                    .iter()
+                    .map(|e| match now.get(&(e.provider.as_str(), e.quantization.as_str())) {
+                        Some(n) if e.status == 0 && n.status == 0 => crate::OrEndpoint { prompt: n.prompt, completion: n.completion, ..e.clone() },
+                        _ => e.clone(),
+                    })
+                    .collect();
+                phantom[i] = Some(dist(ok(pre.clone_box().step(sn.at_ms, &cf)), last));
+            }
+            if i % 6 == 0 {
+                let provs: BTreeSet<&str> = up(&sn.endpoints).map(|e| e.provider.as_str()).collect();
+                let mut d = (0.0, 0);
+                for p in &provs {
+                    for f in [2.0, 0.5] {
+                        let eps: Vec<crate::OrEndpoint> = sn.endpoints.iter().map(|e| if e.provider == *p { crate::OrEndpoint { prompt: e.prompt * f, completion: e.completion * f, ..e.clone() } } else { e.clone() }).collect();
+                        add(&mut d, dist(ok(pre.clone_box().step(sn.at_ms, &eps)), last));
+                    }
+                }
+                loo[i] = Some(avg(d));
+            }
+        }
+        if scored[i] {
+            prev_scored = Some(i);
+        }
     }
     // Jump and reference on every scored snapshot.
     let mut prev: Option<(Option<f64>, f64)> = None;
@@ -258,9 +307,16 @@ fn run_series(proto: &dyn Rule, s: &Series, seed: u64, pool: &[String], out: &mu
         }
         let acc = out.entry(sn.at_ms / DAY_MS).or_default();
         let med = median(up(&sn.endpoints).map(blend).collect()).expect("scored has 2+ up endpoints");
-        add(&mut acc.reference, dist(marks[i], reference(&sn.endpoints)));
+        if v2 {
+            if let Some(x) = loo[i] {
+                add(&mut acc.reference, x);
+            }
+        } else {
+            add(&mut acc.reference, dist(marks[i], reference(&sn.endpoints)));
+        }
         if let Some((pm, pmed)) = prev {
             let j = match (marks[i], pm) {
+                (Some(_), Some(_)) if v2 => phantom[i].unwrap_or(0.0),
                 (Some(m), Some(pm)) => ((m / pm).ln() - (med / pmed).ln()).abs(),
                 _ => PENALTY,
             };
