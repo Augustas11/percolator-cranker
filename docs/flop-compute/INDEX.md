@@ -23,8 +23,8 @@ audited.** See "What this is not" below.
 which half of the window's GN is covered. A median ignores one odd print;
 weighting by GN means a large job counts more than a tiny one.
 
-**Units.** USD per 1M tokens of Qwen3.8-27B, times 1e6 on chain (owner
-decision, 2026-11-11). What buyers and miners hedge is the dollar price of
+**Units.** USD per 1M tokens of Qwen3.8-27B, times 1e6 on chain (decision,
+2026-11-11). What buyers and miners hedge is the dollar price of
 compute; a FLOP-denominated index would mostly mirror the token price upside
 down, because miners reprice to stay competitive in dollars.
 
@@ -53,7 +53,7 @@ anchor 0.003 FLOP per G_n prices 1M tokens at OpenRouter's qwen/qwen3.8-27b
 price (DeepInfra BF16, matching FLOP's weights) blended at
 `flop_blend_in_out` = 15 input tokens per output token. That is OpenRouter's
 measured mix (State of AI, arXiv 2601.10088). The blend is (15 x $0.15 +
-$1.875) / 16 = $0.2578 per 1M, so FLOP/USD = 0.0000016527 (owner decisions,
+$1.875) / 16 = $0.2578 per 1M, so FLOP/USD = 0.0000016527 (decisions,
 2026-11-11).
 
 **Manipulation limits** on the FLOP side. No single buyer (`agent`) or miner
@@ -117,7 +117,7 @@ On 2026-11-10 the latest 300 spot settlements (about 7.5 hours) had:
 So today's index tracks one buyer's posted price, not a market-clearing price
 for compute. FLOP's own reference index (FRCR on the explorer) doesn't publish
 for this reason: it has volume and concentration floors, and they fail. Index
-v0 has **no buyer-concentration floor**, by the owner's choice, so the demo
+v0 has **no buyer-concentration floor**, by design, so the demo
 has a mark to trade against. Expect the mark to sit flat. When a second real
 buyer shows up, the same index starts to mean something, and adding a floor
 (for example a cap on any one buyer's share of GN) becomes the obvious v1.

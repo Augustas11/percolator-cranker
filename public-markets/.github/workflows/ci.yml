@@ -1,0 +1,98 @@
+# Builds and tests everything that needs no secrets. The Solana crates build
+# against the upstream wrapper at the commit in scripts/pins.env
+# (scripts/fetch_upstream.sh); the matcher's LiteSVM tests and the validator
+# tests need SBF builds and a validator, so they are not run here.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  flop-index:
+    name: price rule + scorer + feed
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            flop-index/target
+          key: flop-index-${{ runner.os }}-${{ hashFiles('flop-index/Cargo.lock') }}
+      - run: cargo test --release --locked --manifest-path flop-index/Cargo.toml
+
+  solana-crates:
+    name: keeper, client, bots, indexer, matcher host
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cranker/target
+            client/target
+            staging/target
+            indexer/target
+            matcher/host/target
+          key: solana-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'scripts/pins.env') }}
+          restore-keys: solana-${{ runner.os }}-
+      - name: fetch pinned wrapper
+        run: ./scripts/fetch_upstream.sh
+      - name: keeper (validator tests self-skip)
+        run: cargo test --release --locked --manifest-path cranker/Cargo.toml
+      - name: bring-up client
+        run: cargo build --release --locked --manifest-path client/Cargo.toml
+      - name: bots
+        run: cargo test --release --locked --manifest-path staging/Cargo.toml
+      - name: indexer
+        run: cargo test --release --locked --manifest-path indexer/Cargo.toml
+      - name: matcher host tools (LiteSVM tests need the SBF builds)
+        run: cargo build --release --locked --manifest-path matcher/host/Cargo.toml --bins
+
+  node:
+    name: ${{ matrix.dir }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [frontend, faucet, mcp, agents]
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+      - run: npm install -g npm@11.6.2
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

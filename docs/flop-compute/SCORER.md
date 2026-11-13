@@ -16,8 +16,8 @@ candidate is better. Then each part alone. Exit 0 means it ran; any other
 exit prints `DID NOT RUN` and why. `flop-score list` names the rules.
 
 **Gate** ([SPEC.md](SPEC.md), "Changing the mark rule"): a candidate is
-recommended only if, on `--split heldout`, gain > 2 x se, and a reviewer on
-a different model does not veto it.
+recommended only if, on `--split heldout`, gain > 2 x se, and an
+independent review does not veto it.
 
 ## What it charges
 

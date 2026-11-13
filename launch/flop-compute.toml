@@ -54,13 +54,13 @@ flop_gn_per_mtok = 52000000
 # BF16, matching FLOP's weights) blended input:output price. Blend 15:1 is
 # OpenRouter's measured mix (State of AI, arXiv 2601.10088: ~6,000 in / 400
 # out). (15 x 0.15 + 1.875) / 16 = $0.2578125 per 1M -> FLOP/USD 0.0000016527.
-# Owner decisions 2026-11-11; the blend is a convention and may change.
+# Decisions (2026-11-11); the blend is a convention and may change.
 flop_ref_usd_in = 0.15
 flop_ref_usd_out = 1.875
 flop_blend_in_out = 15
 flop_anchor_flop_per_gn = 0.003
 # Mark = live OpenRouter USD leg: each up endpoint's 15:1 blend, combined by
-# 1/price^2 weights as OpenRouter's default routing spreads load (owner,
+# 1/price^2 weights as OpenRouter's default routing spreads load (decision,
 # 2026-11-11), over bf16, else fp16, endpoints; fewer than 2 falls back to all. flop_standin keeps the old
 # FLOP side x stand-in mark for when a live FLOP/USD exists.
 flop_mark_source = "openrouter"
@@ -114,7 +114,7 @@ min_nonzero_im_req = 2000
 maintenance_margin_bps = 2500
 initial_margin_bps = 5000        # 2x: thin, gappy index
 max_trading_fee_bps = 100
-# 15 bps (owner, 2026-10-30). 5 bps loses to latency arbitrage at every
+# 15 bps (decision, 2026-10-30). 5 bps loses to latency arbitrage at every
 # reachable lag (research/replay/REPORT.md). Post-stall-fix replay
 # (REPORT-post-fix.md): 12 bps nets +4.8 bps, break-even ~$211k/day, and
 # turns negative near 1.4 s lag; 15 bps nets +10.4, break-even ~$98k/day.

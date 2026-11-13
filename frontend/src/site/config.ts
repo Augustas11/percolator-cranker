@@ -6,7 +6,7 @@ const market = devnetConfig.market.toBase58();
 export const site = {
   paths: { home: "/", tools: "/tools", arena: "/arena", build: "/build", trade: "/trade", compute: "/compute", docs: "/docs", agents: "/agents", challenge: "/challenge" },
   computeTrade: "/trade" as string | null, // the COMPUTE-PERP trade page; null makes /compute link the market account instead
-  computeRepo: "" as string, // empty while the repo is private; the /compute page hides the link when empty
+  computeRepo: "" as string, // the /compute page hides the link when empty
   repo,
   docs: `${repo}/blob/main/docs/RUNBOOK.md`,
   x: null as string | null, // TODO-OWNER: X profile URL

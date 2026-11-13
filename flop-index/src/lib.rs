@@ -26,9 +26,9 @@ pub struct Params {
     pub hold_confirm_s: u64,
 }
 
-/// The live rule (owner decisions 2026-11-11): 15:1 blend, bf16 then fp16,
+/// The live rule (decisions 2026-11-11): 15:1 blend, bf16 then fp16,
 /// at least 2 up endpoints, 1/price² weights, clamp at half the median; the
-/// clamp needs at least 3 endpoints in the set (owner, 2026-11-12).
+/// clamp needs at least 3 endpoints in the set (decision, 2026-11-12).
 pub const SPEC: Params = Params {
     blend: 15.0,
     quantizations: &["bf16", "fp16"],
@@ -36,7 +36,7 @@ pub const SPEC: Params = Params {
     weighting: "inverse_square",
     min_frac_of_median: 0.5,
     clamp_min_set: 3,
-    // Off until the hold length is chosen on recorder data (owner, 2026-11-13:
+    // Off until the hold length is chosen on recorder data (decision, 2026-11-13:
     // rule approved; score 2 h, 6 h and 12 h on the first full week).
     hold_missing_s: 0,
     hold_confirm_s: 3600,
@@ -68,7 +68,7 @@ pub struct Held {
     pub last_up_ms: u64,
 }
 
-/// Holds a missing endpoint at its last up price (owner, 2026-11-13). An
+/// Holds a missing endpoint at its last up price (decision, 2026-11-13). An
 /// endpoint that is down, unpriced or gone from the listing keeps counting,
 /// as up and at the price it last had while up, until it has been missing
 /// longer than `hold_ms`; then it is dropped as before. One that comes back
@@ -242,7 +242,7 @@ pub fn or_quote_with(
     let tier = |qs: &[String]| valid.iter().copied().filter(|e| qs.iter().any(|q| q == &e.quantization)).collect::<Vec<_>>();
     // Sets in order: each preferred quantization alone, then the preferred
     // ones together, then every up endpoint. The first with `min_endpoints`
-    // up endpoints prices the push (owner, 2026-11-11: fall through rather
+    // up endpoints prices the push (decision, 2026-11-11: fall through rather
     // than hold); none: hold (stale). Cheap prices never empty a set: they
     // are clamped, below.
     let mut sets: Vec<(Vec<&OrEndpoint>, String)> = quantizations.iter().map(|q| (tier(std::slice::from_ref(q)), q.clone())).collect();
@@ -277,12 +277,12 @@ pub fn or_quote_with(
     used.sort_by(|x, y| x.listed.total_cmp(&y.listed));
     // Cheap-outlier guard: 1/b² weights hand a very cheap listing (a
     // mispricing, a promo) nearly all the weight, so a price under
-    // `min_frac_of_median` of the set's median counts as that floor (owner,
+    // `min_frac_of_median` of the set's median counts as that floor (decision,
     // 2026-11-11: clamp, don't drop). Dropping made the mark jump when the
     // cheapest provider crossed the floor; clamping keeps it continuous and
     // never lets a cheaper listing raise it.
     //
-    // A set under `min_set` endpoints is not clamped (owner, 2026-11-12): with
+    // A set under `min_set` endpoints is not clamped (decision, 2026-11-12): with
     // two points the half-median floor is a quarter of their sum, so it lifted
     // the cheaper legitimate endpoint when an outage left two (DeepInfra
     // $0.2578 priced at $0.3198, mark +23%). Too few points to call one an

@@ -1,0 +1,303 @@
+# drip-markets export manifest (scripts/export_public.py --profile drip-markets).
+# <private path> <public path>, `dir:`, `skip:` and `allow-phrase:` lines; see
+# the exporter's docstring. Exported from the COMMITTED tree (HEAD) only. Every
+# file committed under the profile's checked directories (MARKETS_SCANNED:
+# agents client cranker deploy docs/flop-compute faucet flop-index frontend
+# indexer launch matcher mcp public-markets staging) must appear here as a
+# file, under a dir: entry, or as a skip:. Layout: the private one, with the
+# pinned wrapper fetched into upstream/percolator-prog (scripts/fetch_upstream.sh).
+
+# The site names MCP clients by product name; "Claude" alone stays denylisted.
+allow-phrase: Claude Code
+allow-phrase: claude mcp add
+
+# --- public skeleton (public-markets/) ---
+public-markets/.dockerignore .dockerignore
+public-markets/.github/ISSUE_TEMPLATE/propose-price-rule.md .github/ISSUE_TEMPLATE/propose-price-rule.md
+public-markets/.github/ISSUE_TEMPLATE/report-bad-price.md .github/ISSUE_TEMPLATE/report-bad-price.md
+public-markets/.github/workflows/ci.yml .github/workflows/ci.yml
+public-markets/.gitignore .gitignore
+public-markets/CONTRIBUTING.md CONTRIBUTING.md
+public-markets/LICENSE LICENSE
+public-markets/NOTICE NOTICE
+public-markets/README.md README.md
+public-markets/SECURITY.md SECURITY.md
+public-markets/client/README.md client/README.md
+public-markets/cranker/README.md cranker/README.md
+public-markets/docs/RUNBOOK.md docs/RUNBOOK.md
+public-markets/scripts/env.sh scripts/env.sh
+
+# --- price rule, scorer, feed ---
+docs/flop-compute/FEED.md docs/flop-compute/FEED.md
+docs/flop-compute/INDEX.md docs/flop-compute/INDEX.md
+docs/flop-compute/SCORER.md docs/flop-compute/SCORER.md
+docs/flop-compute/SPEC.md docs/flop-compute/SPEC.md
+flop-index/Cargo.lock flop-index/Cargo.lock
+flop-index/Cargo.toml flop-index/Cargo.toml
+flop-index/pins/2026-11-11/MANIFEST flop-index/pins/2026-11-11/MANIFEST
+flop-index/pins/2026-11-11/SOURCES flop-index/pins/2026-11-11/SOURCES
+flop-index/pins/fetch.sh flop-index/pins/fetch.sh
+flop-index/src/bin/flop-feed.rs flop-index/src/bin/flop-feed.rs
+flop-index/src/bin/flop-score.rs flop-index/src/bin/flop-score.rs
+flop-index/src/feed.rs flop-index/src/feed.rs
+flop-index/src/lib.rs flop-index/src/lib.rs
+flop-index/src/score/candidates.rs flop-index/src/score/candidates.rs
+flop-index/src/score/data.rs flop-index/src/score/data.rs
+flop-index/src/score/mod.rs flop-index/src/score/mod.rs
+flop-index/src/score/rules.rs flop-index/src/score/rules.rs
+flop-index/src/score/tests.rs flop-index/src/score/tests.rs
+flop-index/src/wide.rs flop-index/src/wide.rs
+flop-index/tests/fixtures/wide/mistralai__mistral-small-2603/2026-11-13.jsonl flop-index/tests/fixtures/wide/mistralai__mistral-small-2603/2026-11-13.jsonl
+flop-index/tests/fixtures/wide/qwen__qwen3-14b/2026-11-13.jsonl flop-index/tests/fixtures/wide/qwen__qwen3-14b/2026-11-13.jsonl
+flop-index/tests/fixtures/wide/qwen__qwen3.8-27b/2026-11-13.jsonl flop-index/tests/fixtures/wide/qwen__qwen3.8-27b/2026-11-13.jsonl
+
+# --- WASM rule host: the challenge ABI, template crate and test modules ---
+docs/flop-compute/CHALLENGE_ABI.md docs/flop-compute/CHALLENGE_ABI.md
+flop-index/challenge-template/.cargo/config.toml flop-index/challenge-template/.cargo/config.toml
+flop-index/challenge-template/.gitignore flop-index/challenge-template/.gitignore
+flop-index/challenge-template/Cargo.lock flop-index/challenge-template/Cargo.lock
+flop-index/challenge-template/Cargo.toml flop-index/challenge-template/Cargo.toml
+flop-index/challenge-template/build.sh flop-index/challenge-template/build.sh
+flop-index/challenge-template/examples/hold.rs flop-index/challenge-template/examples/hold.rs
+flop-index/challenge-template/examples/live.rs flop-index/challenge-template/examples/live.rs
+flop-index/challenge-template/examples/median.rs flop-index/challenge-template/examples/median.rs
+flop-index/challenge-template/src/lib.rs flop-index/challenge-template/src/lib.rs
+flop-index/src/score/wasm.rs flop-index/src/score/wasm.rs
+flop-index/src/score/wasm/tests.rs flop-index/src/score/wasm/tests.rs
+flop-index/testdata/recorder-excerpt/2026-11-11T22-4h.jsonl flop-index/testdata/recorder-excerpt/2026-11-11T22-4h.jsonl
+flop-index/testdata/recorder-excerpt/MANIFEST flop-index/testdata/recorder-excerpt/MANIFEST
+flop-index/testdata/wasm/README.md flop-index/testdata/wasm/README.md
+flop-index/testdata/wasm/hold.wasm flop-index/testdata/wasm/hold.wasm
+flop-index/testdata/wasm/hostile/abi-2.wasm flop-index/testdata/wasm/hostile/abi-2.wasm
+flop-index/testdata/wasm/hostile/abi-2.wat flop-index/testdata/wasm/hostile/abi-2.wat
+flop-index/testdata/wasm/hostile/alloc-loops.wasm flop-index/testdata/wasm/hostile/alloc-loops.wasm
+flop-index/testdata/wasm/hostile/alloc-loops.wat flop-index/testdata/wasm/hostile/alloc-loops.wat
+flop-index/testdata/wasm/hostile/costly.wasm flop-index/testdata/wasm/hostile/costly.wasm
+flop-index/testdata/wasm/hostile/costly.wat flop-index/testdata/wasm/hostile/costly.wat
+flop-index/testdata/wasm/hostile/huge-table.wasm flop-index/testdata/wasm/hostile/huge-table.wasm
+flop-index/testdata/wasm/hostile/huge-table.wat flop-index/testdata/wasm/hostile/huge-table.wat
+flop-index/testdata/wasm/hostile/imports.wasm flop-index/testdata/wasm/hostile/imports.wasm
+flop-index/testdata/wasm/hostile/imports.wat flop-index/testdata/wasm/hostile/imports.wat
+flop-index/testdata/wasm/hostile/loops-every-15min.wasm flop-index/testdata/wasm/hostile/loops-every-15min.wasm
+flop-index/testdata/wasm/hostile/loops-every-15min.wat flop-index/testdata/wasm/hostile/loops-every-15min.wat
+flop-index/testdata/wasm/hostile/memory-17-pages.wasm flop-index/testdata/wasm/hostile/memory-17-pages.wasm
+flop-index/testdata/wasm/hostile/memory-17-pages.wat flop-index/testdata/wasm/hostile/memory-17-pages.wat
+flop-index/testdata/wasm/hostile/memory-only.wasm flop-index/testdata/wasm/hostile/memory-only.wasm
+flop-index/testdata/wasm/hostile/memory-only.wat flop-index/testdata/wasm/hostile/memory-only.wat
+flop-index/testdata/wasm/hostile/misaligned.wasm flop-index/testdata/wasm/hostile/misaligned.wasm
+flop-index/testdata/wasm/hostile/misaligned.wat flop-index/testdata/wasm/hostile/misaligned.wat
+flop-index/testdata/wasm/hostile/mut-funcref-global.wasm flop-index/testdata/wasm/hostile/mut-funcref-global.wasm
+flop-index/testdata/wasm/hostile/mut-funcref-global.wat flop-index/testdata/wasm/hostile/mut-funcref-global.wat
+flop-index/testdata/wasm/hostile/odd.wasm flop-index/testdata/wasm/hostile/odd.wasm
+flop-index/testdata/wasm/hostile/odd.wat flop-index/testdata/wasm/hostile/odd.wat
+flop-index/testdata/wasm/hostile/start.wasm flop-index/testdata/wasm/hostile/start.wasm
+flop-index/testdata/wasm/hostile/start.wat flop-index/testdata/wasm/hostile/start.wat
+flop-index/testdata/wasm/hostile/table-set.wasm flop-index/testdata/wasm/hostile/table-set.wasm
+flop-index/testdata/wasm/hostile/table-set.wat flop-index/testdata/wasm/hostile/table-set.wat
+flop-index/testdata/wasm/hostile/too-many-data-segments.wasm flop-index/testdata/wasm/hostile/too-many-data-segments.wasm
+flop-index/testdata/wasm/hostile/too-many-element-segments.wasm flop-index/testdata/wasm/hostile/too-many-element-segments.wasm
+flop-index/testdata/wasm/hostile/too-many-functions.wasm flop-index/testdata/wasm/hostile/too-many-functions.wasm
+flop-index/testdata/wasm/hostile/too-many-globals.wasm flop-index/testdata/wasm/hostile/too-many-globals.wasm
+flop-index/testdata/wasm/live.wasm flop-index/testdata/wasm/live.wasm
+flop-index/testdata/wasm/median.wasm flop-index/testdata/wasm/median.wasm
+skip: docs/flop-compute/PREMISE.md   # owner premise: private
+
+# --- bots: mark pusher, OpenRouter recorder, launch steps, verify-push-log ---
+launch/flop-compute.toml launch/flop-compute.toml
+launch/sol-perp.toml launch/sol-perp.toml
+staging/Cargo.lock staging/Cargo.lock
+staging/Cargo.toml staging/Cargo.toml
+staging/src/launch.rs staging/src/launch.rs
+staging/src/main.rs staging/src/main.rs
+staging/src/pusher.rs staging/src/pusher.rs
+staging/src/pusher/exchanges.rs staging/src/pusher/exchanges.rs
+staging/src/pusher/fixtures/binance.json staging/src/pusher/fixtures/binance.json
+staging/src/pusher/fixtures/binance_ticker.json staging/src/pusher/fixtures/binance_ticker.json
+staging/src/pusher/fixtures/coinbase_l2_snapshot.json staging/src/pusher/fixtures/coinbase_l2_snapshot.json
+staging/src/pusher/fixtures/coinbase_l2update.json staging/src/pusher/fixtures/coinbase_l2update.json
+staging/src/pusher/fixtures/kraken_ticker.json staging/src/pusher/fixtures/kraken_ticker.json
+staging/src/pusher/flop.rs staging/src/pusher/flop.rs
+staging/src/pusher/or_record.rs staging/src/pusher/or_record.rs
+
+# --- keeper + bring-up client (READMEs from public-markets/) ---
+client/Cargo.lock client/Cargo.lock
+client/Cargo.toml client/Cargo.toml
+client/build.rs client/build.rs
+client/src/bin/ts_fixtures.rs client/src/bin/ts_fixtures.rs
+client/src/main.rs client/src/main.rs
+client/src/plan_gate.rs client/src/plan_gate.rs
+cranker/Cargo.lock cranker/Cargo.lock
+cranker/Cargo.toml cranker/Cargo.toml
+cranker/build.rs cranker/build.rs
+cranker/src/binding.rs cranker/src/binding.rs
+cranker/src/cycle.rs cranker/src/cycle.rs
+cranker/src/discovery.rs cranker/src/discovery.rs
+cranker/src/lib.rs cranker/src/lib.rs
+cranker/src/main.rs cranker/src/main.rs
+cranker/src/observation.rs cranker/src/observation.rs
+cranker/src/plan_gate.rs cranker/src/plan_gate.rs
+cranker/src/quarantine.rs cranker/src/quarantine.rs
+cranker/src/resolved.rs cranker/src/resolved.rs
+cranker/src/scheduler.rs cranker/src/scheduler.rs
+cranker/src/setup.rs cranker/src/setup.rs
+cranker/src/submit.rs cranker/src/submit.rs
+cranker/src/work.rs cranker/src/work.rs
+cranker/tests/common/mod.rs cranker/tests/common/mod.rs
+cranker/tests/cycle_resolved.rs cranker/tests/cycle_resolved.rs
+cranker/tests/hard_reject.rs cranker/tests/hard_reject.rs
+cranker/tests/invariants.rs cranker/tests/invariants.rs
+cranker/tests/lifecycle.rs cranker/tests/lifecycle.rs
+cranker/tests/money_path.rs cranker/tests/money_path.rs
+skip: cranker/README.md              # private milestones and notes; public one below
+skip: cranker/scenario-findings.md   # private findings log
+
+# --- indexer, matcher (program + host tools), faucet, MCP, agents ---
+agents/.gitignore agents/.gitignore
+agents/Dockerfile agents/Dockerfile
+agents/README.md agents/README.md
+agents/package-lock.json agents/package-lock.json
+agents/package.json agents/package.json
+agents/src/agent.test.ts agents/src/agent.test.ts
+agents/src/agent.ts agents/src/agent.ts
+agents/src/house.test.ts agents/src/house.test.ts
+agents/src/mcp.test.ts agents/src/mcp.test.ts
+agents/src/mcp.ts agents/src/mcp.ts
+agents/src/run.test.ts agents/src/run.test.ts
+agents/src/run.ts agents/src/run.ts
+agents/src/strategies.test.ts agents/src/strategies.test.ts
+agents/src/strategies/basis.ts agents/src/strategies/basis.ts
+agents/src/strategies/breakout.ts agents/src/strategies/breakout.ts
+agents/src/strategies/hedger.ts agents/src/strategies/hedger.ts
+agents/src/strategies/index.ts agents/src/strategies/index.ts
+agents/src/strategies/meanrev.ts agents/src/strategies/meanrev.ts
+agents/src/strategies/trend.ts agents/src/strategies/trend.ts
+agents/src/strategies/types.ts agents/src/strategies/types.ts
+agents/tsconfig.json agents/tsconfig.json
+faucet/.gitignore faucet/.gitignore
+faucet/README.md faucet/README.md
+faucet/package-lock.json faucet/package-lock.json
+faucet/package.json faucet/package.json
+faucet/src/faucet.test.ts faucet/src/faucet.test.ts
+faucet/src/faucet.ts faucet/src/faucet.ts
+faucet/src/main.test.ts faucet/src/main.test.ts
+faucet/src/main.ts faucet/src/main.ts
+faucet/tsconfig.json faucet/tsconfig.json
+faucet/vitest.config.ts faucet/vitest.config.ts
+indexer/Cargo.lock indexer/Cargo.lock
+indexer/Cargo.toml indexer/Cargo.toml
+indexer/README.md indexer/README.md
+indexer/src/api.rs indexer/src/api.rs
+indexer/src/db.rs indexer/src/db.rs
+indexer/src/decode.rs indexer/src/decode.rs
+indexer/src/ingest.rs indexer/src/ingest.rs
+indexer/src/main.rs indexer/src/main.rs
+indexer/src/stats.rs indexer/src/stats.rs
+indexer/tests/fixtures/crank.json indexer/tests/fixtures/crank.json
+indexer/tests/fixtures/crank_trade.json indexer/tests/fixtures/crank_trade.json
+indexer/tests/fixtures/deposit.json indexer/tests/fixtures/deposit.json
+indexer/tests/fixtures/init_portfolio.json indexer/tests/fixtures/init_portfolio.json
+indexer/tests/fixtures/push_mark.json indexer/tests/fixtures/push_mark.json
+indexer/tests/fixtures/trade_cpi_close.json indexer/tests/fixtures/trade_cpi_close.json
+indexer/tests/fixtures/trade_cpi_open.json indexer/tests/fixtures/trade_cpi_open.json
+matcher/.gitignore matcher/.gitignore
+matcher/LICENSE matcher/LICENSE
+matcher/README.md matcher/README.md
+matcher/host/Cargo.lock matcher/host/Cargo.lock
+matcher/host/Cargo.toml matcher/host/Cargo.toml
+matcher/host/src/bin/matcher_ops.rs matcher/host/src/bin/matcher_ops.rs
+matcher/host/src/lib.rs matcher/host/src/lib.rs
+matcher/host/tests/litesvm.rs matcher/host/tests/litesvm.rs
+matcher/program/Cargo.lock matcher/program/Cargo.lock
+matcher/program/Cargo.toml matcher/program/Cargo.toml
+matcher/program/src/lib.rs matcher/program/src/lib.rs
+mcp/.gitignore mcp/.gitignore
+mcp/README.md mcp/README.md
+mcp/package-lock.json mcp/package-lock.json
+mcp/package.json mcp/package.json
+mcp/src/drip.test.ts mcp/src/drip.test.ts
+mcp/src/drip.ts mcp/src/drip.ts
+mcp/src/env.d.ts mcp/src/env.d.ts
+mcp/src/index.ts mcp/src/index.ts
+mcp/src/tools/claim_test_funds.ts mcp/src/tools/claim_test_funds.ts
+mcp/src/tools/close_position.ts mcp/src/tools/close_position.ts
+mcp/src/tools/deposit.ts mcp/src/tools/deposit.ts
+mcp/src/tools/get_position.ts mcp/src/tools/get_position.ts
+mcp/src/tools/index.ts mcp/src/tools/index.ts
+mcp/src/tools/leaderboard.ts mcp/src/tools/leaderboard.ts
+mcp/src/tools/market_stats.ts mcp/src/tools/market_stats.ts
+mcp/src/tools/open_position.ts mcp/src/tools/open_position.ts
+mcp/src/tools/perps_markets.ts mcp/src/tools/perps_markets.ts
+mcp/src/tools/tool.ts mcp/src/tools/tool.ts
+mcp/src/tools/trade_history.ts mcp/src/tools/trade_history.ts
+mcp/src/tools/withdraw.ts mcp/src/tools/withdraw.ts
+mcp/tsconfig.json mcp/tsconfig.json
+
+# --- site: named top-level and public/ files, source by directory and
+# extension (a new file type, directory or top-level file fails the export) ---
+frontend/.env.example frontend/env.example
+frontend/.env.production frontend/env.production.example
+skip: frontend/PRIOR_ART.md   # private research notes
+skip: frontend/.npmrc         # dot file; save-exact only
+skip: frontend/.vercelignore  # hosting detail
+frontend/.gitignore frontend/.gitignore
+frontend/README.md frontend/README.md
+frontend/index.html frontend/index.html
+frontend/package.json frontend/package.json
+frontend/package-lock.json frontend/package-lock.json
+frontend/tsconfig.json frontend/tsconfig.json
+frontend/vercel.json frontend/vercel.json
+frontend/vite.config.ts frontend/vite.config.ts
+frontend/public/brand/d-mark.svg frontend/public/brand/d-mark.svg
+frontend/public/og.png frontend/public/og.png
+frontend/public/robots.txt frontend/public/robots.txt
+glob: frontend/scripts/*.ts
+glob: frontend/src/*.{ts,tsx,css}
+glob: frontend/src/{arena,chain,challenge,compute,indexer,market,pages,site,trade}/*.{ts,tsx,css}
+glob: frontend/src/site/routes.json
+glob: frontend/src/chain/fixtures/*.{json,bin}
+
+# --- hosting: Dockerfiles, compose, nginx (the monitor stack stays private) ---
+deploy/Dockerfile deploy/Dockerfile
+deploy/Dockerfile.faucet deploy/Dockerfile.faucet
+deploy/Dockerfile.flop-feed deploy/Dockerfile.flop-feed
+deploy/Dockerfile.indexer deploy/Dockerfile.indexer
+deploy/docker-compose.yml deploy/docker-compose.yml
+deploy/indexer-nginx.conf deploy/indexer-nginx.conf
+deploy/launch.env.example deploy/launch.env.example
+skip: deploy/alertmanager.yml                    # monitor stack (Telegram alerts)
+skip: deploy/prometheus.yml                      # monitor stack
+skip: deploy/systemd/percolator-bots.service     # operator host units
+skip: deploy/systemd/percolator-monitor.service  # operator host units
+skip: deploy/systemd/percolator-staging@.service # operator host units
+
+# --- top-level build files ---
+scripts/fetch_upstream.sh scripts/fetch_upstream.sh
+scripts/pins.env scripts/pins.env
+
+# --- binaries: the only binary files the tree may hold, each pinned by
+# sha256 (public path). A changed or new binary fails the export until its
+# pin is updated on purpose. ---
+sha256: 8fde22cfb73b2b9a44f859182ce8e89cb515290d5dd029a791b8c3a4c8f18ad8 frontend/public/og.png
+sha256: ba3a73bc308b49e903b7e720fe4e4833b977ed8a5005bd054e5170d42524c335 frontend/src/chain/fixtures/lp_portfolio.bin
+sha256: 4ad8ef1cddd8c0afc5c84f37e5683bed5a5ecef80c5e1f869bb6018a42cc9c52 frontend/src/chain/fixtures/market.bin
+sha256: 1a189d637d9c68c0e54089f5c0d17a7d64a28a2ab4903d5d0eedfd9c48f9c59e frontend/src/chain/fixtures/portfolio.bin
+sha256: 08a5ed48b554a9e02f3b9f3c768b4842765d05014d527c1381f1b5c25fa254d9 flop-index/testdata/wasm/hold.wasm
+sha256: 8d3c4f1dd4b38dbf2aa8c63201b15a66793e684d747b87df167dff06f2db1e8b flop-index/testdata/wasm/hostile/abi-2.wasm
+sha256: cf475cccc36047790813ab722ee0f8f9dff13dc0e84ed7e3e914b05be3acc317 flop-index/testdata/wasm/hostile/alloc-loops.wasm
+sha256: cbc3380e0aa8e2e53ad15446d8cfcfe0769256836496ccda1b12a9b4546db149 flop-index/testdata/wasm/hostile/costly.wasm
+sha256: ac2833b38702206bbdc09c88c09c4e1ad9a16eef2f3ea5bf87ba6a87249804e1 flop-index/testdata/wasm/hostile/huge-table.wasm
+sha256: 77c668308bfa4207d6bfb4238568c1d60617dab6f94cb86102a3d16758c04f5f flop-index/testdata/wasm/hostile/imports.wasm
+sha256: fe7fbd7da8baabf057e8f378446bb75ca02e3619d024e8ee04aa79e4dfa2aeb4 flop-index/testdata/wasm/hostile/loops-every-15min.wasm
+sha256: 1d3f06793e9e24b02fb523917b85ac5091f2438eee65b05c970467db84782d33 flop-index/testdata/wasm/hostile/memory-17-pages.wasm
+sha256: 86b83c292b6362ce9b0e8b468f00c88186366ca4292be39a7acb5808d9f13d39 flop-index/testdata/wasm/hostile/memory-only.wasm
+sha256: bb8719faf0e5b1dc9ee6538ef22aa239f5ff9b17ce54dc9ea3093209e8515428 flop-index/testdata/wasm/hostile/misaligned.wasm
+sha256: 55e7d0f1548bfcad491869133400e8fb0a557b3a8c7fdfa99646ae43ebdca6cc flop-index/testdata/wasm/hostile/mut-funcref-global.wasm
+sha256: 0eaace6a3ae259adc1b530963bb609a12728b91201e996ecb33cacc2c13b5bed flop-index/testdata/wasm/hostile/odd.wasm
+sha256: 426dff64ca3167bae7acd0407f9b218153ba7085a2bc0d8416c94ff9cf4574e3 flop-index/testdata/wasm/hostile/start.wasm
+sha256: 7d095a357dae6a3a96bd716aeeb88fe0252a2a2980285d528ae0b34f2fffd36a flop-index/testdata/wasm/hostile/table-set.wasm
+sha256: 1c53e93c28f776a18f563d5d13d21a47bb791609d2258506ab77f1e68bfb183e flop-index/testdata/wasm/hostile/too-many-data-segments.wasm
+sha256: 43cb0d40c958d347fce16a5801cb8608ea85b45ddfa9ca0ab3b31faaea46292c flop-index/testdata/wasm/hostile/too-many-element-segments.wasm
+sha256: a398cff60fed71dc7acf376e07b1c8c62a895f1c25ce522475e005ad16e50520 flop-index/testdata/wasm/hostile/too-many-functions.wasm
+sha256: 9dfc23292901904b32da35e5d3121f114b1b3b4b0b6793eca3bb21758cd12f89 flop-index/testdata/wasm/hostile/too-many-globals.wasm
+sha256: 9599eb277ca22c041c6edbffe9a2b4178006f0dfa82b943909109551f4a18aaa flop-index/testdata/wasm/live.wasm
+sha256: 5f1adec6e6bc8ebdcdd964b21acbf91fce74524c17a327cc9dd5a6b6323a8820 flop-index/testdata/wasm/median.wasm

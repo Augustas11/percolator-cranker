@@ -668,7 +668,7 @@ mod tests {
         assert_eq!(order, vec![0, 1, 2, 3, 4, 0]);
     }
 
-    /// Audit finding: with 8 txs and 4-tx drains (quotas 4/2/2), a pending
+    /// Regression: with 8 txs and 4-tx drains (quotas 4/2/2), a pending
     /// drain used to take 4 txs and leave quiet accounts nothing. A drain is
     /// now capped at its class's remaining quota while others still need it.
     #[test]
@@ -697,7 +697,7 @@ mod tests {
         assert!(quiet_txs >= 5 * 2, "quiet got {quiet_txs} txs over 5 cycles");
     }
 
-    /// Re-audit finding: a deadline hit before the send used to fall through
+    /// A deadline hit before the send used to fall through
     /// to Idle (clearing history, bumping the idle streak, losing its place).
     /// Deferred touches no streak and keeps the account first next cycle;
     /// Unconfirmed is reported, never Idle or Failed.
@@ -728,7 +728,7 @@ mod tests {
         assert_eq!(order, vec![1, 1, 2]);
     }
 
-    /// Re-audit finding: a standalone Unconfirmed outcome (no budget note)
+    /// A standalone Unconfirmed outcome (no budget note)
     /// must still be reported once, and must not touch account health.
     #[test]
     fn standalone_unconfirmed_is_reported_and_neutral() {
@@ -751,7 +751,7 @@ mod tests {
         assert_eq!((s.idle, s.failed, s.idle_pending_stuck), (0, 0, 0));
     }
 
-    /// Re-audit finding: an unconfirmed tail after earlier drain progress
+    /// An unconfirmed tail after earlier drain progress
     /// must still be reported, alongside the Progress.
     #[test]
     fn unconfirmed_tail_is_reported_even_after_progress() {
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!(s.unconfirmed, vec![(pk(1), "tail-sig".to_string())]);
     }
 
-    /// Audit finding: position cursors broke when class membership changed.
+    /// Regression: position cursors broke when class membership changed.
     /// With last-visited pubkeys, a deferred account is first next cycle even
     /// when a new account sorting before it joins.
     #[test]
@@ -791,7 +791,7 @@ mod tests {
         assert_eq!(served, vec![10, 11, 12, 5]);
     }
 
-    /// Audit finding: with a 1-tx budget every cycle used to start (and end)
+    /// Regression: with a 1-tx budget every cycle used to start (and end)
     /// with a liquidatable account. The class turn now persists across
     /// cycles, and a deferred class opens the next cycle.
     #[test]

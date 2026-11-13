@@ -2115,7 +2115,7 @@ mod tests {
         assert_eq!(Config::from_json(&Value::Null), None);
     }
 
-    /// Real collector lines (2026-11-13), three models, plus junk.
+    /// Collector lines in the real shape (synthetic sellers and prices), three models, plus junk.
     #[test]
     fn end_to_end_on_the_fixture() {
         let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/wide"));
@@ -2123,7 +2123,7 @@ mod tests {
         let v = run(dir, now);
         let i = &v["index"];
         assert_eq!((i["level"].as_f64(), i["base_ms"].as_u64(), i["n_models"].as_u64()), (Some(100.0), Some(1_794_559_021_841), Some(1)));
-        // Mistral lists three regional endpoints of one (provider, quantization): one quote.
+        // The Mistral model lists three regional endpoints of one (provider, quantization): one quote.
         assert_eq!((i["n_quotes"].as_u64(), i["n_quotes_up"].as_u64()), (Some(25), Some(22)));
         assert_eq!((i["change_24h_pct"].clone(), i["change_7d_pct"].clone()), (Value::Null, Value::Null));
         // The window ends at the newest snapshot read, not at write time.
@@ -2131,24 +2131,24 @@ mod tests {
         assert_eq!((v["data_ms"].as_u64(), v["generated_ms"].as_u64()), (Some(1_794_559_021_841), Some(now + STEP_LAG_MS)));
         let q = model(&v, "qwen/qwen3.8-27b");
         assert_eq!((q["name"].as_str(), q["sellers_total"].as_u64(), q["sellers_up"].as_u64(), q["thin"].as_bool()), (Some("Qwen3.8 27B"), Some(22), Some(19), Some(false)));
-        assert!(close(q["median"].as_f64().unwrap(), 0.296875));
-        // 52 G_n per token (registry): 0.296875 / 52e6 × 1e9 = $5.709 per billion G_n.
+        assert!(close(q["median"].as_f64().unwrap(), 0.3109375));
+        // 52 G_n per token (registry): 0.3109375 / 52e6 × 1e9 = $5.980 per billion G_n.
         assert_eq!(q["compute"], json!({ "params": null, "active_params": null, "active_params_source": null, "gn_per_token": 52.0, "basis": "flop_registry", "source": "flop_registry" }));
-        assert!(close(q["usd_per_bn_gn"].as_f64().unwrap(), 0.296875 / 52.0 * 1e3));
+        assert!(close(q["usd_per_bn_gn"].as_f64().unwrap(), 0.3109375 / 52.0 * 1e3));
         assert_eq!(model(&v, "qwen/qwen3-14b")["usd_per_bn_gn"], Value::Null);
         assert_eq!((v["compute_price"]["n_models"].as_u64(), v["compute_price"]["n_unknown"].as_u64(), v["flop"]["implied_flop_usd"].clone()), (Some(1), Some(0), Value::Null));
-        assert!(close(q["min"].as_f64().unwrap(), 0.1146875) && close(q["max"].as_f64().unwrap(), 1.02125));
-        assert_eq!(q["cheapest"]["provider"], "Chutes");
+        assert!(close(q["min"].as_f64().unwrap(), 0.09828125) && close(q["max"].as_f64().unwrap(), 1.2075));
+        assert_eq!(q["cheapest"]["provider"], "Seller E");
         let qs = q["quotes"].as_array().unwrap();
         assert!(qs.windows(2).all(|w| (!w[0]["up"].as_bool().unwrap(), w[0]["price"].as_f64()) <= (!w[1]["up"].as_bool().unwrap(), w[1]["price"].as_f64())));
         assert!(!qs.last().unwrap()["up"].as_bool().unwrap());
         let m = model(&v, "mistralai/mistral-small-2603");
-        // The cheapest of the three: (15 × 1.5e-7 + 6e-7) / 16 × 1e6.
+        // The cheapest of the three: (15 × 1.32e-7 + 5.28e-7) / 16 × 1e6.
         assert_eq!((m["sellers_total"].as_u64(), m["thin"].as_bool()), (Some(1), Some(true)));
-        assert!(close(m["median"].as_f64().unwrap(), 0.178125));
+        assert!(close(m["median"].as_f64().unwrap(), 0.15675));
         let t = model(&v, "qwen/qwen3-14b");
         assert_eq!((t["thin"].as_bool(), t["sellers_up"].as_u64()), (Some(true), Some(2)));
-        assert!(close(t["median"].as_f64().unwrap(), 0.1175));
+        assert!(close(t["median"].as_f64().unwrap(), 0.109828125));
         // Its empty listing five minutes earlier counts as down for both quotes.
         assert!(t["quotes"].as_array().unwrap().iter().all(|x| x["uptime_24h_pct"] == 50.0));
         let ids: Vec<&str> = v["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();

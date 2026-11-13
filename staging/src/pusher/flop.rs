@@ -1449,7 +1449,7 @@ mod tests {
         let mut loose = o.clone();
         loose.or_min_frac_of_median = 0.0;
         assert!(or_quote(&eps, NOW, &loose).unwrap().usd_e6 < 20_000);
-        // Two endpoints, one slashed to ~$0.01: not clamped (owner, 2026-11-12:
+        // Two endpoints, one slashed to ~$0.01: not clamped (decision, 2026-11-12:
         // two points can't name an outlier), so the mark follows it. The
         // accepted cost of not lifting real prices after an outage.
         let eps = [ep("DeepInfra", "bf16", 0.005, 0.08), ep("GMICloud", "bf16", b.0, b.1)];

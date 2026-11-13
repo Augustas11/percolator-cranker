@@ -1,0 +1,28 @@
+# Build output
+target/
+**/target/
+node_modules/
+dist/
+
+# Pinned upstream wrapper (scripts/fetch_upstream.sh)
+upstream/
+
+# Keys, env files, run state: never commit
+.env
+.env.*
+keys/
+*.pem
+*keypair*.json
+launch-runs/
+deploy/.env
+**/faucet-state.json*
+indexer/*.sqlite*
+/indexer.sqlite*
+
+# Local tooling
+.solana-test-ledger/
+*.log
+.DS_Store
+
+# Scorer data (flop-index/pins/fetch.sh)
+/data/

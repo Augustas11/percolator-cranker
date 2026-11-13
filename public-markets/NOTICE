@@ -1,0 +1,28 @@
+Drip
+Copyright 2026 the Drip contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository depends on, and in one place derives from, the Percolator
+projects, all licensed under the Apache License, Version 2.0:
+
+* matcher/program is derived from percolator-match
+  (https://github.com/aeyakovenko/percolator-match) at commit 60aac3a,
+  Copyright 2025 Anatoly Yakovenko. Its licence is matcher/LICENSE; the
+  changes are listed at the top of matcher/program/src/lib.rs.
+
+* The Rust crates build against the Percolator engine
+  (https://github.com/aeyakovenko/percolator) and its Solana wrapper
+  (https://github.com/aeyakovenko/percolator-prog), at the forks and commits
+  pinned in scripts/pins.env. Their source is not included here: Cargo and
+  scripts/fetch_upstream.sh fetch it, with its own LICENSE files.
+
+* frontend/src/chain encodes and decodes the wrapper's instruction and
+  account layouts. It was written against the pinned wrapper; no upstream
+  code is copied.
+
+Price data is read from public sources at run time (OpenRouter's public
+model endpoints list; the pinned scorer data listed in
+flop-index/pins/*/SOURCES, which is downloaded from its sources and not
+included here). This project is not affiliated with Flop Labs (FLOP
+Network) or OpenRouter.

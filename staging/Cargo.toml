@@ -2,6 +2,8 @@
 name = "staging"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Augustas11/drip-markets"
 publish = false
 
 # Private: the local staging market (docs/STAGING.md). Not exported.
