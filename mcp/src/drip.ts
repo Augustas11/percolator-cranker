@@ -178,9 +178,9 @@ export class Drip {
     if (!this.cfg.matcherContext) throw new Error("Matcher context is not configured");
     const state = parseMatcher((await this.account(this.cfg.matcherContext)).data);
     return { state, output: {
-      paused: state.paused, max_fill_sol: units(state.maxFill), max_fill_atoms: state.maxFill.toString(),
-      lp_inventory_sol: units(state.inventory), inventory_atoms: state.inventory.toString(),
-      inventory_cap_sol: units(state.inventoryCap), inventory_cap_atoms: state.inventoryCap.toString(),
+      paused: state.paused, max_fill: units(state.maxFill), max_fill_atoms: state.maxFill.toString(),
+      lp_inventory: units(state.inventory), inventory_atoms: state.inventory.toString(),
+      inventory_cap: units(state.inventoryCap), inventory_cap_atoms: state.inventoryCap.toString(),
       ref_price: units(state.refPrice), ref_age_slots: (BigInt(await this.conn.getSlot()) - state.refSlot).toString(),
     } };
   }
