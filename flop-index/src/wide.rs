@@ -61,6 +61,8 @@ struct Row {
     /// (prompt, completion) in USD per token, when `price` is set.
     pc: Option<[f64; 2]>,
     up: bool,
+    /// OpenRouter's `uptime_30m` (0–100), if it has recent traffic.
+    uptime: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -137,7 +139,8 @@ fn read_day(path: &Path, quotes: &mut Quotes) -> Result<Vec<Snap>> {
                 let up = r["status"].is_null() || r["status"].as_i64() == Some(0);
                 let (p, c) = (r["prompt"].as_f64(), r["completion"].as_f64());
                 let price = blend(p, c);
-                Some(Row { quote: quotes.id(key, provider, quant), listing, price, pc: price.and_then(|_| Some([p?, c?])), up })
+                let uptime = r["uptime_30m"].as_f64().filter(|u| u.is_finite()).map(|u| u.clamp(0.0, 100.0));
+                Some(Row { quote: quotes.id(key, provider, quant), listing, price, pc: price.and_then(|_| Some([p?, c?])), up, uptime })
             })
             .collect::<Vec<Row>>();
         out.push(Snap { at_ms, rows: dedup(rows.clone()), raw: rows });
@@ -667,6 +670,79 @@ fn quantile(v: &mut [f64], q: f64) -> Option<f64> {
     (!v.is_empty()).then(|| percentile(v, q))
 }
 
+/// Routed price points per model, at most.
+pub const ROUTED_POINTS: usize = 300;
+/// The most of a model's routed weight one provider may carry.
+pub const MAX_SHARE: f64 = 0.5;
+
+/// Shares ∝ `w`, no share over `cap` (the excess goes to the others in
+/// proportion to their weight) when at least 1 / `cap` weights are above 0.
+/// Also whether the cap acted.
+pub fn route_shares(w: &[f64], cap: f64) -> (Vec<f64>, bool) {
+    let total: f64 = w.iter().sum();
+    let mut s: Vec<f64> = w.iter().map(|x| x / total).collect();
+    if (w.iter().filter(|x| **x > 0.0).count() as f64) * cap < 1.0 {
+        return (s, false);
+    }
+    let (mut fixed, mut capped) = (vec![false; w.len()], false);
+    loop {
+        let free = 1.0 - cap * fixed.iter().filter(|f| **f).count() as f64;
+        let rest: f64 = w.iter().zip(&fixed).filter(|(_, f)| !**f).map(|(x, _)| x).sum();
+        let mut again = false;
+        for i in 0..w.len() {
+            if fixed[i] {
+                continue;
+            }
+            s[i] = w[i] / rest * free;
+            if s[i] > cap * (1.0 + 1e-12) {
+                (s[i], fixed[i], again, capped) = (cap, true, true, true);
+            }
+        }
+        if !again {
+            return (s, capped);
+        }
+    }
+}
+
+/// What a request pays now, spread over a model's sellers the way
+/// OpenRouter's default routing spreads traffic.
+#[derive(Debug, PartialEq)]
+pub struct Routed {
+    pub price: f64,
+    /// (quote, price, share), largest share first; shares sum to 1.
+    pub sellers: Vec<(u32, f64, f64)>,
+    pub uptime_fallback: bool,
+    pub capped: bool,
+}
+
+/// Over the up, priced quotes of a snapshot, one per provider (its lowest),
+/// weight ∝ uptime_30m / 100 ÷ price² (no recent uptime: 0; all 0: 1 ÷
+/// price² each), shares capped at `MAX_SHARE`; price = Σ share × price.
+fn routed(rows: &[Row], prov: &[u32]) -> Option<Routed> {
+    let mut low: BTreeMap<u32, (u32, f64, Option<f64>)> = BTreeMap::new();
+    for r in rows.iter().filter(|r| r.up) {
+        let Some(p) = r.price.filter(|p| *p > 0.0) else { continue };
+        let e = low.entry(prov[r.quote as usize]).or_insert((r.quote, p, r.uptime));
+        if p < e.1 {
+            *e = (r.quote, p, r.uptime);
+        }
+    }
+    let picks: Vec<(u32, f64, Option<f64>)> = low.into_values().collect();
+    if picks.is_empty() {
+        return None;
+    }
+    let mut w: Vec<f64> = picks.iter().map(|(_, p, u)| u.map_or(0.0, |u| u / 100.0) / (p * p)).collect();
+    let uptime_fallback = !w.iter().any(|x| *x > 0.0);
+    if uptime_fallback {
+        w = picks.iter().map(|(_, p, _)| 1.0 / (p * p)).collect();
+    }
+    let (share, capped) = route_shares(&w, MAX_SHARE);
+    let price = picks.iter().zip(&share).map(|((_, p, _), s)| p * s).sum();
+    let mut sellers: Vec<(u32, f64, f64)> = picks.iter().zip(&share).filter(|(_, s)| **s > 0.0).map(|((q, p, _), s)| (*q, *p, *s)).collect();
+    sellers.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.1.total_cmp(&b.1)));
+    Some(Routed { price, sellers, uptime_fallback, capped })
+}
+
 /// Linear-interpolated percentile of sorted, non-empty values (q in 0..=1).
 pub fn percentile(sorted: &[f64], q: f64) -> f64 {
     let pos = q * (sorted.len() - 1) as f64;
@@ -953,6 +1029,9 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
     // Over non-thin models: USD per bn G_n, mixes, completion ÷ prompt.
     let (mut per_gn, mut mixes, mut ratios) = (Vec::new(), [Vec::new(), Vec::new(), Vec::new()], Vec::new());
     let (mut basis_gn, mut n_unknown, mut n_estimated) = (None, 0, 0);
+    // The benchmark's routed price, its USD per bn G_n, series and time.
+    type Bench = (Option<f64>, Option<f64>, Vec<Value>, u64);
+    let mut bench: Option<Bench> = None;
     for m in models {
         let Some(latest) = m.snaps.last() else { continue };
         // Stale: nothing fetched for this model for 30 minutes; none of its quotes is up.
@@ -1015,6 +1094,25 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
                 basis_gn = u;
             }
         }
+        // Routed price: at every snapshot (series), and now (none if stale).
+        let r_pts: Vec<(u64, f64)> = m.snaps.iter().filter_map(|s| Some((s.at_ms, routed(&s.rows, prov)?.price))).collect();
+        let r_now = if stale { None } else { routed(&latest.rows, prov) };
+        let r_price = r_now.as_ref().map(|r| r.price);
+        let r_series: Vec<Value> = steps(&r_pts, ROUTED_POINTS).iter().map(|p| json!([p.0, p.1])).collect();
+        let routed_gn = r_price.and_then(per_bn).filter(|x| x.is_finite());
+        let routed_json = json!({
+            "price": r_price,
+            "sellers": r_now.as_ref().map_or(0, |r| r.sellers.len()),
+            "top": r_now.as_ref().map_or(Vec::new(), |r| r.sellers.iter().take(5).map(|(q, p, sh)| json!({ "provider": names[*q as usize].0, "quantization": names[*q as usize].1, "price": p, "share": sh })).collect()),
+            "change_1h_pct": r_price.and_then(|p| pct(p, at_or_before(&r_pts, now_ms.saturating_sub(3_600_000)))),
+            "change_24h_pct": r_price.and_then(|p| pct(p, at_or_before(&r_pts, day_ago))),
+            "uptime_fallback": r_now.as_ref().is_some_and(|r| r.uptime_fallback),
+            "capped": r_now.as_ref().is_some_and(|r| r.capped),
+            "series": r_series,
+        });
+        if ids().any(|id| id == BASIS_MODEL) {
+            bench = Some((r_price, routed_gn, r_series.clone(), latest.at_ms));
+        }
         // Quotes listed now that were not listed 7 days ago (null without data that old).
         let week_ago = now_ms.saturating_sub(7 * DAY_MS);
         let then = m.snaps.partition_point(|s| s.at_ms <= week_ago).checked_sub(1).map(|i| &m.snaps[i]);
@@ -1030,6 +1128,7 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
             "usd_per_bn_gn": per_bn(median), "usd_per_bn_gn_min": per_bn(range(0.0)), "usd_per_bn_gn_max": per_bn(range(1.0)),
             "mix": { "chat_3_1": mix_at[0], "avg_15_1": mix_at[1], "agent_150_1": mix_at[2] },
             "out_in_ratio": out_in,
+            "routed": routed_json, "routed_usd_per_bn_gn": routed_gn,
             "cheapest": cheapest.map(|(q, p)| json!({ "provider": names[q as usize].0, "quantization": names[q as usize].1, "price": p })),
             "change_24h_pct": pct(median, m.median_at(day_ago)),
             "series": steps(&pts, MODEL_POINTS).iter().map(|p| json!([p.0, p.1])).collect::<Vec<_>>(),
@@ -1080,6 +1179,10 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
         .map(|(name, (ms, q, up, of, cheap))| json!({ "name": name, "models": ms.len(), "quotes": q, "uptime_24h_pct": (*of > 0).then(|| *up as f64 / *of as f64 * 100.0), "cheapest_in": cheap }))
         .collect();
     providers.sort_by(|a, b| b["models"].as_u64().cmp(&a["models"].as_u64()).then(a["name"].as_str().cmp(&b["name"].as_str())));
+    // USD per G_n ÷ FLOP per G_n = USD per FLOP.
+    let to_flop = |usd_per_bn: Option<f64>| usd_per_bn.zip(compute.gn_price_flop).filter(|(_, f)| *f > 0.0).map(|(u, f)| u / 1e9 / f);
+    let routed_bench = bench.as_ref().and_then(|b| b.1);
+    let (implied, implied_routed) = (to_flop(basis_gn), to_flop(routed_bench));
     let first = models.iter().filter_map(|m| m.snaps.first()).map(|s| s.at_ms).min();
     let data_ms = models.iter().filter_map(|m| m.snaps.last()).map(|s| s.at_ms).max();
     json!({
@@ -1098,9 +1201,18 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
         },
         "mixes": { "chat_3_1": quantile(&mut mixes[0], 0.5), "avg_15_1": quantile(&mut mixes[1], 0.5), "agent_150_1": quantile(&mut mixes[2], 0.5) },
         "out_in_ratio_median": quantile(&mut ratios, 0.5),
+        "routed": {
+            "benchmark": BASIS_MODEL, "price": bench.as_ref().and_then(|b| b.0), "usd_per_bn_gn": routed_bench,
+            "series": bench.as_ref().map_or(Vec::new(), |b| b.2.clone()),
+        },
         "flop": {
             "gn_price_flop": compute.gn_price_flop, "basis_model": BASIS_MODEL,
-            "implied_flop_usd": basis_gn.zip(compute.gn_price_flop).filter(|(_, f)| *f > 0.0).map(|(u, f)| u / 1e9 / f),
+            "implied_flop_usd": implied, "implied_flop_usd_routed": implied_routed,
+            "parity": {
+                "market_usd_per_bn_gn": routed_bench, "flop_rate_flop_per_gn": compute.gn_price_flop,
+                "implied_flop_usd": implied, "implied_flop_usd_routed": implied_routed,
+                "as_of_ms": bench.as_ref().map(|b| b.3),
+            },
         },
         "models": out_models,
         "demand_rank": demand_rank,
@@ -1902,6 +2014,70 @@ mod tests {
         // Only x/ok counts: $1 per 1M at 10 G_n per token = $100 per bn G_n.
         assert_eq!(v["compute_price"], json!({ "median_usd_per_bn_gn": 100.0, "p25": 100.0, "p75": 100.0, "n_models": 1, "n_estimated": 0, "n_unknown": 1 }));
         assert_eq!(v["mixes"]["avg_15_1"], 1.0);
+    }
+
+    #[test]
+    fn route_shares_cap_one_provider_at_half() {
+        let r = |w: &[f64]| route_shares(w, MAX_SHARE);
+        assert_eq!(r(&[1.0, 1.0]), (vec![0.5, 0.5], false));
+        assert_eq!(r(&[3.0, 1.0]), (vec![0.5, 0.5], true));
+        assert_eq!(r(&[8.0, 1.0, 1.0]), (vec![0.5, 0.25, 0.25], true));
+        assert_eq!(r(&[1.0, 2.0, 1.0]), (vec![0.25, 0.5, 0.25], false));
+        // One seller with weight carries it all: the cap cannot apply.
+        assert_eq!(r(&[2.0, 0.0]), (vec![1.0, 0.0], false));
+    }
+
+    #[test]
+    fn routed_price_weights_cap_uptime_and_parity() {
+        let d = tmp("routed");
+        let now = T0 + 3 * HOUR;
+        // (provider, USD per 1M at 15:1, status, uptime_30m)
+        let snap = |m: &str, at: u64, rows: &[(&str, f64, i64, Option<f64>)]| {
+            let rows: Vec<Value> = rows.iter().map(|(p, x, st, u)| json!({ "provider": p, "tag": p, "quantization": "bf16", "prompt": x / 1e6, "completion": x / 1e6, "status": st, "uptime_30m": u })).collect();
+            json!({ "at_ms": at, "model": m, "rows": rows }).to_string()
+        };
+        put(&d, &[
+            // Weights 100/2², 100/2², 100/4² → shares 4/9, 4/9, 1/9, none
+            // over half: Σ(u/p) / Σ(u/p²) = 1.25 / 0.5625 = 2.2222.
+            snap("qwen/qwen3.8-27b", now - 2 * HOUR, &[("A", 2.0, 0, Some(100.0)), ("B", 2.0, 0, Some(100.0)), ("C", 4.0, 0, Some(100.0))]),
+            // A 1/1², B 1/2², C 0.5/4²: A would take 78% (price 1.2683); capped
+            // at 50%, B and C share the rest 8:1: 0.5 × 1 + 4/9 × 2 + 1/18 × 4.
+            // D has no recent uptime (weight 0); E is down (not counted).
+            snap("qwen/qwen3.8-27b", now - MIN, &[("A", 1.0, 0, Some(100.0)), ("B", 2.0, 0, Some(100.0)), ("C", 4.0, 0, Some(50.0)), ("D", 0.5, 0, None), ("E", 0.1, -2, Some(100.0))]),
+            // Every seller without uptime: 1 / price² each, then the cap.
+            snap("x/null", now - MIN, &[("A", 1.0, 0, None), ("B", 2.0, 0, None), ("C", 4.0, 0, None)]),
+        ]);
+        let mut w = Wide::default();
+        w.compute.gn_price_flop = Some(0.002);
+        w.update(&d, now).unwrap();
+        let v = w.market_json(now + STEP_LAG_MS).unwrap();
+        let q = &model(&v, "qwen/qwen3.8-27b")["routed"];
+        let want = 0.5 + 8.0 / 9.0 + 4.0 / 18.0;
+        assert!(close(q["price"].as_f64().unwrap(), want), "{q}");
+        assert_eq!((q["sellers"].as_u64(), q["capped"].as_bool(), q["uptime_fallback"].as_bool()), (Some(3), Some(true), Some(false)));
+        let top: Vec<(&str, f64)> = q["top"].as_array().unwrap().iter().map(|t| (t["provider"].as_str().unwrap(), t["share"].as_f64().unwrap())).collect();
+        assert_eq!(top.iter().map(|t| t.0).collect::<Vec<_>>(), ["A", "B", "C"]);
+        assert!(close(top[0].1, 0.5) && close(top[1].1, 4.0 / 9.0) && close(top[2].1, 1.0 / 18.0));
+        assert!(close(q["change_1h_pct"].as_f64().unwrap(), (want / (1.25 / 0.5625) - 1.0) * 100.0));
+        assert_eq!(q["change_24h_pct"], Value::Null);
+        let series: Vec<f64> = q["series"].as_array().unwrap().iter().map(|p| p[1].as_f64().unwrap()).collect();
+        assert!(series.len() == 2 && close(series[0], 1.25 / 0.5625) && close(series[1], want));
+        let x = &model(&v, "x/null")["routed"];
+        assert_eq!((x["uptime_fallback"].as_bool(), x["capped"].as_bool()), (Some(true), Some(true)));
+        // A 0.5; B, C 1/4 : 1/16 of the rest → 0.4, 0.1.
+        assert!(close(x["price"].as_f64().unwrap(), 0.5 + 0.8 + 0.4));
+        // Parity at 52 G_n per token: USD per bn G_n, then ÷ 1e9 ÷ FLOP per G_n.
+        let gn = want / 52.0 * 1e3;
+        assert!(close(model(&v, "qwen/qwen3.8-27b")["routed_usd_per_bn_gn"].as_f64().unwrap(), gn));
+        assert_eq!(model(&v, "x/null")["routed_usd_per_bn_gn"], Value::Null);
+        assert_eq!((v["routed"]["benchmark"].as_str(), v["routed"]["series"].as_array().map(Vec::len)), (Some(BASIS_MODEL), Some(2)));
+        assert!(close(v["routed"]["price"].as_f64().unwrap(), want) && close(v["routed"]["usd_per_bn_gn"].as_f64().unwrap(), gn));
+        let par = &v["flop"]["parity"];
+        assert!(close(v["flop"]["implied_flop_usd_routed"].as_f64().unwrap(), gn / 1e9 / 0.002));
+        assert_eq!((par["flop_rate_flop_per_gn"].as_f64(), par["as_of_ms"].as_u64(), par["implied_flop_usd_routed"].clone()), (Some(0.002), Some(now - MIN), v["flop"]["implied_flop_usd_routed"].clone()));
+        assert!(close(par["market_usd_per_bn_gn"].as_f64().unwrap(), gn));
+        // The median (list prices, held) is a different number: D at 0.5 counts there.
+        assert_eq!(par["implied_flop_usd"], v["flop"]["implied_flop_usd"]);
     }
 
     /// DeepSeek-V3's `config.json` (685B weights).

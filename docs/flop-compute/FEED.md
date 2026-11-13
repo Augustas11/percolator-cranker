@@ -136,12 +136,15 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
 | `models[].usd_per_bn_gn` | `median` in USD per billion G_n; `usd_per_bn_gn_min`, `usd_per_bn_gn_max` likewise from `min`, `max` |
 | `models[].mix` | `chat_3_1`, `avg_15_1`, `agent_150_1`: USD per 1M tokens at 3:1, 15:1, 150:1 input:output (`avg_15_1` = `median`); null with no set |
 | `models[].out_in_ratio` | Median completion ÷ prompt price over the median's set; null if none has a prompt price above 0 |
+| `models[].routed` | The routed price (below): `price` (null when no seller is up, or the model is `stale`), `sellers` (providers with a share above 0), `top[]` (up to 5 by share: `provider`, `quantization`, `price`, `share`), `change_1h_pct`, `change_24h_pct` (null without data that old), `uptime_fallback`, `capped`, `series` (`[t_ms, price]`, at most 300, both sides of every change) |
+| `models[].routed_usd_per_bn_gn` | `routed.price` in USD per billion G_n; null when either is unknown |
 | `models[].sellers_added_7d` | Quotes (provider, quantization) listed now that were not listed in the snapshot 7 days ago; null without data that old. Sellers adding a model is a supply-side read of demand. |
 | `models` (empty) | With no wide data yet the file is still written, with `models: []`, null `data_ms`, `level` and `base_ms` |
 | `compute_price` | `median_usd_per_bn_gn`, `p25`, `p75` of `usd_per_bn_gn` over models that are neither `thin` nor `stale` and have a finite one, and their count `n_models`, of which `n_estimated` use a config estimate; `n_unknown` counts the models neither `thin` nor `stale` left out for lack of a G_n figure; null with none |
 | `mixes` | `chat_3_1`, `avg_15_1`, `agent_150_1`: the median of the models' `mix` (models neither `thin` nor `stale`) |
 | `out_in_ratio_median` | The median of the models' `out_in_ratio` (models neither `thin` nor `stale`) |
-| `flop` | `gn_price_flop` (from `--flop-gn-price`, or null), `basis_model` (`qwen/qwen3.8-27b`), `implied_flop_usd` (null without both, or while the basis model is `thin` or `stale`) |
+| `routed` | The benchmark's routed price: `benchmark` (`qwen/qwen3.8-27b`), `price`, `usd_per_bn_gn`, `series` (as per model) |
+| `flop` | `gn_price_flop` (from `--flop-gn-price`, or null), `basis_model` (`qwen/qwen3.8-27b`), `implied_flop_usd` (from the median; null without both, or while the basis model is `thin` or `stale`), `implied_flop_usd_routed` (`routed.usd_per_bn_gn` / 1e9 / `gn_price_flop`), `parity`: `market_usd_per_bn_gn` (= `routed.usd_per_bn_gn`), `flop_rate_flop_per_gn` (= `gn_price_flop`), `implied_flop_usd`, `implied_flop_usd_routed`, `as_of_ms` (the benchmark's newest snapshot), so FLOP's rate and the market's sit side by side |
 | `demand_rank` | Model ids by `hf_downloads_30d`, highest first (models without it left out) |
 | `providers[]` | `name`, `models`, `quotes` (in the latest listings), `uptime_24h_pct` (over all its quotes), `cheapest_in` (models where it is the cheapest up seller); most models first |
 | `changes[]` | Price changes over the last 7 days, newest first, at most 200: `at_ms`, `model`, `provider`, `quantization`, `from`, `to` |
@@ -324,6 +327,29 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
   - Totals (`compute_price`, `mixes`, `out_in_ratio_median`) leave out
     `thin` and `stale` models and any value that is not finite. A parameter
     count of 0 is unknown, and a G_n per token that is not above 0 is none.
+- **Routed price.** The price a request pays right now if it is spread
+  across the sellers that are up, the way OpenRouter's default routing
+  spreads traffic: cheaper sellers get more, in proportion to 1 ÷ price².
+  Over the sellers in the model's latest snapshot that are up (status 0 or
+  missing) with a usable 15:1 price, one per provider (its lowest; aliases
+  merged as for the median), each gets weight uptime_30m / 100 ÷ price²,
+  and the price is Σ weight × price / Σ weight (= Σ(u/p) / Σ(u/p²)). A
+  seller with no `uptime_30m` (listed, no recent traffic) gets weight 0; if
+  no up seller has any uptime weight, each gets 1 ÷ price² and
+  `uptime_fallback` is true. There is no hold: a seller that is down is not
+  counted, since this is the price paid now. **Cap:** no provider carries
+  more than 50% of a model's weight; the excess goes to the others in
+  proportion to their weights (repeated until none is over), so one very
+  cheap seller cannot be the whole price, and `capped` says it acted. With
+  one seller the cap cannot act; with two it makes the price their plain
+  average. Worked: sellers at $2, $2 and $4, all at 100% uptime: weights
+  1/4, 1/4, 1/16, price (2/4 + 2/4 + 4/16) / (9/16) = $2.222. This is not
+  the model `median` (list prices, one per provider, sellers that went down
+  held for 6 hours, unweighted) and not the perp's settlement mark
+  (`latest.json`: the pusher's price set for Qwen3.8-27B under its own
+  rules). On 2026-11-13 Qwen3.8-27B routed at $0.1931 per 1M (20 sellers,
+  largest share 19%, so the cap did not act) against a median of $0.2969
+  and a perp mark of $0.3036.
 - **Robustness.** Unparsable or torn lines, a line without `rows`, rows
   without a provider, and missing days are skipped. An empty `rows` is a
   fetch that listed nobody.
