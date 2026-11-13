@@ -53,7 +53,7 @@ test("renders the price, chart, sellers, FLOP side and how-to from the mock feed
 
   const flop = container.querySelector('[aria-labelledby="compute-flop-heading"]')!;
   expect(Array.from(flop.querySelectorAll(".fact-value")).map(v => v.textContent)).toEqual(["0.00291", "3", "34", "50%"]);
-  expect(flop.textContent).toContain("shown for comparison only");
+  expect(flop.textContent).toContain("not a traded price");
 
   const how = container.querySelector('[aria-labelledby="compute-how-heading"]')!;
   expect(how.querySelector('a[href="https://explorer.solana.com/tx/mock-push-signature?cluster=devnet"]')).not.toBeNull();
