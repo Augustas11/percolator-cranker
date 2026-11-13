@@ -58,6 +58,8 @@ struct Row {
     listing: u32,
     /// Blended USD per 1M tokens, if both prices are usable.
     price: Option<f64>,
+    /// (prompt, completion) in USD per token, when `price` is set.
+    pc: Option<[f64; 2]>,
     up: bool,
 }
 
@@ -109,8 +111,13 @@ impl Quotes {
 /// (15 × prompt + completion) / 16 in USD per 1M tokens, if usable.
 pub fn blend(prompt: Option<f64>, completion: Option<f64>) -> Option<f64> {
     let (p, c) = (prompt?, completion?);
-    let b = crate::SPEC.blend;
-    (p.is_finite() && c.is_finite() && p >= 0.0 && c >= 0.0 && p + c > 0.0).then(|| (b * p + c) / (b + 1.0) * 1e6)
+    (p.is_finite() && c.is_finite() && p >= 0.0 && c >= 0.0 && p + c > 0.0).then(|| mix([p, c], crate::SPEC.blend))
+}
+
+/// (r × prompt + completion) / (r + 1) in USD per 1M tokens: the price of
+/// r input tokens per output token.
+pub fn mix(pc: [f64; 2], r: f64) -> f64 {
+    (r * pc[0] + pc[1]) / (r + 1.0) * 1e6
 }
 
 fn read_day(path: &Path, quotes: &mut Quotes) -> Result<Vec<Snap>> {
@@ -128,7 +135,9 @@ fn read_day(path: &Path, quotes: &mut Quotes) -> Result<Vec<Snap>> {
                 let listing = quotes.listing(r["tag"].as_str().map(String::from).unwrap_or_else(|| key.clone()));
                 // A missing status reads as 0 (up), as in the pusher.
                 let up = r["status"].is_null() || r["status"].as_i64() == Some(0);
-                Some(Row { quote: quotes.id(key, provider, quant), listing, price: blend(r["prompt"].as_f64(), r["completion"].as_f64()), up })
+                let (p, c) = (r["prompt"].as_f64(), r["completion"].as_f64());
+                let price = blend(p, c);
+                Some(Row { quote: quotes.id(key, provider, quant), listing, price, pc: price.and_then(|_| Some([p?, c?])), up })
             })
             .collect::<Vec<Row>>();
         out.push(Snap { at_ms, rows: dedup(rows.clone()), raw: rows });
@@ -167,12 +176,57 @@ pub fn alias_of<'a>(id: &str, ids: &BTreeSet<&'a str>, hf: &HashMap<String, Stri
     (hx == hd || *hd == format!("{hx}-{tail}")).then_some(x)
 }
 
-/// One demand line: Hugging Face downloads (30 days) and likes.
+/// One demand line: Hugging Face downloads (30 days), likes and parameter count.
 #[derive(Clone, Debug)]
 struct Demand {
     at_ms: u64,
     downloads: Option<u64>,
     likes: Option<u64>,
+    params: Option<u64>,
+}
+
+/// The model whose USD per G_n prices FLOP (`flop.implied_flop_usd`).
+pub const BASIS_MODEL: &str = "qwen/qwen3.8-27b";
+
+/// G_n per token from FLOP's model registry (`gflopsPerToken`, SPEC.md and
+/// INDEX.md), by OpenRouter id. Qwen2.5-0.5B (2) has no OpenRouter id here.
+const REGISTRY: [(&str, f64); 2] = [("qwen/qwen3.8-27b", 52.0), ("qwen/qwen3-8b", 17.0)];
+
+/// Compute-unit settings: registry G_n per token by model id, and FLOP's
+/// price in FLOP per G_n (if given).
+#[derive(Clone, Debug)]
+pub struct Compute {
+    pub registry: HashMap<String, f64>,
+    pub gn_price_flop: Option<f64>,
+}
+
+impl Default for Compute {
+    fn default() -> Self {
+        Self { registry: REGISTRY.iter().map(|(id, g)| (id.to_string(), *g)).collect(), gn_price_flop: None }
+    }
+}
+
+impl Compute {
+    /// Add (or override) registry entries from a file: `<model id> <G_n per
+    /// token>` per line, `#` comments. A bad line is an error.
+    pub fn read_registry(&mut self, path: &Path) -> Result<()> {
+        let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        for (i, l) in text.lines().enumerate() {
+            let l = l.split('#').next().unwrap_or("").trim();
+            if l.is_empty() {
+                continue;
+            }
+            let mut f = l.split_whitespace();
+            let (Some(id), Some(g), None) = (f.next(), f.next().and_then(|g| g.parse::<f64>().ok()), f.next()) else {
+                bail!("{}:{}: want `<model id> <G_n per token>`", path.display(), i + 1)
+            };
+            if !(g.is_finite() && g > 0.0) {
+                bail!("{}:{}: G_n per token must be > 0", path.display(), i + 1);
+            }
+            self.registry.insert(id.to_owned(), g);
+        }
+        Ok(())
+    }
 }
 
 /// Keep the first snapshot of each hour.
@@ -199,6 +253,7 @@ pub struct Wide {
     demand: HashMap<PathBuf, (u64, Vec<(String, Demand)>)>,
     /// The index so far; `None` until a base is set.
     pub state: Option<IndexState>,
+    pub compute: Compute,
 }
 
 impl Wide {
@@ -270,7 +325,7 @@ impl Wide {
                     .split(|b| *b == b'\n')
                     .filter_map(|l| {
                         let v: Value = serde_json::from_slice(l).ok()?;
-                        Some((v["model"].as_str()?.to_owned(), Demand { at_ms: v["at_ms"].as_u64()?, downloads: v["downloads_30d"].as_u64(), likes: v["likes"].as_u64() }))
+                        Some((v["model"].as_str()?.to_owned(), Demand { at_ms: v["at_ms"].as_u64()?, downloads: v["downloads_30d"].as_u64(), likes: v["likes"].as_u64(), params: v["params"].as_u64() }))
                     })
                     .collect();
                 self.demand.insert(p.clone(), (len, lines));
@@ -315,7 +370,7 @@ impl Wide {
         for (m, d) in self.demand.values().flat_map(|f| &f.1) {
             demand.entry(m.as_str()).or_default().push(d);
         }
-        Ok(market(&models, &self.quotes.names, &self.quotes.prov, self.state.as_ref(), &demand, now_ms))
+        Ok(market(&models, &self.quotes.names, &self.quotes.prov, self.state.as_ref(), &demand, &self.compute, now_ms))
     }
 }
 
@@ -324,6 +379,7 @@ impl Wide {
 /// `market.json` (each run returns the error) until it is fixed.
 pub struct MarketFeed {
     pub dir: PathBuf,
+    pub compute: Compute,
     rebase: bool,
     wide: Option<Wide>,
 }
@@ -331,7 +387,7 @@ pub struct MarketFeed {
 impl MarketFeed {
     /// `rebase`: ignore any saved state once and start a new base.
     pub fn new(dir: PathBuf, rebase: bool) -> Self {
-        Self { dir, rebase, wide: None }
+        Self { dir, compute: Compute::default(), rebase, wide: None }
     }
 
     /// Read new data, step the index, write `index-state.json` then `market.json`.
@@ -339,7 +395,7 @@ impl MarketFeed {
         if self.wide.is_none() {
             let state = if self.rebase { None } else { IndexState::load(&out.join("index-state.json"))? };
             self.rebase = false;
-            self.wide = Some(Wide::with_state(state));
+            self.wide = Some(Wide { compute: self.compute.clone(), ..Wide::with_state(state) });
         }
         let w = self.wide.as_mut().unwrap();
         w.update(&self.dir, now_ms)?;
@@ -367,9 +423,9 @@ struct Model<'a> {
     /// Median over distinct providers (held ones included), or the last one
     /// carried forward.
     median: Vec<Option<f64>>,
-    /// At the newest snapshot: (provider, price) of each provider in the
-    /// median's set, its lowest (held) price.
-    held_now: Vec<(u32, f64)>,
+    /// At the newest snapshot: each provider in the median's set at its
+    /// lowest (held) price: (provider, price, (prompt, completion)).
+    held_now: Vec<Held>,
     /// Whether `median` was computed at that snapshot (not carried).
     fresh: Vec<bool>,
 }
@@ -378,19 +434,26 @@ struct Model<'a> {
 /// listing of every member seen up within `HOLD_DOWN_MS`, at its last up
 /// price (so a listing that is down now is held), then one per provider
 /// (across precisions, regions and aliases): its lowest. Sorted by price.
-fn held(s: &Snap, k: usize, prov: &[u32], up: &mut HashMap<(usize, u32), (u32, f64, u64)>) -> Vec<(u32, f64)> {
+type Held = (u32, f64, [f64; 2]);
+/// (member, listing) → (quote, last up price, its (prompt, completion), when last seen up).
+type UpSince = HashMap<(usize, u32), (u32, f64, [f64; 2], u64)>;
+
+fn held(s: &Snap, k: usize, prov: &[u32], up: &mut UpSince) -> Vec<Held> {
     for r in s.raw.iter().filter(|r| r.up) {
-        if let Some(p) = r.price {
-            up.insert((k, r.listing), (r.quote, p, s.at_ms));
+        if let (Some(p), Some(pc)) = (r.price, r.pc) {
+            up.insert((k, r.listing), (r.quote, p, pc, s.at_ms));
         }
     }
-    up.retain(|_, (_, _, t)| *t <= s.at_ms && s.at_ms - *t <= HOLD_DOWN_MS);
-    let mut low: HashMap<u32, f64> = HashMap::new();
-    for (q, p, _) in up.values() {
-        let e = low.entry(prov[*q as usize]).or_insert(*p);
-        *e = e.min(*p);
+    up.retain(|_, (_, _, _, t)| *t <= s.at_ms && s.at_ms - *t <= HOLD_DOWN_MS);
+    let mut low: HashMap<u32, (f64, [f64; 2])> = HashMap::new();
+    for (q, p, pc, _) in up.values() {
+        let e = low.entry(prov[*q as usize]).or_insert((*p, *pc));
+        // Ties at the 15:1 price: the lower prompt price, so the pick is stable.
+        if p.total_cmp(&e.0).then(pc[0].total_cmp(&e.1[0])).is_lt() {
+            *e = (*p, *pc);
+        }
     }
-    let mut v: Vec<(u32, f64)> = low.into_iter().collect();
+    let mut v: Vec<Held> = low.into_iter().map(|(k, (p, pc))| (k, p, pc)).collect();
     v.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
     v
 }
@@ -434,8 +497,7 @@ impl<'a> Model<'a> {
     #[allow(clippy::too_many_arguments)]
     fn new(id: &'a str, aliases: Vec<&'a str>, snaps: Vec<Cow<'a, Snap>>, fetched: Vec<&'a Snap>, src: Vec<usize>, members: Vec<u64>, prov: &[u32]) -> Self {
         let (mut median, mut fresh, mut last, mut held_now) = (Vec::new(), Vec::new(), None, Vec::new());
-        // (member, listing) → (quote, last up price, when last seen up), for the hold.
-        let mut up: HashMap<(usize, u32), (u32, f64, u64)> = HashMap::new();
+        let mut up = UpSince::new();
         for (f, k) in fetched.iter().zip(&src) {
             held_now = held(f, *k, prov, &mut up);
             let ok = held_now.len() >= MIN_QUOTES;
@@ -453,6 +515,31 @@ impl<'a> Model<'a> {
         let n = self.snaps.partition_point(|s| s.at_ms <= t);
         n.checked_sub(1).and_then(|i| self.median[i])
     }
+}
+
+/// Input:output token ratios of `mix`: chat 3:1, average 15:1, agent 150:1.
+pub const MIXES: [f64; 3] = [3.0, 15.0, 150.0];
+
+/// USD per 1M tokens → USD per billion G_n at `gn` G_n per token.
+pub fn usd_per_bn_gn(usd_per_m: f64, gn: f64) -> f64 {
+    usd_per_m / (gn * 1e6) * 1e9
+}
+
+/// The median over a model's median set of each provider's price at `r`:1.
+fn mix_median(set: &[Held], r: f64) -> Option<f64> {
+    quantile(&mut set.iter().map(|h| mix(h.2, r)).collect::<Vec<_>>(), 0.5)
+}
+
+/// The median over a model's median set of completion ÷ prompt (a free
+/// prompt has none).
+fn out_in_ratio(set: &[Held]) -> Option<f64> {
+    quantile(&mut set.iter().filter(|h| h.2[0] > 0.0).map(|h| h.2[1] / h.2[0]).collect::<Vec<_>>(), 0.5)
+}
+
+/// `percentile` of unsorted values, `None` when empty.
+fn quantile(v: &mut [f64], q: f64) -> Option<f64> {
+    v.sort_by(f64::total_cmp);
+    (!v.is_empty()).then(|| percentile(v, q))
 }
 
 /// Linear-interpolated percentile of sorted, non-empty values (q in 0..=1).
@@ -725,7 +812,7 @@ fn demand_json(m: &Model, demand: &HashMap<&str, Vec<&Demand>>) -> Value {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Option<&IndexState>, demand: &HashMap<&str, Vec<&Demand>>, now_ms: u64) -> Value {
+fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Option<&IndexState>, demand: &HashMap<&str, Vec<&Demand>>, compute: &Compute, now_ms: u64) -> Value {
     let day_ago = now_ms.saturating_sub(DAY_MS);
     let (base, series, n_models) = match state {
         Some(s) => (Some(s.base_ms), s.series.as_slice(), s.models.len()),
@@ -738,6 +825,9 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
     let (mut n_quotes, mut n_up) = (0, 0);
     let mut changes: Vec<(u64, &str, u32, f64, f64)> = Vec::new();
     let mut dynamic = Vec::new();
+    // Over non-thin models: USD per bn G_n, mixes, completion ÷ prompt.
+    let (mut per_gn, mut mixes, mut ratios) = (Vec::new(), [Vec::new(), Vec::new(), Vec::new()], Vec::new());
+    let mut basis_gn = None;
     for m in models {
         let Some(latest) = m.snaps.last() else { continue };
         // Stale: nothing fetched for this model for 30 minutes; none of its quotes is up.
@@ -775,6 +865,26 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
         }
         let pts: Vec<(u64, f64)> = m.snaps.iter().zip(&m.median).filter_map(|(s, v)| Some((s.at_ms, (*v)?))).collect();
         let (name, family) = name_family(m.id);
+        // Compute units: G_n per token from the registry, else 2 × params.
+        let ids = || std::iter::once(m.id).chain(m.aliases.iter().copied());
+        let params = ids().filter_map(|id| demand.get(id)).flatten().filter(|d| d.params.is_some()).max_by_key(|d| d.at_ms).and_then(|d| d.params);
+        let (gn, source) = match ids().find_map(|id| compute.registry.get(id)) {
+            Some(g) => (Some(*g), Some("flop_registry")),
+            None => (params.map(|n| 2.0 * n as f64 / 1e9), params.map(|_| "2x_params")),
+        };
+        let per_bn = |usd_per_m: f64| gn.map(|g| usd_per_bn_gn(usd_per_m, g));
+        let mix_at: Vec<Option<f64>> = MIXES.iter().map(|r| mix_median(&m.held_now, *r)).collect();
+        let out_in = out_in_ratio(&m.held_now);
+        if !thin {
+            per_gn.extend(per_bn(median));
+            for (v, x) in mixes.iter_mut().zip(&mix_at) {
+                v.extend(*x);
+            }
+            ratios.extend(out_in);
+        }
+        if ids().any(|id| id == BASIS_MODEL) {
+            basis_gn = per_bn(median);
+        }
         // Quotes listed now that were not listed 7 days ago (null without data that old).
         let week_ago = now_ms.saturating_sub(7 * DAY_MS);
         let then = m.snaps.partition_point(|s| s.at_ms <= week_ago).checked_sub(1).map(|i| &m.snaps[i]);
@@ -786,6 +896,10 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
             "sellers_total": latest.rows.len(), "sellers_up": latest.rows.iter().filter(|r| is_up(r)).count(),
             "median": median, "p25": spread(0.25), "p75": spread(0.75), "min": range(0.0), "max": range(1.0),
             "thin": thin, "quotes_held": quotes_held,
+            "compute": { "params": params, "gn_per_token": gn, "source": source },
+            "usd_per_bn_gn": per_bn(median), "usd_per_bn_gn_min": per_bn(range(0.0)), "usd_per_bn_gn_max": per_bn(range(1.0)),
+            "mix": { "chat_3_1": mix_at[0], "avg_15_1": mix_at[1], "agent_150_1": mix_at[2] },
+            "out_in_ratio": out_in,
             "cheapest": cheapest.map(|(q, p)| json!({ "provider": names[q as usize].0, "quantization": names[q as usize].1, "price": p })),
             "change_24h_pct": pct(median, m.median_at(day_ago)),
             "series": steps(&pts, MODEL_POINTS).iter().map(|p| json!([p.0, p.1])).collect::<Vec<_>>(),
@@ -848,6 +962,15 @@ fn market(models: &[Model], names: &[(String, String)], prov: &[u32], state: Opt
             "change_7d_pct": level.and_then(|l| pct(l, at_or_before(series, now_ms.saturating_sub(7 * DAY_MS)))),
             "n_models": n_models, "n_quotes": n_quotes, "n_quotes_up": n_up, "n_providers": providers.len(),
             "series": steps(series, INDEX_POINTS).iter().map(|p| json!([p.0, p.1])).collect::<Vec<_>>(),
+        },
+        "compute_price": {
+            "median_usd_per_bn_gn": quantile(&mut per_gn, 0.5), "p25": quantile(&mut per_gn, 0.25), "p75": quantile(&mut per_gn, 0.75), "n_models": per_gn.len(),
+        },
+        "mixes": { "chat_3_1": quantile(&mut mixes[0], 0.5), "avg_15_1": quantile(&mut mixes[1], 0.5), "agent_150_1": quantile(&mut mixes[2], 0.5) },
+        "out_in_ratio_median": quantile(&mut ratios, 0.5),
+        "flop": {
+            "gn_price_flop": compute.gn_price_flop, "basis_model": BASIS_MODEL,
+            "implied_flop_usd": basis_gn.zip(compute.gn_price_flop).filter(|(_, f)| *f > 0.0).map(|(u, f)| u / 1e9 / f),
         },
         "models": out_models,
         "demand_rank": demand_rank,
@@ -1479,6 +1602,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn compute_units_mixes_and_the_flop_price() {
+        // (15 × 1e-7 + 1.6e-6) / 16 × 1e6 = 0.19375; 3:1 and 150:1 likewise.
+        assert!(close(mix([1e-7, 1.6e-6], 15.0), 0.19375));
+        assert!(close(mix([1e-7, 1.6e-6], 3.0), 0.475));
+        assert!(close(mix([1e-7, 1.6e-6], 150.0), 16.6 / 151.0));
+        // $0.2969 per 1M tokens at 52 G_n per token: $5.71 per billion G_n.
+        assert!(close(usd_per_bn_gn(0.2969, 52.0), 5.709615384615385));
+
+        let d = tmp("compute");
+        std::fs::create_dir_all(d.join("demand")).unwrap();
+        let now = T0 + HOUR;
+        let row = |p: &str, i: f64, o: f64| json!({ "provider": p, "tag": p, "quantization": "bf16", "prompt": i, "completion": o, "status": 0 });
+        let lines = [
+            // 15:1: A 0.15625, B 0.25, C 0.28125. 3:1: 0.325, 0.4, 0.825.
+            // 150:1: 16/151, 31/151, 18/151. completion ÷ prompt: 10, 5, 30.
+            json!({ "at_ms": now - MIN, "model": "qwen/qwen3.8-27b", "rows": [row("A", 1e-7, 1e-6), row("B", 2e-7, 1e-6), row("C", 1e-7, 3e-6)] }).to_string(),
+            three("x/b", now - MIN, 1.0, 1.0),
+            three("x/c", now - MIN, 1.0, 1.0),
+            line("x/d", now - MIN, &[("A", 2.0, 0), ("B", 2.0, 0)]),
+        ];
+        put(&d, &lines);
+        let dl = |at: u64, m: &str, n: Value| json!({ "at_ms": at, "model": m, "params": n }).to_string();
+        // x/b: the newest known count (7e9), not the later null.
+        let demand = [dl(now - 3 * MIN, "x/b", json!(7_000_000_000u64)), dl(now - 2 * MIN, "x/b", Value::Null), dl(now - 2 * MIN, "x/d", json!(1_000_000_000u64))];
+        std::fs::write(d.join(format!("demand/{}.jsonl", day(now))), demand.join("\n")).unwrap();
+        let mut w = Wide::default();
+        w.compute.gn_price_flop = Some(0.002);
+        w.update(&d, now).unwrap();
+        let v = w.market_json(now + STEP_LAG_MS).unwrap();
+
+        let q = model(&v, "qwen/qwen3.8-27b");
+        assert!(close(q["median"].as_f64().unwrap(), 0.25));
+        assert_eq!(q["compute"], json!({ "params": null, "gn_per_token": 52.0, "source": "flop_registry" }));
+        assert!(close(q["usd_per_bn_gn"].as_f64().unwrap(), 0.25 / 52.0 * 1e3));
+        assert!(close(q["usd_per_bn_gn_min"].as_f64().unwrap(), 0.15625 / 52.0 * 1e3));
+        assert!(close(q["usd_per_bn_gn_max"].as_f64().unwrap(), 0.28125 / 52.0 * 1e3));
+        assert!(close(q["mix"]["chat_3_1"].as_f64().unwrap(), 0.4));
+        assert!(close(q["mix"]["avg_15_1"].as_f64().unwrap(), 0.25));
+        assert!(close(q["mix"]["agent_150_1"].as_f64().unwrap(), 18.0 / 151.0));
+        assert!(close(q["out_in_ratio"].as_f64().unwrap(), 10.0));
+
+        let b = model(&v, "x/b");
+        assert_eq!(b["compute"], json!({ "params": 7_000_000_000u64, "gn_per_token": 14.0, "source": "2x_params" }));
+        assert!(close(b["usd_per_bn_gn"].as_f64().unwrap(), 1.0 / 14.0 * 1e3));
+        assert_eq!((b["mix"]["chat_3_1"].as_f64(), b["out_in_ratio"].as_f64()), (Some(1.0), Some(1.0)));
+        let c = model(&v, "x/c");
+        assert_eq!((c["compute"].clone(), c["usd_per_bn_gn"].clone()), (json!({ "params": null, "gn_per_token": null, "source": null }), Value::Null));
+        // x/d is thin: it has a value but is left out of the totals.
+        let x = model(&v, "x/d");
+        assert_eq!((x["thin"].as_bool(), x["usd_per_bn_gn"].as_f64().map(|u| close(u, 1e3))), (Some(true), Some(true)));
+
+        // Over the non-thin models with a value: 4.8077 and 71.43.
+        let cp = &v["compute_price"];
+        assert_eq!(cp["n_models"], 2);
+        assert!(close(cp["median_usd_per_bn_gn"].as_f64().unwrap(), (0.25 / 52.0 * 1e3 + 1e3 / 14.0) / 2.0));
+        assert!(close(cp["p25"].as_f64().unwrap(), 0.25 / 52.0 * 1e3 + 0.25 * (1e3 / 14.0 - 0.25 / 52.0 * 1e3)));
+        // Medians of the model medians (qwen, x/b, x/c): x/b and x/c are 1.
+        assert_eq!(v["mixes"], json!({ "chat_3_1": 1.0, "avg_15_1": 1.0, "agent_150_1": 1.0 }));
+        assert_eq!(v["out_in_ratio_median"], 1.0);
+        // $4.8077 per billion G_n / 1e9 / 0.002 FLOP per G_n.
+        assert_eq!((v["flop"]["gn_price_flop"].as_f64(), v["flop"]["basis_model"].as_str()), (Some(0.002), Some(BASIS_MODEL)));
+        assert!(close(v["flop"]["implied_flop_usd"].as_f64().unwrap(), 0.25 / 52.0 * 1e3 / 1e9 / 0.002));
+
+        // A registry file adds or overrides entries; a bad line is an error.
+        let f = d.join("compute.tsv");
+        std::fs::write(&f, "# id  G_n per token\nx/c\t4 # set by hand\n\nqwen/qwen3.8-27b 50\n").unwrap();
+        let mut cfg = Compute::default();
+        cfg.read_registry(&f).unwrap();
+        assert_eq!((cfg.registry["x/c"], cfg.registry["qwen/qwen3.8-27b"], cfg.registry["qwen/qwen3-8b"]), (4.0, 50.0, 17.0));
+        for bad in ["x/c", "x/c four", "x/c 0", "x/c 4 5"] {
+            std::fs::write(&f, bad).unwrap();
+            assert!(Compute::default().read_registry(&f).is_err(), "{bad}");
+        }
+    }
+
     /// Real collector lines (2026-11-13), three models, plus junk.
     #[test]
     fn end_to_end_on_the_fixture() {
@@ -1496,6 +1695,11 @@ mod tests {
         let q = model(&v, "qwen/qwen3.8-27b");
         assert_eq!((q["name"].as_str(), q["sellers_total"].as_u64(), q["sellers_up"].as_u64(), q["thin"].as_bool()), (Some("Qwen3.8 27B"), Some(22), Some(19), Some(false)));
         assert!(close(q["median"].as_f64().unwrap(), 0.296875));
+        // 52 G_n per token (registry): 0.296875 / 52e6 × 1e9 = $5.709 per billion G_n.
+        assert_eq!(q["compute"], json!({ "params": null, "gn_per_token": 52.0, "source": "flop_registry" }));
+        assert!(close(q["usd_per_bn_gn"].as_f64().unwrap(), 0.296875 / 52.0 * 1e3));
+        assert_eq!(model(&v, "qwen/qwen3-14b")["usd_per_bn_gn"], Value::Null);
+        assert_eq!((v["compute_price"]["n_models"].as_u64(), v["flop"]["implied_flop_usd"].clone()), (Some(1), Value::Null));
         assert!(close(q["min"].as_f64().unwrap(), 0.1146875) && close(q["max"].as_f64().unwrap(), 1.02125));
         assert_eq!(q["cheapest"]["provider"], "Chutes");
         let qs = q["quotes"].as_array().unwrap();

@@ -31,12 +31,19 @@ pusher").
   `{"at_ms", "model", "rows": [{"provider", "tag", "quantization", "prompt", "completion", "status", "uptime_30m", "context"}]}`
   (prices in USD per token). Optional in the same directory: `hf-map.tsv`
   (`<openrouter id>\t<hugging face id>\t<slug>`) and `demand/YYYY-MM-DD.jsonl`
-  (`{"at_ms", "model", "hf", "downloads_30d", "likes"}`); missing or odd
+  (`{"at_ms", "model", "hf", "downloads_30d", "likes", "params"}`); missing or odd
   ones mean no aliases or no demand data, not an error. Only directories
   named `<org>__<name>` are models. Adds `market.json`, and keeps the index state
   in `<out dir>/index-state.json`.
 - `--rebase` (with `--wide`): ignore any saved index state and start a new
   base. Only for a deliberate re-base; the level then means something new.
+- `--compute <file>` (with `--wide`, optional): G_n per token from FLOP's
+  model registry, one `<openrouter id> <G_n per token>` per line, `#`
+  comments. Added to (or overriding) the built-in entries
+  `qwen/qwen3.8-27b 52` and `qwen/qwen3-8b 17` (SPEC.md, INDEX.md). Read
+  once at start; a bad line stops the feed.
+- `--flop-gn-price <FLOP per G_n>` (with `--wide`, optional): FLOP's price
+  of one G_n, for `flop.implied_flop_usd`.
 - `out dir`: gets `latest.json`, `history.json` and, with `--wide`,
   `market.json`. Each is written to a temp
   file in the same directory (named with the process id), synced, and
@@ -120,8 +127,16 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
 | `index.series` | `[t_ms, level]`, at most 500; both sides of every change |
 | `models[]` | Per model, most up sellers first: `id` (shortest id of its alias group), `aliases` (the other ids), `name`, `family`, `data_ms` (its newest snapshot), `stale` (that is over 30 minutes old: no quote is reported up), `sellers_total`, `sellers_up`, `median`, `p25`, `p75` (over the index input's set, below), `min`, `max` (over quotes up now), `thin`, `quotes_held` (providers in the median's set held at their last up price), `cheapest` (`provider`, `quantization`, `price`; null if no quote is up and priced), `change_24h_pct` (same set as `median`), `demand` (below), `sellers_added_7d`, `series` (`[t_ms, median]`, at most 200), `quotes[]` (`provider`, `quantization`, `price` or null, `up`, `uptime_24h_pct`), cheapest first, unpriced next, down last |
 | `models[].demand` | From the newest demand line of the model (or an alias): `hf_downloads_30d`, `hf_likes`, `as_of_ms`, and `hf_downloads_change_7d_pct` against the newest line at least 6 days older (null without one). All null without demand data. |
+| `models[].compute` | `params` (newest known count from the demand lines, or null), `gn_per_token`, `source`: `flop_registry`, `2x_params`, or null when neither is known (then every G_n field of the model is null) |
+| `models[].usd_per_bn_gn` | `median` in USD per billion G_n; `usd_per_bn_gn_min`, `usd_per_bn_gn_max` likewise from `min`, `max` |
+| `models[].mix` | `chat_3_1`, `avg_15_1`, `agent_150_1`: USD per 1M tokens at 3:1, 15:1, 150:1 input:output (`avg_15_1` = `median`); null with no set |
+| `models[].out_in_ratio` | Median completion ÷ prompt price over the median's set; null if none has a prompt price above 0 |
 | `models[].sellers_added_7d` | Quotes (provider, quantization) listed now that were not listed in the snapshot 7 days ago; null without data that old. Sellers adding a model is a supply-side read of demand. |
 | `models` (empty) | With no wide data yet the file is still written, with `models: []`, null `data_ms`, `level` and `base_ms` |
+| `compute_price` | `median_usd_per_bn_gn`, `p25`, `p75` of `usd_per_bn_gn` over models that are not `thin` and have one, and their count `n_models`; null with none |
+| `mixes` | `chat_3_1`, `avg_15_1`, `agent_150_1`: the median of the models' `mix` (models not `thin`) |
+| `out_in_ratio_median` | The median of the models' `out_in_ratio` (models not `thin`) |
+| `flop` | `gn_price_flop` (from `--flop-gn-price`, or null), `basis_model` (`qwen/qwen3.8-27b`), `implied_flop_usd` (null without both) |
 | `demand_rank` | Model ids by `hf_downloads_30d`, highest first (models without it left out) |
 | `providers[]` | `name`, `models`, `quotes` (in the latest listings), `uptime_24h_pct` (over all its quotes), `cheapest_in` (models where it is the cheapest up seller); most models first |
 | `changes[]` | Price changes over the last 7 days, newest first, at most 200: `at_ms`, `model`, `provider`, `quantization`, `from`, `to` |
@@ -229,6 +244,28 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
   They measure interest in the open weights (people downloading the model
   to run it themselves), not paid API usage on OpenRouter or anywhere
   else.
+- **Compute units.** G_n per token is FLOP's registry value where the
+  model has one (`source: flop_registry`), else 2 × parameters / 1e9
+  (`2x_params`), with the parameter count from Hugging Face. 2 × params is
+  FLOP's accounting convention for the work in one token (about one
+  multiply and one add per weight), not a measurement of what a token costs
+  to serve: it counts every weight of a mixture-of-experts model, not only
+  the active ones, and ignores attention, batching and hardware. It puts
+  listed prices on one scale; it is not a cost.
+  - `usd_per_bn_gn` = median (USD per 1M tokens) / (G_n per token × 1e6) × 1e9.
+    Qwen3.8-27B on 2026-11-13: $0.296875 / (52 × 1e6) × 1e9 = $5.709 per
+    billion G_n. Qwen3.5-9B (9,653,104,368 params, so 19.306 G_n per
+    token): $0.103125 / 19.306e6 × 1e9 = $5.342.
+  - `mix` at r:1 = (r × prompt + completion) / (r + 1) × 1e6 for each
+    provider in the median's set (its price is the one picked at 15:1), then
+    the median. The middle Qwen3.5-9B quote, $0.10 in and $0.15 out per 1M:
+    3:1 (3 × 0.10 + 0.15) / 4 = $0.1125, 15:1 $0.103125, 150:1
+    (150 × 0.10 + 0.15) / 151 = $0.1003. Its `out_in_ratio` is 0.15 / 0.10 = 1.5.
+  - `flop.implied_flop_usd` = the basis model's `usd_per_bn_gn` / 1e9 /
+    `gn_price_flop`: USD per G_n over FLOP per G_n, so USD per FLOP. With
+    0.00291 FLOP per G_n: 5.709 / 1e9 / 0.00291 = $0.000001962.
+  - Totals (`compute_price`, `mixes`, `out_in_ratio_median`) leave out
+    `thin` models, as the index does.
 - **Robustness.** Unparsable or torn lines, a line without `rows`, rows
   without a provider, and missing days are skipped. An empty `rows` is a
   fetch that listed nobody.

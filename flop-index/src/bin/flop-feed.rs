@@ -2,7 +2,7 @@
 //! OpenRouter recorder and (optionally) the wide collector. See
 //! docs/flop-compute/FEED.md.
 //!
-//!   flop-feed <bots.log> <or-prices dir> <out dir> --oracle <pubkey> [--wide <dir> [--rebase]] [--loop <seconds>]
+//!   flop-feed <bots.log> <or-prices dir> <out dir> --oracle <pubkey> [--wide <dir> [--rebase] [--compute <file>] [--flop-gn-price <FLOP per G_n>]] [--loop <seconds>]
 //!
 //! With --wide, the index state is kept in <out dir>/index-state.json; an
 //! unreadable one stops only market.json (logged each run) until it is
@@ -10,11 +10,11 @@
 
 use anyhow::{bail, Context, Result};
 use flop_index::feed::{lock_out, write_atomic, Feed};
-use flop_index::wide::MarketFeed;
+use flop_index::wide::{Compute, MarketFeed};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const USAGE: &str = "usage: flop-feed <bots.log> <or-prices dir> <out dir> --oracle <pubkey> [--wide <dir> [--rebase]] [--loop <seconds>]";
+const USAGE: &str = "usage: flop-feed <bots.log> <or-prices dir> <out dir> --oracle <pubkey> [--wide <dir> [--rebase] [--compute <file>] [--flop-gn-price <FLOP per G_n>]] [--loop <seconds>]";
 
 fn once(feed: &mut Feed, wide: &mut Option<MarketFeed>, log: &Path, or_dir: &Path, out: &Path) -> Result<()> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
@@ -33,6 +33,7 @@ fn main() -> Result<()> {
         _ => bail!(USAGE),
     };
     let (mut oracle, mut wide_dir, mut every, mut rebase) = (None, None, None, false);
+    let (mut compute, mut compute_flags) = (Compute::default(), false);
     let mut rest = args[3..].iter();
     while let Some(flag) = rest.next() {
         if flag == "--rebase" {
@@ -44,6 +45,15 @@ fn main() -> Result<()> {
             "--oracle" => oracle = Some(val.clone()),
             "--wide" => wide_dir = Some(PathBuf::from(val)),
             "--loop" => every = Some(val.parse::<u64>().context(USAGE)?),
+            "--compute" => {
+                compute.read_registry(Path::new(val))?;
+                compute_flags = true;
+            }
+            "--flop-gn-price" => {
+                let p = val.parse::<f64>().ok().filter(|p| p.is_finite() && *p > 0.0).context("--flop-gn-price must be a number > 0 (FLOP per G_n)")?;
+                compute.gn_price_flop = Some(p);
+                compute_flags = true;
+            }
             _ => bail!(USAGE),
         }
     }
@@ -53,12 +63,16 @@ fn main() -> Result<()> {
         bail!("--oracle must be the oracle authority's base58 pubkey");
     }
     let mut feed = Feed::new(&oracle);
-    if rebase && wide_dir.is_none() {
-        bail!("--rebase needs --wide");
+    if (rebase || compute_flags) && wide_dir.is_none() {
+        bail!("--rebase, --compute and --flop-gn-price need --wide");
     }
     let _lock = lock_out(&out)?;
     // Never re-base silently: a state file that is there must load.
-    let mut wide = wide_dir.map(|d| MarketFeed::new(d, rebase));
+    let mut wide = wide_dir.map(|d| {
+        let mut w = MarketFeed::new(d, rebase);
+        w.compute = compute;
+        w
+    });
     let Some(every) = every else { return once(&mut feed, &mut wide, &log, &or_dir, &out) };
     if every == 0 {
         bail!("--loop needs at least 1 second");
