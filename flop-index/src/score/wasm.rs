@@ -14,13 +14,23 @@
 //! fresh instance given the original's memory and mutable globals. Globals a
 //! module does not export are exported under `__flop_global_<i>` before it is
 //! loaded so they can be read; table and segment mutations, which could not
-//! be copied, are refused at load.
+//! be copied, are refused at load, as are mutable globals that are not
+//! numbers (a function reference cannot move between instances).
+//!
+//! Every call into the runtime runs under `catch_unwind`. A panic there (a
+//! runtime bug a module found) disqualifies the submission with the reason
+//! (`WasmRule::disqualified`) instead of ending the process. This is defence
+//! in depth: the load-time checks are the control.
 
 use super::rules::Rule;
 use crate::OrEndpoint;
 use anyhow::{anyhow, bail, Context, Result};
+use std::cell::Cell;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use wasmi::{CompilationMode, Config, Engine, Global, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, Val};
 
 /// The ABI this host speaks: the module's `abi_version()` must return it.
@@ -33,10 +43,36 @@ pub const MAX_MODULE_BYTES: usize = 1 << 20;
 pub const MAX_MEMORY_BYTES: usize = 1 << 20;
 /// Table size cap (function pointers; tables cannot change after load).
 pub const MAX_TABLE_ELEMENTS: usize = 10_000;
+/// Most globals, functions, and data or element segments a module may
+/// declare (each costs host time on every clone).
+pub const MAX_GLOBALS: u32 = 1_000;
+pub const MAX_FUNCTIONS: u32 = 10_000;
+pub const MAX_SEGMENTS: u32 = 1_000;
 /// Fuel for one step (`alloc` and `step` together); about one unit per
-/// instruction. The template's rules use 9k-33k on 23 quotes; a step that
-/// burns it all takes about 1.5 ms.
+/// instruction. The template's rules use 9k-33k on 23 quotes.
 pub const FUEL_PER_STEP: u64 = 1_000_000;
+/// After this many traps in one series the rule holds for the rest of it.
+pub const MAX_TRAPS_PER_SERIES: u32 = 100;
+
+/// Run-time limits. The defaults are what `flop-score` uses; a round runner
+/// may tighten them per submission (`WasmRule::with_limits`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Limits {
+    pub fuel_per_step: u64,
+    /// Traps (including out of fuel) allowed in one series, counting the
+    /// clean pass and every replay; after that the rule holds.
+    pub max_traps_per_series: u32,
+    /// Host time allowed for one series, checked between steps; after that
+    /// the rule holds. Wall time is not deterministic, so this is a safety
+    /// stop for a runner, off by default.
+    pub max_wall_ms_per_series: Option<u64>,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self { fuel_per_step: FUEL_PER_STEP, max_traps_per_series: MAX_TRAPS_PER_SERIES, max_wall_ms_per_series: None }
+    }
+}
 /// Snapshot layout: header (u64 at_ms, u32 n, u32 0), then n records.
 pub const HEADER_BYTES: usize = 16;
 /// Record: u64 provider hash, u64 quantization hash, f64 prompt, f64
@@ -72,6 +108,54 @@ struct Shared {
     module: Module,
     /// Export names of the mutable globals, in index order.
     globals: Vec<String>,
+    /// Why the submission was disqualified (a panic in the runtime).
+    disqualified: Mutex<Option<String>>,
+}
+
+impl Shared {
+    fn disqualified(&self) -> Option<String> {
+        self.disqualified.lock().map(|d| d.clone()).unwrap_or_else(|p| p.into_inner().clone())
+    }
+}
+
+/// What one series has spent, shared by the clones that replay it.
+#[derive(Default)]
+struct SeriesBudget {
+    traps: AtomicU32,
+    wall_ns: AtomicU64,
+}
+
+impl SeriesBudget {
+    fn spent(&self, l: &Limits) -> bool {
+        self.traps.load(Ordering::Relaxed) >= l.max_traps_per_series
+            || l.max_wall_ms_per_series.is_some_and(|ms| self.wall_ns.load(Ordering::Relaxed) >= ms.saturating_mul(1_000_000))
+    }
+}
+
+thread_local! {
+    static GUARDED: Cell<u32> = const { Cell::new(0) };
+}
+
+/// True while this thread is inside a guarded runtime call: a panic hook
+/// should leave such a panic to `catch_unwind` (flop-score's hook does).
+pub fn in_guard() -> bool {
+    GUARDED.with(|g| g.get() > 0)
+}
+
+/// Run `f` under `catch_unwind`; a panic disqualifies the submission.
+fn guarded<T>(shared: &Shared, what: &str, f: impl FnOnce() -> T) -> Option<T> {
+    GUARDED.with(|g| g.set(g.get() + 1));
+    let r = catch_unwind(AssertUnwindSafe(f));
+    GUARDED.with(|g| g.set(g.get() - 1));
+    match r {
+        Ok(v) => Some(v),
+        Err(p) => {
+            let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();
+            let mut d = shared.disqualified.lock().unwrap_or_else(|p| p.into_inner());
+            d.get_or_insert(format!("runtime panic in {what}: {msg}"));
+            None
+        }
+    }
 }
 
 /// A module's state between steps: its linear memory and mutable globals.
@@ -90,7 +174,9 @@ struct Live {
 }
 
 impl Live {
-    fn new(shared: &Shared) -> Result<Self> {
+    /// A fresh instance. `check_abi` calls `abi_version` (once, at load; not
+    /// on rebuilds, where a hostile one could burn fuel again).
+    fn new(shared: &Shared, check_abi: bool) -> Result<Self> {
         let limits = StoreLimitsBuilder::new().memory_size(MAX_MEMORY_BYTES).memories(1).table_elements(MAX_TABLE_ELEMENTS).instances(1).build();
         let mut store = Store::new(&shared.engine, limits);
         store.limiter(|l| l);
@@ -100,17 +186,19 @@ impl Live {
         let abi = inst.get_typed_func::<(), i32>(&store, "abi_version").map_err(|e| anyhow!("export abi_version() -> i32: {e}"))?;
         let alloc = inst.get_typed_func::<i32, i32>(&store, "alloc").map_err(|e| anyhow!("export alloc(i32) -> i32: {e}"))?;
         let step = inst.get_typed_func::<(i32, i32), f64>(&store, "step").map_err(|e| anyhow!("export step(i32, i32) -> f64: {e}"))?;
-        store.set_fuel(FUEL_PER_STEP).map_err(|e| anyhow!("{e}"))?;
-        let v = abi.call(&mut store, ()).map_err(|e| anyhow!("abi_version trapped: {e}"))?;
-        if v != ABI_VERSION {
-            bail!("module speaks ABI {v}; this scorer speaks {ABI_VERSION}");
+        if check_abi {
+            store.set_fuel(FUEL_PER_STEP).map_err(|e| anyhow!("{e}"))?;
+            let v = abi.call(&mut store, ()).map_err(|e| anyhow!("abi_version trapped: {e}"))?;
+            if v != ABI_VERSION {
+                bail!("module speaks ABI {v}; this scorer speaks {ABI_VERSION}");
+            }
         }
         Ok(Self { store, memory, globals, alloc, step })
     }
 
     /// A fresh instance put into `saved`'s state.
     fn restored(shared: &Shared, saved: &Saved) -> Result<Self> {
-        let mut l = Self::new(shared)?;
+        let mut l = Self::new(shared, false)?;
         let have = l.memory.data(&l.store).len();
         if saved.memory.len() > have {
             let pages = ((saved.memory.len() - have) / 65_536) as u64;
@@ -135,12 +223,20 @@ impl Live {
         into.globals.extend(self.globals.iter().map(|g| g.get(&self.store)));
     }
 
-    /// One call of the module: Err on a trap, out of fuel, or a pointer
-    /// that does not fit the input.
-    fn call(&mut self, input: &[u8]) -> Result<f64> {
-        self.store.set_fuel(FUEL_PER_STEP).map_err(|e| anyhow!("{e}"))?;
+    /// One call of the module, and the fuel it used: Err on a trap, out of
+    /// fuel, or a pointer that is 0, unaligned or does not fit the input.
+    fn call(&mut self, input: &[u8], fuel: u64) -> (Result<f64>, u64) {
+        let r = self.call_inner(input, fuel);
+        (r, fuel - self.store.get_fuel().unwrap_or(0).min(fuel))
+    }
+
+    fn call_inner(&mut self, input: &[u8], fuel: u64) -> Result<f64> {
+        self.store.set_fuel(fuel).map_err(|e| anyhow!("{e}"))?;
         let len = i32::try_from(input.len())?;
         let ptr = self.alloc.call(&mut self.store, len)?;
+        if ptr % 8 != 0 {
+            bail!("alloc returned an unaligned pointer");
+        }
         let mem = self.memory.data_mut(&mut self.store);
         let start = ptr as u32 as usize;
         let end = start.checked_add(input.len()).filter(|&e| ptr != 0 && e <= mem.len()).context("alloc returned no room")?;
@@ -154,9 +250,16 @@ impl Live {
 pub struct WasmRule {
     shared: Arc<Shared>,
     saved: Saved,
-    /// None once the instance could not be rebuilt: holds from then on.
+    /// None once the rule holds for good (disqualified, out of budget, or
+    /// the instance could not be rebuilt).
     live: Option<Live>,
     buf: Vec<u8>,
+    limits: Limits,
+    /// The loaded rule: each clone of it starts a series with a fresh budget;
+    /// clones of a series share its budget.
+    root: bool,
+    series: Arc<SeriesBudget>,
+    last_fuel: Option<u64>,
 }
 
 impl WasmRule {
@@ -173,48 +276,115 @@ impl WasmRule {
         let mut cfg = Config::default();
         // Eager: lazy compilation would charge fuel on first call only.
         cfg.consume_fuel(true).compilation_mode(CompilationMode::Eager).allow_start_fn(false).wasm_multi_memory(false);
-        let engine = Engine::new(&cfg);
-        let module = Module::new(&engine, &patched).map_err(|e| anyhow!("not a valid module: {e}"))?;
-        let shared = Arc::new(Shared { engine, module, globals });
-        let live = Live::new(&shared)?;
-        let mut saved = Saved { memory: Vec::new(), globals: Vec::new() };
-        live.save(&mut saved);
-        Ok(Self { shared, saved, live: Some(live), buf: Vec::new() })
+        let load = || -> Result<Self> {
+            let engine = Engine::new(&cfg);
+            let module = Module::new(&engine, &patched).map_err(|e| anyhow!("not a valid module: {e}"))?;
+            let shared = Arc::new(Shared { engine, module, globals, disqualified: Mutex::new(None) });
+            let live = Live::new(&shared, true)?;
+            let mut saved = Saved { memory: Vec::new(), globals: Vec::new() };
+            live.save(&mut saved);
+            Ok(Self { shared, saved, live: Some(live), buf: Vec::new(), limits: Limits::default(), root: true, series: Default::default(), last_fuel: None })
+        };
+        GUARDED.with(|g| g.set(g.get() + 1));
+        let r = catch_unwind(AssertUnwindSafe(load));
+        GUARDED.with(|g| g.set(g.get() - 1));
+        r.unwrap_or_else(|_| bail!("disqualified: runtime panic while loading"))
     }
 
-    /// Fuel the last step used (tests and docs).
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Why this submission was disqualified, if it was. A scorer must not
+    /// report a score for a disqualified rule.
+    pub fn disqualified(&self) -> Option<String> {
+        self.shared.disqualified()
+    }
+
+    /// A handle that reads `disqualified` after the rule is boxed.
+    pub fn verdict(&self) -> Verdict {
+        Verdict(self.shared.clone())
+    }
+
+    /// Fuel the last step used, a trapping one included (tests and docs).
     pub fn fuel_used(&self) -> Option<u64> {
-        self.live.as_ref().and_then(|l| l.store.get_fuel().ok()).map(|left| FUEL_PER_STEP - left)
+        self.last_fuel
+    }
+
+    #[cfg(test)]
+    fn guarded<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
+        guarded(&self.shared, "test", f)
+    }
+}
+
+/// Reads whether a boxed `WasmRule` (or any clone of it) was disqualified.
+pub struct Verdict(Arc<Shared>);
+
+impl Verdict {
+    pub fn disqualified(&self) -> Option<String> {
+        self.0.disqualified()
     }
 }
 
 impl Rule for WasmRule {
     fn step(&mut self, at_ms: u64, endpoints: &[OrEndpoint]) -> Option<f64> {
+        if self.shared.disqualified().is_some() || self.series.spent(&self.limits) {
+            self.live = None;
+        }
         let live = self.live.as_mut()?;
+        let t = self.limits.max_wall_ms_per_series.map(|_| Instant::now());
         encode(at_ms, endpoints, &mut self.buf);
-        match live.call(&self.buf) {
-            Ok(x) => {
+        let (buf, fuel) = (&self.buf, self.limits.fuel_per_step);
+        let out = guarded(&self.shared, "step", || {
+            let (r, used) = live.call(buf, fuel);
+            if r.is_ok() {
                 live.save(&mut self.saved);
-                (x.is_finite() && x > 0.0).then_some(x)
             }
-            Err(_) => {
-                // Back to the state before this step; if that fails, hold for good.
-                self.live = Live::restored(&self.shared, &self.saved).ok();
+            (r, used)
+        });
+        let mark = match out {
+            None => {
+                self.live = None;
                 None
             }
+            Some((r, used)) => {
+                self.last_fuel = Some(used);
+                match r {
+                    Ok(x) => (x.is_finite() && x > 0.0).then_some(x),
+                    Err(_) => {
+                        // Back to the state before this step, unless the
+                        // series is out of traps; if rebuilding fails, hold for good.
+                        let traps = self.series.traps.fetch_add(1, Ordering::Relaxed) + 1;
+                        self.live = if traps >= self.limits.max_traps_per_series {
+                            None
+                        } else {
+                            let (shared, saved) = (&self.shared, &self.saved);
+                            guarded(shared, "rebuild", || Live::restored(shared, saved).ok()).flatten()
+                        };
+                        None
+                    }
+                }
+            }
+        };
+        if let Some(t) = t {
+            self.series.wall_ns.fetch_add(t.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
         }
+        mark
     }
 
     fn clone_box(&self) -> Box<dyn Rule> {
-        let live = self.live.as_ref().and_then(|_| Live::restored(&self.shared, &self.saved).ok());
-        Box::new(WasmRule { shared: self.shared.clone(), saved: self.saved.clone(), live, buf: Vec::new() })
+        let (shared, saved) = (&self.shared, &self.saved);
+        let live = if self.live.is_some() && shared.disqualified().is_none() { guarded(shared, "clone", || Live::restored(shared, saved).ok()).flatten() } else { None };
+        let series = if self.root { Arc::default() } else { self.series.clone() };
+        Box::new(WasmRule { shared: shared.clone(), saved: saved.clone(), live, buf: Vec::new(), limits: self.limits, root: false, series, last_fuel: None })
     }
 }
 
 /// Check what wasmi's validation does not, and export every mutable global
 /// so a clone can copy it. Returns the module to load and those exports.
 fn prepare(wasm: &[u8]) -> Result<(Vec<u8>, Vec<String>)> {
-    use wasmparser::{Operator, Parser, Payload};
+    use wasmparser::{Operator, Parser, Payload, ValType};
     if wasm.len() < 8 {
         bail!("not a valid module: {} bytes", wasm.len());
     }
@@ -227,12 +397,25 @@ fn prepare(wasm: &[u8]) -> Result<(Vec<u8>, Vec<String>)> {
             }
             Payload::StartSection { .. } => bail!("module has a start function; a rule may not run code at load"),
             Payload::GlobalSection(r) => {
+                if r.count() > MAX_GLOBALS {
+                    bail!("module has {} globals; the cap is {MAX_GLOBALS}", r.count());
+                }
                 for (i, g) in r.into_iter().enumerate() {
-                    if g.map_err(|e| anyhow!("global section: {e}"))?.ty.mutable {
+                    let ty = g.map_err(|e| anyhow!("global section: {e}"))?.ty;
+                    if ty.mutable {
+                        // A clone copies mutable globals between instances;
+                        // only numbers can move (a funcref from another
+                        // instance made wasmi panic, review of PR 88).
+                        if !matches!(ty.content_type, ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64) {
+                            bail!("module has a mutable {} global; a rule's mutable globals must be i32, i64, f32 or f64", ty.content_type);
+                        }
                         mutable.push(i as u32);
                     }
                 }
             }
+            Payload::FunctionSection(r) if r.count() > MAX_FUNCTIONS => bail!("module has {} functions; the cap is {MAX_FUNCTIONS}", r.count()),
+            Payload::DataSection(r) if r.count() > MAX_SEGMENTS => bail!("module has {} data segments; the cap is {MAX_SEGMENTS}", r.count()),
+            Payload::ElementSection(r) if r.count() > MAX_SEGMENTS => bail!("module has {} element segments; the cap is {MAX_SEGMENTS}", r.count()),
             Payload::CodeSectionEntry(body) => {
                 let mut ops = body.get_operators_reader().map_err(|e| anyhow!("code: {e}"))?;
                 while !ops.eof() {
@@ -266,7 +449,9 @@ fn prepare(wasm: &[u8]) -> Result<(Vec<u8>, Vec<String>)> {
     while i < wasm.len() {
         let id = wasm[i];
         let (size, n) = leb(&wasm[i + 1..])?;
-        let body = wasm.get(i + 1 + n..i + 1 + n + size as usize).context("truncated section")?;
+        let start = i + 1 + n;
+        let end = usize::try_from(size).ok().and_then(|s| start.checked_add(s)).context("section size overflows")?;
+        let body = wasm.get(start..end).context("truncated section")?;
         if id == 7 {
             let (count, m) = leb(body)?;
             let mut nb = Vec::with_capacity(body.len() + 32 * names.len());
@@ -283,9 +468,9 @@ fn prepare(wasm: &[u8]) -> Result<(Vec<u8>, Vec<String>)> {
             out.extend_from_slice(&nb);
             done = true;
         } else {
-            out.extend_from_slice(&wasm[i..i + 1 + n + size as usize]);
+            out.extend_from_slice(&wasm[i..end]);
         }
-        i += 1 + n + size as usize;
+        i = end;
     }
     if !done {
         bail!("module exports nothing; a rule exports memory, abi_version, alloc and step");

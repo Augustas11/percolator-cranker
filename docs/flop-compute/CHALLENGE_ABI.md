@@ -28,8 +28,12 @@ emits a module with the exports below works.
 |---|---|
 | Module file | 1 MiB (1,048,576 bytes) |
 | Linear memory | 1 MiB (16 pages) for stack, heap and state together. `memory.grow` past it returns -1; a module whose initial memory is larger does not load. State is promised up to 64 KiB; the template asserts it. |
-| Fuel | 1,000,000 per step, about one unit per instruction, shared by `alloc` and `step`. On 23 quotes the template's rules use 9k (`live`), 14k (`median`) and 33k (`hold`). A step that burns it all takes about 1.5 ms. |
+| Fuel | 1,000,000 per step, about one unit per instruction, shared by `alloc` and `step`. On 23 quotes the template's rules use 9k (`live`), 14k (`median`) and 33k (`hold`). |
 | Tables | 10,000 entries. |
+| Declarations | At most 1,000 globals, 10,000 functions, 1,000 data segments, 1,000 element segments. |
+| Mutable globals | i32, i64, f32 or f64 only (a clone copies them between instances; a function reference cannot move). |
+| Traps | 100 per series (the clean pass and every attack replay together); then the rule holds for the rest of the series. |
+| Wall clock | Off in `flop-score`. A round runner can set `Limits::max_wall_ms_per_series`; checked between steps, then the rule holds for the rest of the series. |
 | Imports | None. No WASI, clock, randomness, I/O or threads. |
 | Start function | Not allowed. |
 | Instructions | Not allowed: `table.set/grow/fill/copy/init`, `elem.drop`, `memory.init`, `data.drop` (a clone could not copy their effect). No SIMD, no threads, one memory, 32-bit memory. |
@@ -44,7 +48,7 @@ does not depend on whether a function was compiled yet).
 |---|---|---|
 | `memory` | memory | The module's only memory. |
 | `abi_version` | `() -> i32` | Returns 1. Any other value: the module does not load. |
-| `alloc` | `(len: i32) -> i32` | Returns a pointer to `len` writable bytes, 8-aligned. 0 means no room: that step holds. |
+| `alloc` | `(len: i32) -> i32` | Returns a pointer to `len` writable bytes, 8-aligned. 0 means no room; 0, unaligned or too short: that step holds, counted as a trap. |
 | `step` | `(ptr: i32, len: i32) -> f64` | Reads the snapshot at `ptr` and returns the mark in USD per 1M benchmark tokens. |
 
 Each step the host calls `alloc(len)`, writes the snapshot there, and calls
@@ -83,11 +87,18 @@ A hold means no new mark this step; the scorer keeps the rule's last mark.
   stack overflow, running out of fuel (an infinite loop ends here), a
   failed allocation that aborts. The module is put back exactly as it was
   before the step (memory and globals), and the next step runs normally.
-- `alloc` returns 0 or a pointer whose `len` bytes do not fit in memory.
-- If the module cannot be rebuilt after a trap (not expected), it holds for
-  the rest of the series.
+- `alloc` returns 0, a pointer that is not 8-aligned, or one whose `len`
+  bytes do not fit in memory (handled as a trap).
+- For the rest of the series: after 100 traps, after the wall-clock budget
+  if one is set, or if the module cannot be rebuilt after a trap (not
+  expected).
+- For good, with the submission disqualified: a panic inside the runtime.
+  Every call into wasmi runs under `catch_unwind`, so such a panic stops
+  that rule, not the scorer; `flop-score` then reports `DID NOT RUN ...
+  disqualified: <reason>`. This is defence in depth. The control is the
+  load-time checks above, which refuse what a clone could not copy.
 
-The scorer never panics or hangs on a module: every call is bounded by fuel.
+The scorer never hangs on a module: every call is bounded by fuel.
 
 ## How clones work
 
@@ -107,6 +118,26 @@ snapshots, ~23 endpoints each): the built-in `spec` takes 5.4 µs a step,
 `live.wasm` 7.4 µs and `hold.wasm` 23 µs; a clone (once per scenario per
 day) about 15-20 µs. `live.wasm` scores exactly as `spec` (gain 0, se 0).
 wasmi added about 10 s to a clean release build of `flop-index`.
+
+Worst case known (`testdata/wasm/hostile/costly.wat`: memory grown to the
+1 MiB cap, whole-memory copies until out of fuel, so every step traps and
+rebuilds, 1,000 globals): load 1.2 ms, a step 0.94 ms, a clone 0.18 ms. A
+plain infinite loop costs 0.35 ms a step. With the 100-trap budget such a
+module stops costing anything after 100 steps of a series; without it, a
+week of recorder data (about 22,000 calls) would take about 21 s.
+
+## Known limits before the competition opens
+
+- **Attack timing is recognisable.** Every attack replay starts at the
+  first snapshot of a UTC day and lasts exactly 24 h, so a module can tell
+  from `at_ms` when it may be under attack. Planned: attack start and
+  length drawn from a secret seed fixed after submissions close.
+- **Provider ids are public.** They are an unsalted FNV-1a of public names,
+  so a module can special-case a named seller. Planned: a per-round keyed
+  hash for provider ids (quantization tags stay unsalted, they are a fixed
+  public vocabulary).
+
+Both belong to the round-runner work and are not fixed here.
 
 ## Not covered yet
 

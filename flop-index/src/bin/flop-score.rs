@@ -58,9 +58,14 @@ fn run(args: &[String]) -> Result<()> {
     }
     let data_dir = data_dir.context(USAGE)?;
     let rule = rule.context(USAGE)?;
-    let get = |name: &str| -> Result<Box<dyn rules::Rule>> {
+    let mut verdicts = Vec::new();
+    let mut get = |name: &str| -> Result<Box<dyn rules::Rule>> {
         match name.strip_prefix("wasm:") {
-            Some(path) => Ok(Box::new(score::wasm::WasmRule::load(path.as_ref())?)),
+            Some(path) => {
+                let w = score::wasm::WasmRule::load(path.as_ref())?;
+                verdicts.push((name.to_owned(), w.verdict()));
+                Ok(Box::new(w))
+            }
             None => rules::by_name(name).with_context(|| format!("no rule {name:?}; flop-score list")),
         }
     };
@@ -68,6 +73,11 @@ fn run(args: &[String]) -> Result<()> {
     let (series, manifest) = data::load(&data_dir)?;
     let snaps: usize = series.iter().map(|s| s.snaps.len()).sum();
     let r = score::score(cand.as_ref(), base_rule.as_ref(), &series, seed, split)?;
+    for (name, v) in &verdicts {
+        if let Some(why) = v.disqualified() {
+            bail!("{name} disqualified: {why}");
+        }
+    }
     let t = r.total;
     println!("gain {:+.6} se {:.6} n {} ({rule} vs {base}, split {split:?}, seed {seed})", t.gain, t.se, t.n);
     let part = |name: &str, s: score::Stat, b: f64, c: f64| println!("  {name:<10} gain {:+.6} se {:.6}   loss {base} {b:.6} {rule} {c:.6}", s.gain, s.se);
@@ -89,6 +99,10 @@ fn run(args: &[String]) -> Result<()> {
 fn main() {
     // A panic (in a candidate rule, say) is a run that did not happen too.
     std::panic::set_hook(Box::new(|info| {
+        // A wasm rule's runtime call is caught and disqualifies the rule.
+        if score::wasm::in_guard() {
+            return;
+        }
         // A reader that stopped early (`| head -1`) already has the number.
         let m = info.to_string();
         if m.contains("failed printing to stdout") && m.contains("Broken pipe") {

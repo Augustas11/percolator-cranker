@@ -282,9 +282,117 @@ fn fixtures_are_built_from_the_template_as_committed() {
         assert_eq!(hex(&Sha256::digest(&bytes)), hash, "{path} changed: rebuild the fixtures (testdata/wasm/README.md)");
         n += 1;
     }
-    assert_eq!(n, 31, "every source and fixture is listed");
+    assert_eq!(n, 41, "every source and fixture is listed");
 }
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+#[test]
+fn a_mutable_reference_global_is_refused() {
+    // Review of PR 88: a clone copying a funcref global made wasmi panic.
+    let e = format!("{:#}", hostile("mut-funcref-global").err().expect("refused"));
+    assert!(e.contains("mutable funcref global"), "{e}");
+}
+
+#[test]
+fn a_panic_in_the_runtime_disqualifies_instead_of_crashing() {
+    // Defence in depth behind the load checks: whatever panics inside a
+    // guarded call is caught, and the rule and its clones hold from then on.
+    let mut r = fixture("median.wasm");
+    let v = r.verdict();
+    let s = real();
+    let sn = &s[0].snaps[0];
+    assert!(r.step(sn.at_ms, &sn.endpoints).is_some());
+    let mut c = r.clone_box();
+    assert_eq!(r.guarded(|| panic!("boom")), None);
+    assert!(v.disqualified().unwrap().contains("boom"));
+    assert_eq!(r.step(sn.at_ms, &sn.endpoints), None);
+    assert_eq!(c.step(sn.at_ms, &sn.endpoints), None, "clones share the verdict");
+    assert!(!in_guard());
+}
+
+#[test]
+fn modules_over_the_load_caps_are_refused() {
+    for (f, want) in [
+        ("too-many-globals", "1001 globals"),
+        ("too-many-functions", "10001 functions"),
+        ("too-many-data-segments", "1001 data segments"),
+        ("too-many-element-segments", "1001 element segments"),
+    ] {
+        let e = format!("{:#}", hostile(f).err().expect("refused"));
+        assert!(e.contains(want), "{f}: {e}");
+    }
+    // A section size past the end is an error, not an overflow.
+    let mut w = b"\0asm\x01\0\0\0".to_vec();
+    w.extend_from_slice(&[0x07, 0xff, 0xff, 0xff, 0xff, 0x0f]);
+    assert!(WasmRule::new(&w).is_err());
+}
+
+#[test]
+fn traps_are_budgeted_per_series() {
+    let mut r = hostile("odd").unwrap();
+    for _ in 0..MAX_TRAPS_PER_SERIES - 1 {
+        assert_eq!(r.step(2, &[]), None);
+    }
+    assert_eq!(r.step(1, &[]), Some(1001.0), "still running under the budget");
+    assert_eq!(r.step(2, &[]), None);
+    assert_eq!(r.step(1, &[]), None, "out of traps: holds for the rest of the series");
+    // A series started from the loaded rule has its own budget...
+    let root = hostile("odd").unwrap();
+    let mut a = root.clone_box();
+    for _ in 0..MAX_TRAPS_PER_SERIES {
+        a.step(2, &[]);
+    }
+    assert_eq!(a.step(1, &[]), None);
+    assert_eq!(root.clone_box().step(1, &[]), Some(1001.0));
+    // ...and a replay clone shares its series' budget.
+    assert_eq!(a.clone_box().step(1, &[]), None);
+}
+
+#[test]
+fn a_wall_clock_budget_stops_a_series() {
+    let mut r = hostile("alloc-loops").unwrap().with_limits(Limits { max_wall_ms_per_series: Some(5), ..Limits::default() });
+    let t = std::time::Instant::now();
+    for _ in 0..2_000 {
+        assert_eq!(r.step(1, &[]), None);
+    }
+    // Without the budget 2,000 out-of-fuel steps take seconds.
+    assert!(t.elapsed() < std::time::Duration::from_millis(500), "{:?}", t.elapsed());
+    let mut r = fixture("median.wasm").with_limits(Limits { max_wall_ms_per_series: Some(0), ..Limits::default() });
+    let s = real();
+    assert_eq!(r.step(s[0].snaps[0].at_ms, &s[0].snaps[0].endpoints), None);
+}
+
+#[test]
+fn fuel_used_reports_the_trapping_step() {
+    let mut r = hostile("odd").unwrap();
+    r.step(3, &[]);
+    assert_eq!(r.fuel_used(), Some(FUEL_PER_STEP));
+    r.step(2, &[]);
+    let used = r.fuel_used().unwrap();
+    assert!(used > 0 && used < 100, "{used}");
+}
+
+#[test]
+fn an_unaligned_alloc_holds() {
+    let mut r = hostile("misaligned").unwrap();
+    assert_eq!(r.step(1, &[]), None);
+    let mut ok = hostile("odd").unwrap();
+    assert_eq!(ok.step(1, &[]), Some(1001.0));
+}
+
+#[test]
+fn the_costliest_known_module_is_bounded() {
+    // Grows to 1 MiB, then copies memory until out of fuel every step, with
+    // 1,000 globals: it holds, and the scorer finishes a day of it.
+    let r = hostile("costly").unwrap();
+    let mut c = r.clone_box();
+    assert_eq!(c.step(1, &[]), Some(1.0), "grows");
+    assert_eq!(c.step(2, &[]), None, "out of fuel");
+    let t = std::time::Instant::now();
+    let l = day_losses(&r, &five_minute(1)[..], 1);
+    assert_eq!(l.len(), 1);
+    assert!(t.elapsed() < std::time::Duration::from_secs(60), "{:?}", t.elapsed());
 }
