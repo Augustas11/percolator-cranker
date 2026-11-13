@@ -9,7 +9,7 @@ export interface Position {
   capital: number;
   equity: number;
   mark_price: number;
-  position: { side: "long" | "short"; size_sol: number } | null;
+  position: { side: "long" | "short"; size: number } | null;
 }
 
 export interface Config {
@@ -115,8 +115,8 @@ export async function runAgent(strategy: Strategy, cfg: Config, mcp: Mcp, time: 
               if (target !== 0 && !cfg.signal.aborted) {
                 const side = target === 1 ? "long" : "short";
                 trades.push(time.now());
-                await mcp.call("open_position", { side, size_sol: cfg.sizeSol });
-                log("trade", { action: "open", side, size_sol: cfg.sizeSol });
+                await mcp.call("open_position", { side, size: cfg.sizeSol });
+                log("trade", { action: "open", side, size: cfg.sizeSol });
               }
             }
           }

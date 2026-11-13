@@ -36,7 +36,7 @@ async function run(options: {
       if (options.error?.(name, calls.filter(call => call.name === name).length)) throw new Error("test failure");
       if (name === "deposit") { state.portfolio = "created"; state.capital = 500; }
       if (name === "close_position") state.position = null;
-      if (name === "open_position") state.position = { side: args!.side as "long" | "short", size_sol: args!.size_sol as number };
+      if (name === "open_position") state.position = { side: args!.side as "long" | "short", size: args!.size as number };
       return { ...state };
     },
     close,
@@ -67,20 +67,20 @@ describe("agent loop", () => {
     expect(result.calls.map(call => call.name)).toEqual(["get_position", "deposit", "get_position"]);
   });
   it("flips by closing before opening and uses the configured size", async () => {
-    const result = await run({ position: { position: { side: "short", size_sol: 1 } }, target: () => 1, cfg: { sizeSol: 0.7 } });
+    const result = await run({ position: { position: { side: "short", size: 1 } }, target: () => 1, cfg: { sizeSol: 0.7 } });
     expect(result.calls.slice(-2)).toEqual([
-      { name: "close_position" }, { name: "open_position", args: { side: "long", size_sol: 0.7 } },
+      { name: "close_position" }, { name: "open_position", args: { side: "long", size: 0.7 } },
     ]);
     expect(result.events.filter(event => event.event === "trade")).toHaveLength(2);
   });
   it("reserves two trades for a flip before closing", async () => {
-    const result = await run({ position: { position: { side: "short", size_sol: 1 } }, target: () => 1, cfg: { maxTradesPerHour: 1 } });
+    const result = await run({ position: { position: { side: "short", size: 1 } }, target: () => 1, cfg: { maxTradesPerHour: 1 } });
     expect(result.calls.every(call => call.name === "get_position")).toBe(true);
     expect(result.events.some(event => event.event === "skip_budget")).toBe(true);
   });
   it("counts both sides of a flip and resets the rolling budget after an hour", async () => {
     let tick = 0;
-    const result = await run({ ticks: 4, position: { position: { side: "short", size_sol: 1 } },
+    const result = await run({ ticks: 4, position: { position: { side: "short", size: 1 } },
       target: () => ++tick === 1 ? 1 : -1, cfg: { maxTradesPerHour: 2, intervalS: 1200 } });
     expect(result.events.filter(event => event.event === "skip_budget")).toHaveLength(2);
     expect(result.events.filter(event => event.event === "trade")).toHaveLength(4);
@@ -97,14 +97,14 @@ describe("agent loop", () => {
     expect(result.events.filter(event => event.event === "error")).toHaveLength(5);
   });
   it("retries failed bootstrap and never opens after a failed close", async () => {
-    const result = await run({ ticks: 2, position: { portfolio: null, position: { side: "short", size_sol: 1 } },
+    const result = await run({ ticks: 2, position: { portfolio: null, position: { side: "short", size: 1 } },
       target: () => 1, error: (name, count) => name === "deposit" && count === 1 || name === "close_position" });
     expect(result.calls.filter(call => call.name === "deposit")).toHaveLength(2);
     expect(result.calls.some(call => call.name === "open_position")).toBe(false);
     expect(result.close).toHaveBeenCalledOnce();
   });
   it("does not trade when the target matches the current position", async () => {
-    const result = await run({ position: { position: { side: "long", size_sol: 0.5 } }, target: () => 1 });
+    const result = await run({ position: { position: { side: "long", size: 0.5 } }, target: () => 1 });
     expect(result.calls.every(call => call.name === "get_position")).toBe(true);
   });
   it("bounds the price history at 200 samples", async () => {

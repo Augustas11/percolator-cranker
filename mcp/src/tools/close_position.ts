@@ -10,7 +10,7 @@ export function closeChunk(size: bigint, maxFill: bigint) {
 
 export default tool({
   name: "close_position",
-  description: "Close your SOL-PERP position (devnet, test tokens).",
+  description: "Close your drip perp position (devnet, test tokens).",
   run: async (drip) => {
     const signatures: string[] = [], explorer: string[] = [];
     let start = 0n;
@@ -33,6 +33,6 @@ export default tool({
     const market = await drip.market();
     const leg = pf?.legs.find(leg => leg.assetIndex === 0 && leg.marketId === market.asset0.marketId);
     const remaining = leg ? effectiveAbsQ(market, leg) : 0n;
-    return { signatures, explorer, closed_sol: units(start - remaining), complete: remaining === 0n, remaining_sol: units(remaining) };
+    return { signatures, explorer, closed: units(start - remaining), complete: remaining === 0n, remaining: units(remaining) };
   },
 });

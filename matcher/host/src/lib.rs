@@ -116,6 +116,11 @@ pub fn update_ref(program: Pubkey, authority: Pubkey, ctx: Pubkey, price: u64) -
     }
 }
 
+/// Fee to send and to allow: the market's base fee, never below the first market's 12 bps.
+fn fee_bps(base: u64) -> Result<u16, solana_sdk::program_error::ProgramError> {
+    u16::try_from(base.max(12)).map_err(|_| solana_sdk::program_error::ProgramError::InvalidAccountData)
+}
+
 pub fn set_matcher_config(
     wrapper: Pubkey,
     market: Pubkey,
@@ -127,15 +132,17 @@ pub fn set_matcher_config(
     market_data: &[u8],
     expiry: u64,
 ) -> Result<Instruction, solana_sdk::program_error::ProgramError> {
+    let (cfg, engine) = state::read_market(market_data)?;
     Ok(wrapper_ix(
         wrapper,
         P::SetMatcherConfig {
             portfolio_id: state::read_portfolio_id(portfolio_data)?,
             expected_sequence: state::read_portfolio_matcher_sequence(portfolio_data)?,
             position_epoch: state::read_portfolio_position_epoch(portfolio_data)?,
-            asset_generation_frontier: state::read_market(market_data)?.1.next_market_id,
+            asset_generation_frontier: engine.next_market_id,
             enabled: 1,
-            trade_fee_cap_bps: 12,
+            // The wrapper refuses a TradeCpi when the market's base fee is above this cap.
+            trade_fee_cap_bps: fee_bps(cfg.trade_fee_base_bps)?,
             expiry_slot: expiry,
         },
         vec![
@@ -203,7 +210,7 @@ pub fn trade(
             asset_index: 0,
             market_id: state::read_market(market_data)?.1.assets[0].market_id,
             size_q: size,
-            fee_bps: 12,
+            fee_bps: fee_bps(state::read_market(market_data)?.0.trade_fee_base_bps)?.into(),
             limit_price: 0,
             backing_fee_cap_bps: 0,
         },

@@ -134,12 +134,15 @@ async function buildTradeIxs(
   const a = parsePortfolio(accounts[0]), b = parsePortfolio(accounts[1]);
   const market = parseMarket(accounts[2]);
   const { sizeQ, limitPrice } = order(a, market);
+  // The wrapper refuses a TradeCpi fee under the market's trade_fee_base_bps (docs/LAUNCH.md), and markets
+  // differ (12 bps on the first SOL-PERP market, 15 on COMPUTE-PERP), so never send less than the market's own.
+  const fee = feeBps < market.config.tradeFeeBaseBps ? market.config.tradeFeeBaseBps : feeBps;
   const delegate = matcherDelegate(cfg.programId, cfg.market, cfg.lpPortfolio, b.owner, cfg.matcherProgram, cfg.matcherContext);
   return [...ixs, tradeCpiIx(cfg.programId, owner, cfg.market, portfolio, cfg.lpPortfolio,
     cfg.matcherProgram, cfg.matcherContext, delegate, {
       accountAPortfolioId: a.portfolioId, accountAPositionEpoch: a.positionEpoch,
       accountBPortfolioId: b.portfolioId, accountBPositionEpoch: b.positionEpoch, accountBMatcherSequence: b.sequence,
-      assetIndex: 0, marketId: market.asset0.marketId, sizeQ, feeBps, limitPrice, backingFeeCapBps: 0,
+      assetIndex: 0, marketId: market.asset0.marketId, sizeQ, feeBps: fee, limitPrice, backingFeeCapBps: 0,
     })];
 }
 
