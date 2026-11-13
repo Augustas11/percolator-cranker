@@ -73,6 +73,7 @@ or_weighting = "inverse_square"     # or "median"
 or_min_frac_of_median = 0.5        # listings under half the median count as half the median (clamp)
 or_clamp_min_endpoints = 3         # ...only in a set of 3+ up endpoints; 2 points can't name an outlier
 or_hold_missing_s = 0              # a down or unlisted endpoint counts at its last up price this long; 0 = off (length not chosen yet)
+or_hold_confirm_s = 3600           # ...only a price it has been seen up at for this long (a price flashed for one fetch is never held)
 # Manipulation limits on the FLOP side: one buyer or miner is scaled down to
 # 45% of the window's weight (strictly under half, so it can't tie everyone
 # else and set a low median); fewer than 3 distinct buyers is stale.

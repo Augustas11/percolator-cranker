@@ -127,9 +127,14 @@ last up price (SPEC.md, "Missing endpoints"). On daily pins they equal `spec`
 
 | Rule | gain | se | down | jump |
 |---|---|---|---|---|
-| hold-2h | +0.096 | 0.063 | +0.077 | -0.0007 |
+| hold-2h | +0.005 | 0.007 | +0.035 | -0.0005 |
 | hold-6h | +0.346 | 0.215 | +0.178 | -0.0007 |
-| hold-12h | +0.366 | 0.228 | +0.188 | -0.0006 |
+| hold-12h | +0.366 | 0.228 | +0.188 | -0.0007 |
+
+All with the 1 h confirm. The jump part is slightly worse for every length;
+not yet explained. The "down" scenario downs endpoints at their current
+price, so these gains say nothing about a provider that lists a new price
+and then goes down: add that scenario before choosing.
 
 Three days, so no rule clears 2 x se and there is no held-out split yet.
 Rerun on a pin of the first full week (complete 2026-11-18) before choosing.

@@ -203,6 +203,9 @@ pub struct OracleCfg {
     /// (flop_index::Holder). 0 = off.
     #[serde(default)]
     pub or_hold_missing_s: u64,
+    /// Only a price the endpoint has been seen up at for this long is held.
+    #[serde(default = "default_or_hold_confirm_s")]
+    pub or_hold_confirm_s: u64,
 }
 
 impl OracleCfg {
@@ -253,6 +256,7 @@ fn default_or_max_age_s() -> u64 { 1800 }
 fn default_or_weighting() -> String { "inverse_square".into() }
 fn default_or_min_frac() -> f64 { 0.5 }
 fn default_or_clamp_min() -> usize { 3 }
+fn default_or_hold_confirm_s() -> u64 { 3600 }
 
 /// InitMarket, field for field (`initial_price` is the mock start). TOML
 /// integers are i64, so u128 fields are read as u64.

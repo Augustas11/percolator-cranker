@@ -87,17 +87,27 @@ noticed.
 its length is chosen). An endpoint that goes down, loses its price or leaves
 the listing keeps counting, as up and at the price it last had while up, for
 `or_hold_missing_s`; after that it is dropped as before. One that comes back
-counts at its new price at once, and a price shown while down is ignored. Why:
+counts at its new price at once, and a price shown while down is ignored.
+Only a price the endpoint has been seen up at for `or_hold_confirm_s` (1 h)
+is held: otherwise a provider could list any price for one fetch, go down,
+and have it counted for the whole hold without selling at it. An endpoint
+that goes down sooner is dropped, as with no hold. A provider with two
+endpoints in one quantization is not held (its rows can't be told apart
+between fetches). Why:
 in the recorder's first 44 h (2026-11-11 to 11-13) no bf16 or fp16 price
 changed, but GMICloud's bf16 endpoint was down 44% of the time in 15 spells
 (median 30 min, longest 6 h 15 min). Each spell moved the pricing set from the
 bf16 pair ($0.3112) to DeepInfra with Cerebras fp16 ($0.3035), a 2.5% step
 either way, 29 times, with no price change behind it. Cost of the rule: a real
-exit reaches the mark one hold late. Limits: the hold is kept in memory, so
+exit reaches the mark one hold late, and a provider that comes back for one
+fetch in each hold keeps its confirmed price counted while mostly down. Limits: the hold is kept in memory, so
 after a pusher restart nothing is held until an endpoint is seen up again; a
 push line logs `hold_missing_s`, the held endpoints (`held`) and the listing
 as priced, so the mark recomputes from the line, but the line alone does not
-prove the endpoint was up when `held` says. A change in what is held logs
+prove the endpoint was up when `held` says. The scorer's "down" scenario takes
+endpoints down at their current price, the case the hold is built for; it
+has no "new price, then down" scenario yet, and one must be added and scored
+before the hold is turned on. A change in what is held logs
 `flop alert: held at last up price: ...`. The shipped value is 0 (off): 2 h,
 6 h and 12 h are scored as `hold-2h`, `hold-6h` and `hold-12h`
 ([SCORER.md](SCORER.md)) on the recorder's first full week, and the owner

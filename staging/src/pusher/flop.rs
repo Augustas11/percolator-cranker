@@ -509,7 +509,7 @@ impl FlopIndex {
         let (mut models_at, mut or_at) = (None::<Instant>, None::<Instant>);
         let (mut last_table, mut last_status) = (String::new(), String::new());
         let mut clamped: Vec<String> = Vec::new();
-        let mut holder = Holder::new(cfg.or_hold_missing_s.saturating_mul(1000));
+        let mut holder = Holder::new(cfg.or_hold_missing_s.saturating_mul(1000), cfg.or_hold_confirm_s.saturating_mul(1000));
         let mut held_now: Vec<String> = Vec::new();
         std::thread::spawn(move || loop {
             // Model registry for the status table: hourly, and kept on a failed read.
@@ -604,7 +604,7 @@ impl FlopIndex {
                 "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
                 "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp",
                 "clamp_min_endpoints": o.or_clamp_min_endpoints, "clamp": q.clamp, "used": q.used,
-                "hold_missing_s": o.or_hold_missing_s, "held": q.held,
+                "hold_missing_s": o.or_hold_missing_s, "hold_confirm_s": o.or_hold_confirm_s, "held": q.held,
                 "endpoints": q.endpoints, "flop_side": side_json,
             }))
         } else {
@@ -849,11 +849,19 @@ fn rule_ok(line: &str, new_rule_seen: &mut bool) -> Result<()> {
         "weighting": s.weighting, "min_endpoints": s.min_endpoints, "quantizations": s.quantizations,
         "blend_in_out": s.blend,
     });
-    // Lines from before 2026-11-13 carry no hold_missing_s: nothing was held.
-    if let Some(h) = inputs.get("hold_missing_s") {
-        if h.as_u64() != Some(s.hold_missing_s) {
-            bail!("rule loosened or changed: hold_missing_s is {h}, the shipped rule has {}", s.hold_missing_s);
+    // Lines from before 2026-11-13 carry no hold fields: nothing was held.
+    for (k, want) in [("hold_missing_s", s.hold_missing_s), ("hold_confirm_s", s.hold_confirm_s)] {
+        if let Some(h) = inputs.get(k) {
+            if h.as_u64() != Some(want) {
+                bail!("rule loosened or changed: {k} is {h}, the shipped rule has {want}");
+            }
         }
+    }
+    // A held endpoint is logged as an up row, so with the hold off (or not
+    // declared) a line may not name any.
+    let hold = inputs.get("hold_missing_s").and_then(|h| h.as_u64()).unwrap_or(0);
+    if hold == 0 && inputs.get("held").and_then(|h| h.as_array()).is_some_and(|h| !h.is_empty()) {
+        bail!("rule loosened or changed: endpoints are held but the line declares no hold");
     }
     for (k, v) in want.as_object().expect("object") {
         let got = &inputs[k.as_str()];
@@ -954,20 +962,26 @@ mod tests {
         assert_eq!(o.or_min_frac_of_median, s.min_frac_of_median);
         assert_eq!(o.or_clamp_min_endpoints, s.clamp_min_set);
         assert_eq!(o.or_hold_missing_s, s.hold_missing_s);
+        assert_eq!(o.or_hold_confirm_s, s.hold_confirm_s);
     }
 
     #[test]
     fn a_held_endpoint_is_logged_and_the_line_still_verifies() {
         let mut o = cfg();
         o.or_hold_missing_s = 6 * 3600;
-        let mut h = Holder::new(o.or_hold_missing_s * 1000);
+        let mut h = Holder::new(o.or_hold_missing_s * 1000, o.or_hold_confirm_s * 1000);
         let mut eps = vec![ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2), ep("Novita", "bf16", 0.30, 2.4)];
-        let up = held_quote(&eps, NOW, &o, &mut h).unwrap();
+        let hour = 3_600_000;
+        held_quote(&eps, NOW, &o, &mut h).unwrap();
+        let up = held_quote(&eps, NOW + hour, &o, &mut h).unwrap();
         assert!(up.held.is_empty());
         eps[1].status = -2;
-        let q = held_quote(&eps, NOW + 3_600_000, &o, &mut h).unwrap();
+        let q = held_quote(&eps, NOW + 2 * hour, &o, &mut h).unwrap();
         assert_eq!(q.usd_e6, up.usd_e6);
-        assert_eq!((q.held.len(), q.held[0].provider.as_str(), q.held[0].last_up_ms), (1, "GMICloud", NOW));
+        assert_eq!((q.held.len(), q.held[0].provider.as_str(), q.held[0].last_up_ms), (1, "GMICloud", NOW + hour));
+        // With the hold off, a line that names held endpoints is refused.
+        let forged = signed_push(&Keypair::new(), serde_json::json!({"mark_e6": q.usd_e6, "inputs": {"source": "openrouter", "clamp_min_endpoints": 3, "hold_missing_s": 0, "held": q.held}})).unwrap();
+        assert!(rule_ok(&forged, &mut false).unwrap_err().to_string().contains("held"));
         // The logged endpoints are the held listing, so the line recomputes.
         let kp = Keypair::new();
         let line = line_for(&o, &kp, &q, &q.set, serde_json::to_value(&q.used).unwrap());

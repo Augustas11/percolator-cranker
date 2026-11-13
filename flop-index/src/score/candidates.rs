@@ -9,9 +9,9 @@ use crate::{combine, or_quote_with, spec_quote, Guard, Holder, OrEndpoint, SPEC}
 
 /// (name, constructor). Names are unique, lowercase, no spaces.
 pub const ALL: &[(&str, fn() -> Box<dyn Rule>)] = &[
-    ("hold-2h", || Box::new(Hold(Holder::new(2 * HOUR_MS)))),
-    ("hold-6h", || Box::new(Hold(Holder::new(6 * HOUR_MS)))),
-    ("hold-12h", || Box::new(Hold(Holder::new(12 * HOUR_MS)))),
+    ("hold-2h", || Box::new(Hold(Holder::new(2 * HOUR_MS, SPEC.hold_confirm_s * 1000)))),
+    ("hold-6h", || Box::new(Hold(Holder::new(6 * HOUR_MS, SPEC.hold_confirm_s * 1000)))),
+    ("hold-12h", || Box::new(Hold(Holder::new(12 * HOUR_MS, SPEC.hold_confirm_s * 1000)))),
 ];
 
 const HOUR_MS: u64 = 3_600_000;
