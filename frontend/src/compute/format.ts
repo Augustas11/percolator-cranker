@@ -6,6 +6,8 @@ export function usd(n: number | null | undefined) {
   const digits = n >= 1 ? 2 : n >= 0.1 ? 3 : 4;
   return "$" + n.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
+/** Like usd, but keeps 3 significant digits under one cent (FLOP prices, dollars per bn G_n). */
+export const usdSmall = (n: number | null | undefined) => n == null || !Number.isFinite(n) ? "—" : n > 0 && n < 0.01 ? "$" + Number(n.toPrecision(3)).toString() : usd(n);
 /** The perp mark, always 4 decimals as written on chain. */
 export const usd4 = (n: number | null | undefined) => n == null || !Number.isFinite(n) ? "—"
   : n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 4, maximumFractionDigits: 4 });

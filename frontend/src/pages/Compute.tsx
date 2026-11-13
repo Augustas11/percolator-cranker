@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket, MarketModel } from "../compute/client";
-import { Axis, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadSwarm, marketScale, sinceLabel, typicalPrice, upPriced, widest, type LogScale } from "../compute/charts";
-import { addressUrl, ago, clock, count, day, direction, pct, short, times, txUrl, usd, usd4, when } from "../compute/format";
+import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket, MarketModel, MixKey } from "../compute/client";
+import { Axis, DEFAULT_MIX, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadSwarm, computeSpread, hasMixes, marketScale, medianAt, sinceLabel, typicalPrice, upPriced, widest, type LogScale } from "../compute/charts";
+import { addressUrl, ago, clock, count, day, direction, pct, short, times, txUrl, usd, usd4, usdSmall, when } from "../compute/format";
 import { latestStale, marketDataTime, marketStale, modelStale, useComputeFeed } from "../compute/useFeed";
 import FeedBoundary from "../compute/FeedBoundary";
 import { site } from "../site/config";
@@ -12,8 +12,21 @@ import "../site/compute.css";
 export { STALE_MS } from "../compute/useFeed";
 
 const PROVIDERS_SHOWN = 8;
-type SortKey = "sellers" | "spread" | "median";
-const sorts: [SortKey, string][] = [["sellers", "Most sellers"], ["spread", "Widest spread"], ["median", "Highest median"]];
+type SortKey = "sellers" | "spread" | "median" | "gn";
+const sorts: [SortKey, string][] = [["sellers", "Most sellers"], ["spread", "Widest spread"], ["median", "Highest median"], ["gn", "$ per bn G_n"]];
+
+/** Input:output token mixes, as the switch shows them. */
+export const MIXES: [MixKey, string, string][] = [["chat_3_1", "Chat", "3:1"], ["avg_15_1", "Average", "15:1"], ["agent_150_1", "Agent", "150:1"]];
+const ratioOf = (mix: MixKey) => MIXES.find(([k]) => k === mix)![2];
+const GN_FORMULA = "Price per 1M tokens ÷ compute per token. Compute per token is FLOP's count for the model: from FLOP's registry where listed, otherwise 2 × parameters.";
+const fmtTimes = (n: number) => (n >= 10 ? n.toFixed(0) : n.toFixed(1)) + "×";
+
+function MixSwitch({ mix, onMix, ratio }: { mix: MixKey; onMix: (m: MixKey) => void; ratio: number | null | undefined }) {
+  return <div className="cx-mix">
+    <div className="cx-sort" role="group" aria-label="Input:output token mix">{MIXES.map(([key, label, r]) => <button key={key} type="button" aria-pressed={mix === key} onClick={() => onMix(key)}>{label} {r}</button>)}</div>
+    <p className="cx-mix-why">What you pay depends on how much your app reads versus writes{typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? <>; output tokens cost about {fmtTimes(ratio)} input</> : null}.</p>
+  </div>;
+}
 
 const Up = ({ up, stale = false }: { up: boolean; stale?: boolean }) => {
   const state = stale ? "stale" : up ? "up" : "down";
@@ -30,11 +43,11 @@ function Skeleton() {
   </div>;
 }
 
-function Hero({ market, now, error }: { market: ComputeMarket; now: number; error: string }) {
+function Hero({ market, now, error, mix, onMix }: { market: ComputeMarket; now: number; error: string; mix: MixKey; onMix: (m: MixKey) => void }) {
   const { index } = market;
   const stale = marketStale(market, now);
   const wide = widest(market);
-  const typical = typicalPrice(market);
+  const typical = typicalPrice(market, mix);
   const level = index.level;
   const hasSeries = level !== null && index.series.length >= MIN_SERIES_POINTS;
   const read = marketDataTime(market);
@@ -44,9 +57,10 @@ function Hero({ market, now, error }: { market: ComputeMarket; now: number; erro
       {typical ? <>
         <p className="cx-label">Median price to run an open model</p>
         <div className="cx-price"><strong>{usd(typical.median)}</strong><span>per 1M tokens</span></div>
-        <p className="cx-range">Cheapest model <b>{typical.cheapest.name} {usd(typical.cheapest.median)}</b> · dearest <b>{typical.dearest.name} {usd(typical.dearest.median)}</b></p>
+        <p className="cx-range">Cheapest model <b>{typical.cheapest.name} {usd(typical.at(typical.cheapest))}</b> · dearest <b>{typical.dearest.name} {usd(typical.at(typical.dearest))}</b></p>
+        {hasMixes(market) && <MixSwitch mix={mix} onMix={onMix} ratio={market.out_in_ratio_median} />}
       </> : <p className="cx-label">{market.models.length ? "No model has enough sellers for a price right now." : "No prices right now."}</p>}
-      {typical && <p className="cx-proof">Across <b>{count(typical.models)}</b> models with 3 or more sellers: <b>{count(typical.quotes)}</b> quotes from <b>{count(typical.providers)}</b> providers{typical.held > 0 && <>, {count(typical.held)} of them held at their last price while the seller is offline</>}. Input and output tokens mixed 15:1.</p>}
+      {typical && <p className="cx-proof">Across <b>{count(typical.models)}</b> models with 3 or more sellers: <b>{count(typical.quotes)}</b> quotes from <b>{count(typical.providers)}</b> providers{typical.held > 0 && <>, {count(typical.held)} of them held at their last price while the seller is offline</>}. Input and output tokens mixed {ratioOf(mix)}.</p>}
       <p className="cx-updated">
         <span className="cx-indexstat">Index {level === null ? "—" : level.toFixed(2)}{index.base_ms !== null && <> · 100 = {day(index.base_ms)}</>}{index.change_24h_pct !== null && <> · 24 h <Change value={index.change_24h_pct} /></>}{index.change_7d_pct !== null && <> · 7 d <Change value={index.change_7d_pct} /></>}</span>
         {read !== null && <span>Updated {ago(read, now)} · {clock(read)} UTC</span>}
@@ -77,8 +91,20 @@ function Audience({ market, latest }: { market: ComputeMarket; latest: ComputeLa
   </nav>;
 }
 
-function ModelRow({ model, scale, open, onToggle, now }: { model: MarketModel; scale: LogScale; open: boolean; onToggle: () => void; now: number }) {
+function GnCell({ value, spread }: { value: number | null | undefined; spread: ReturnType<typeof computeSpread> }) {
+  const ok = typeof value === "number" && Number.isFinite(value) && value > 0;
+  return <span className="c-gn"><span className="u-mobile">per bn G_n </span><b>{ok ? usdSmall(value) : "—"}</b>
+    {ok && spread && <span className="gn-track" aria-hidden="true">
+      {spread.p25 !== null && spread.p75 !== null && <i className="gn-band" style={{ left: `${spread.at(spread.p25)}%`, width: `${Math.max(2, spread.at(spread.p75) - spread.at(spread.p25))}%` }} />}
+      <i className="gn-dot" style={{ left: `${spread.at(value)}%` }} />
+    </span>}
+  </span>;
+}
+
+function ModelRow({ model, scale, open, onToggle, now, mix, spread }: { model: MarketModel; scale: LogScale; open: boolean; onToggle: () => void; now: number; mix: MixKey; spread: ReturnType<typeof computeSpread> | false }) {
   const stale = modelStale(model, now);
+  const median = medianAt(model, mix);
+  const gn = model.compute?.gn_per_token;
   const panel = `seller-list-${model.id.replace(/[^a-z0-9]/gi, "-")}`;
   const down = model.quotes.filter(q => !q.up).length;
   return <li className={`board-row${open ? " is-open" : ""}${model.thin ? " is-thin" : ""}`}>
@@ -86,8 +112,9 @@ function ModelRow({ model, scale, open, onToggle, now }: { model: MarketModel; s
       <span className="c-model"><span className="m-name">{model.name}</span><span className="m-family"><span>{model.id}</span>{model.thin && <em className="tag">thin</em>}{stale && <em className="tag">stale</em>}</span></span>
       <span className="c-sellers"><b>{model.sellers_up}</b>/{model.sellers_total}<span className="u-mobile"> sellers up</span></span>
       <span className="c-strip"><RangeStrip model={model} scale={scale} stale={stale} /></span>
-      <span className="c-median"><span className="u-mobile">median </span>{usd(model.median)}</span>
+      <span className="c-median"><span className="u-mobile">median </span>{usd(median)}</span>
       <span className="c-spread" title="Dearest seller over cheapest">{times(model.min, model.max)}<span className="u-mobile"> spread</span></span>
+      {spread !== false && <GnCell value={model.usd_per_bn_gn} spread={spread} />}
       <span className="c-cheap"><span className="u-mobile">cheapest </span>{model.cheapest ? <><b>{usd(model.cheapest.price)}</b> {model.cheapest.provider}<span className="q"> {model.cheapest.quantization}</span></> : <b>—</b>}</span>
       <span className="c-chg"><span className="u-mobile">24 h </span><Change value={model.change_24h_pct} /></span>
       <span className="c-chev" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg></span>
@@ -95,6 +122,9 @@ function ModelRow({ model, scale, open, onToggle, now }: { model: MarketModel; s
     {open && <div className="board-panel" id={panel}>
       <div className="panel-meta">
         <span>Range {usd(model.min)}–{usd(model.max)}</span><span>Middle half {usd(model.p25)}–{usd(model.p75)}</span><span>Median {usd(model.median)}</span>
+        {mix !== DEFAULT_MIX && <span>Median at {ratioOf(mix)} {usd(median)}</span>}
+        {typeof model.usd_per_bn_gn === "number" && <span>{usdSmall(model.usd_per_bn_gn)} per bn G_n{typeof model.usd_per_bn_gn_min === "number" && typeof model.usd_per_bn_gn_max === "number" && <> (sellers {usdSmall(model.usd_per_bn_gn_min)}–{usdSmall(model.usd_per_bn_gn_max)})</>}</span>}
+        {typeof gn === "number" && <span>{gn.toLocaleString("en-US", { maximumSignificantDigits: 3 })} G_n per token{model.compute?.source ? ` (${model.compute.source})` : ""}</span>}
         {down > 0 && <span>{down} down</span>}
         {stale && <span>Not read in the last 30 minutes{model.data_ms ? `; last read ${when(model.data_ms)}` : ""}</span>}
         {model.series.length >= MIN_SERIES_POINTS && <Sparkline series={model.series} label={`${model.name} median ${sinceLabel(model.series)}.`} className="spark spark-sm" />}
@@ -118,31 +148,44 @@ function ModelRow({ model, scale, open, onToggle, now }: { model: MarketModel; s
 
 const MODELS_SHOWN = 20;
 
-function Board({ market, now }: { market: ComputeMarket; now: number }) {
+/** Ascending, nulls last. */
+const byNum = (a: number | null | undefined, b: number | null | undefined, desc = false) =>
+  a == null && b == null ? 0 : a == null ? 1 : b == null ? -1 : desc ? b - a : a - b;
+
+function Board({ market, now, mix }: { market: ComputeMarket; now: number; mix: MixKey }) {
   const [all, setAll] = useState(false);
   const [sort, setSort] = useState<SortKey>("sellers");
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const scale = useMemo(() => marketScale(market), [market]);
+  const spread = useMemo(() => computeSpread(market), [market]);
+  const showGn = spread !== null;
+  const mixed = hasMixes(market);
   const models = useMemo(() => [...market.models].sort((a, b) =>
-    sort === "spread" ? b.max / b.min - a.max / a.min : sort === "median" ? b.median - a.median : b.sellers_total - a.sellers_total || a.median - b.median), [market, sort]);
+    sort === "spread" ? b.max / b.min - a.max / a.min
+    : sort === "median" ? byNum(medianAt(a, mix), medianAt(b, mix), true)
+    : sort === "gn" ? byNum(a.usd_per_bn_gn, b.usd_per_bn_gn)
+    : b.sellers_total - a.sellers_total || a.median - b.median), [market, sort, mix]);
   const toggle = (id: string) => setOpen(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   return <section id="board" className="cx-section" aria-labelledby="compute-board-heading">
     <div className="cx-section-head">
       <div>
         <h2 id="compute-board-heading">Price by model</h2>
-        <p className="cx-sub">Same model, every seller. USD per 1M tokens, 15:1 input:output, log scale shared by all rows.</p>
+        <p className="cx-sub">{mixed
+          ? `Same model, every seller. USD per 1M tokens. Medians at ${ratioOf(mix)} input:output; strips and cheapest seller at 15:1 quotes, log scale shared by all rows.`
+          : "Same model, every seller. USD per 1M tokens, 15:1 input:output, log scale shared by all rows."}</p>
       </div>
-      <div className="cx-sort" role="group" aria-label="Sort models">{sorts.map(([key, label]) => <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>{label}</button>)}</div>
+      <div className="cx-sort" role="group" aria-label="Sort models">{sorts.filter(([key]) => key !== "gn" || showGn).map(([key, label]) => <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>{label}</button>)}</div>
     </div>
     {models.length === 0 ? <p className="cx-empty" role="status">No prices right now. The board fills in at the next read.</p> : <>
     <div className="cx-legend" aria-hidden="true">
       <span><i className="lg-whisker" />cheapest to dearest</span><span><i className="lg-box" />middle half</span><span><i className="lg-median" />median</span><span><i className="lg-dot" />one seller</span><span><i className="lg-dot is-down" />seller down</span>
     </div>
-    <div className={`board${market.models.some(m => m.change_24h_pct !== null) ? "" : " no-chg"}`}>
+    {spread && <p className="cx-gn-note"><b>$ per bn G_n</b>, dollars per billion units of compute (FLOP's unit): {GN_FORMULA}{spread.median !== null && <> Across {count(spread.n)} models the median is {usdSmall(spread.median)}{spread.p25 !== null && spread.p75 !== null && <>, middle half {usdSmall(spread.p25)} to {usdSmall(spread.p75)}</>}{spread.lo < spread.hi && <>; cheapest {usdSmall(spread.lo)}, dearest {usdSmall(spread.hi)} ({times(spread.lo, spread.hi)})</>}.</>}</p>}
+    <div className={`board${market.models.some(m => m.change_24h_pct !== null) ? "" : " no-chg"}${showGn ? " has-gn" : ""}`}>
       <div className="board-cols" aria-hidden="true">
-        <span className="c-model">Model</span><span className="c-sellers">Up</span><span className="c-strip"><Axis scale={scale} /></span><span className="c-median">Median</span><span className="c-spread">Spread</span><span className="c-cheap">Cheapest</span><span className="c-chg">24 h</span><span className="c-chev" />
+        <span className="c-model">Model</span><span className="c-sellers">Up</span><span className="c-strip"><Axis scale={scale} /></span><span className="c-median">Median</span><span className="c-spread">Spread</span>{showGn && <span className="c-gn" title={GN_FORMULA}>$ / bn G_n</span>}<span className="c-cheap">Cheapest</span><span className="c-chg">24 h</span><span className="c-chev" />
       </div>
-      <ul className="board-list">{(all ? models : models.slice(0, MODELS_SHOWN)).map(m => <ModelRow key={m.id} model={m} scale={scale} now={now} open={open.has(m.id)} onToggle={() => toggle(m.id)} />)}</ul>
+      <ul className="board-list">{(all ? models : models.slice(0, MODELS_SHOWN)).map(m => <ModelRow key={m.id} model={m} scale={scale} now={now} mix={mix} spread={showGn ? spread : false} open={open.has(m.id)} onToggle={() => toggle(m.id)} />)}</ul>
     </div>
     {models.length > MODELS_SHOWN && <button type="button" className="cx-more" aria-expanded={all} onClick={() => setAll(a => !a)}>{all ? `Show top ${MODELS_SHOWN}` : `Show all ${models.length} models`}</button>}
     </>}
@@ -246,13 +289,21 @@ function Perp({ latest, history, now }: { latest: ComputeLatest; history: Comput
   </article>;
 }
 
-function Flop({ latest }: { latest: ComputeLatest }) {
+function Flop({ latest, market }: { latest: ComputeLatest; market: ComputeMarket | null }) {
   const flop = latest.flop_side;
+  const implied = market?.flop?.implied_flop_usd;
+  const basisId = market?.flop?.basis_model ?? null;
+  const basis = basisId ? market?.models.find(m => m.id === basisId)?.name ?? basisId : null;
   const openrouter = latest.source === "openrouter";
   return <article className="cx-panel" aria-labelledby="compute-flop-heading">
     <p className="cx-k">FLOP Network · on-chain</p>
     <h2 id="compute-flop-heading">FLOP price per unit of compute</h2>
     <div className="perp-price"><strong>{flop.flop_per_gn == null ? "—" : flop.flop_per_gn.toPrecision(3)}</strong><span>FLOP per G_n</span></div>
+    {typeof implied === "number" && Number.isFinite(implied) && implied > 0 && <div className="flop-implied">
+      <p className="cx-k">Implied FLOP price · derived</p>
+      <div className="perp-price"><strong>{usdSmall(implied)}</strong><span>per FLOP</span></div>
+      <p className="perp-why">The FLOP price at which FLOP's rate equals what the open market pays for the same compute{basis ? <> on {basis}</> : null}.</p>
+    </div>}
     <dl className="flop-facts">{([
       ["Buyers", flop.buyers ?? "—"],
       ["Miners", flop.miners ?? "—"],
@@ -266,16 +317,17 @@ function Flop({ latest }: { latest: ComputeLatest }) {
 
 export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
   const { latest, history, market, error, failed, loaded, now } = useComputeFeed(feed);
+  const [mix, setMix] = useState<MixKey>(DEFAULT_MIX);
   if (!feed) return <div className="cx"><h1>Compute index</h1><p className="note">Price feed not configured.</p></div>;
   const nothing = !latest && !market;
   return <div className="cx">
     {!loaded && nothing ? <><h1 className="sr-only">Compute index</h1><Skeleton /></>
-      : market ? <FeedBoundary data={market} name="Compute index"><Hero market={market} now={now} error={failed.market ? error : ""} /></FeedBoundary>
+      : market ? <FeedBoundary data={market} name="Compute index"><Hero market={market} now={now} error={failed.market ? error : ""} mix={mix} onMix={setMix} /></FeedBoundary>
       : <header className="cx-hero is-empty"><div className="cx-hero-main"><h1>Compute index</h1><p role="status" className="error">Market feed unreachable ({failed.market ? error : "no data"}). Try again in a minute.</p></div></header>}
     {market && <FeedBoundary data={market}><Audience market={market} latest={latest} /></FeedBoundary>}
-    {market && <FeedBoundary data={market} name="Price by model"><Board market={market} now={now} /></FeedBoundary>}
+    {market && <FeedBoundary data={market} name="Price by model"><Board market={market} now={now} mix={mix} /></FeedBoundary>}
     {(latest || failed.latest) && <div className="cx-panels">
-      {latest ? <><FeedBoundary data={latest} name="COMPUTE-PERP"><Perp latest={latest} history={history} now={now} /></FeedBoundary><FeedBoundary data={latest} name="FLOP price"><Flop latest={latest} /></FeedBoundary></>
+      {latest ? <><FeedBoundary data={latest} name="COMPUTE-PERP"><Perp latest={latest} history={history} now={now} /></FeedBoundary><FeedBoundary data={latest} name="FLOP price"><Flop latest={latest} market={market} /></FeedBoundary></>
         : <article id="perp" className="cx-panel"><h2>Perp settlement price</h2><p role="status" className="error">Price feed unreachable ({error}). Try again in a minute.</p></article>}
     </div>}
     {market && <div className="cx-pair"><FeedBoundary data={market} name="Providers"><Providers market={market} /></FeedBoundary><FeedBoundary data={market} name="Price moves"><Moves market={market} /></FeedBoundary></div>}

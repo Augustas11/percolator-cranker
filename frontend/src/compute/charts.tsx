@@ -1,4 +1,4 @@
-import type { ComputeMarket, MarketModel, Point } from "./client";
+import type { ComputeMarket, MarketModel, MixKey, Point } from "./client";
 import { quantile } from "./fixture";
 import { day, times, usd } from "./format";
 
@@ -139,19 +139,51 @@ export const sinceLabel = (series: Point[]) => series.length ? `since ${day(seri
 export const upPriced = (m: MarketModel) => m.quotes.filter(q => q.up && q.price !== null);
 
 /**
- * The going rate for an open model: median of the medians of models with 3 or more sellers (not thin),
- * with the cheapest and dearest model and the counts behind those medians: quotes up plus quotes held
- * at their last price, and the providers selling them.
+ * How dollars per billion G_n spread across models: the feed's median and middle half when it sends them
+ * (else computed here), the cheapest and dearest model, and a log position for a value. Null without data.
  */
-export function typicalPrice(market: ComputeMarket) {
-  const pool = market.models.filter(m => !m.thin && m.median > 0);
+export function computeSpread(market: ComputeMarket) {
+  const vals = market.models.map(m => m.usd_per_bn_gn).filter((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+  if (!vals.length) return null;
+  const cp = market.compute_price;
+  const num = (v: number | null | undefined, fallback: number) => typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  const lo = vals[0], hi = vals[vals.length - 1];
+  const span = Math.log(hi / lo) || 1;
+  return {
+    n: num(cp?.n_models, vals.length), median: num(cp?.median_usd_per_bn_gn, quantile(vals, 0.5)),
+    p25: num(cp?.p25, quantile(vals, 0.25)), p75: num(cp?.p75, quantile(vals, 0.75)), lo, hi,
+    at: (v: number) => hi > lo ? Math.min(100, Math.max(0, Math.log(Math.max(v, lo) / lo) / span * 100)) : 50,
+  };
+}
+
+export const DEFAULT_MIX: MixKey = "avg_15_1";
+
+/** A model's median at a token mix: the 15:1 median, or the feed's per-mix median (null when the feed has none). */
+export function medianAt(m: MarketModel, mix: MixKey = DEFAULT_MIX): number | null {
+  const v = m.mix?.[mix];
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  return mix === DEFAULT_MIX ? m.median : null;
+}
+
+/** True when the feed carries medians for the other mixes. */
+export const hasMixes = (market: ComputeMarket) => market.models.some(m => medianAt(m, "chat_3_1") !== null || medianAt(m, "agent_150_1") !== null);
+
+/**
+ * The going rate for an open model: median of the medians of models with 3 or more sellers (not thin),
+ * at a token mix, with the cheapest and dearest model. Counts follow the median's own set: one price per
+ * provider up now, plus providers held at their last price.
+ */
+export function typicalPrice(market: ComputeMarket, mix: MixKey = DEFAULT_MIX) {
+  const pool = market.models.filter(m => !m.thin && (medianAt(m, mix) ?? 0) > 0);
   if (!pool.length) return null;
-  const sorted = pool.map(m => m.median).sort((a, b) => a - b);
-  const byMedian = [...pool].sort((a, b) => a.median - b.median);
-  const live = pool.flatMap(upPriced);
+  const at = (m: MarketModel) => medianAt(m, mix)!;
+  const byMedian = [...pool].sort((a, b) => at(a) - at(b));
+  const top = market.mixes?.[mix];
+  const sets = pool.map(m => new Set(upPriced(m).map(q => q.provider)));
   const held = pool.reduce((n, m) => n + (m.quotes_held ?? 0), 0);
   return {
-    median: quantile(sorted, 0.5), cheapest: byMedian[0], dearest: byMedian[byMedian.length - 1], models: pool.length,
-    quotes: live.length + held, held, providers: new Set(live.map(q => q.provider)).size,
+    median: mix !== DEFAULT_MIX && typeof top === "number" && Number.isFinite(top) ? top : quantile(byMedian.map(at), 0.5),
+    cheapest: byMedian[0], dearest: byMedian[byMedian.length - 1], models: pool.length, at,
+    quotes: sets.reduce((n, s) => n + s.size, 0) + held, held, providers: new Set(sets.flatMap(s => [...s])).size,
   };
 }

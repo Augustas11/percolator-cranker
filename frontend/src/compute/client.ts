@@ -44,6 +44,10 @@ export interface ComputeHistory {
 
 export type Point = [number, number];
 
+/** Input:output token mixes the feed prices at. `avg_15_1` is the blend every other price on the page uses. */
+export type MixKey = "chat_3_1" | "avg_15_1" | "agent_150_1";
+export type Mixes = Partial<Record<MixKey, number | null>>;
+
 export interface MarketQuote { provider: string; quantization: string; price: number | null; up: boolean; uptime_24h_pct: number | null }
 export interface MarketModel {
   id: string;
@@ -63,6 +67,16 @@ export interface MarketModel {
   stale?: boolean;
   /** Quotes counted in the median at their last price while the seller is offline. */
   quotes_held?: number;
+  /** FLOP's compute count for the model: G_n per token, from FLOP's registry or 2 × parameters. */
+  compute?: { params: number | null; gn_per_token: number | null; source: string | null } | null;
+  /** USD per billion G_n: the median price per 1M tokens over compute per token; min and max over its sellers. */
+  usd_per_bn_gn?: number | null;
+  usd_per_bn_gn_min?: number | null;
+  usd_per_bn_gn_max?: number | null;
+  /** The model median at each token mix. */
+  mix?: Mixes | null;
+  /** Output price over input price. */
+  out_in_ratio?: number | null;
   /** Null when no seller has a usable quote. */
   cheapest: { provider: string; quantization: string; price: number } | null;
   change_24h_pct: number | null;
@@ -92,6 +106,13 @@ export interface ComputeMarket {
     series: Point[];
   };
   models: MarketModel[];
+  /** Median and middle half of the models' USD per billion G_n. */
+  compute_price?: { median_usd_per_bn_gn: number | null; p25: number | null; p75: number | null; n_models: number | null } | null;
+  /** The going rate (median of model medians) at each token mix. */
+  mixes?: Mixes | null;
+  out_in_ratio_median?: number | null;
+  /** FLOP's on-chain rate set against the open market for the same compute. */
+  flop?: { gn_price_flop: number | null; implied_flop_usd: number | null; basis_model: string | null } | null;
   providers: MarketProvider[];
   changes: MarketChange[];
   dynamic: MarketDynamic[];

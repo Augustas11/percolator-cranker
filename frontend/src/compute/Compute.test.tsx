@@ -358,3 +358,75 @@ test("docs describe a flop_standin settlement price", async () => {
   const container = await renderDocs(feed);
   expect(container.querySelector("#compute-index")!.textContent).toContain("FLOP's on-chain price (flop_standin)");
 });
+
+test("mix switch: hidden without per-mix data, then moves the headline, the medians and the sort", async () => {
+  let container = await render(liveFeed());
+  expect(container.querySelector(".cx-mix")).toBeNull();
+  await cleanup?.();
+  const now = Date.now(), market = marketFixture(now);
+  const cheap = [...market.models].filter(m => !m.thin).sort((a, b) => a.median - b.median)[0];
+  container = await render(liveFeed(now, m => ({
+    ...m, out_in_ratio_median: 4.13, mixes: { chat_3_1: 0.987, avg_15_1: null, agent_150_1: 0.111 },
+    models: m.models.map(x => ({ ...x, mix: { chat_3_1: x.id === cheap.id ? 99 : x.median * 2, avg_15_1: x.median, agent_150_1: x.median / 2 } })),
+  })));
+  const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>(".cx-mix button"));
+  expect(buttons.map(b => b.textContent)).toEqual(["Chat 3:1", "Average 15:1", "Agent 150:1"]);
+  expect(buttons[1].getAttribute("aria-pressed")).toBe("true");
+  expect(container.querySelector(".cx-price strong")?.textContent).toBe(usd(typicalPrice(market)!.median));
+  expect(container.querySelector(".cx-mix-why")?.textContent).toBe("What you pay depends on how much your app reads versus writes; output tokens cost about 4.1× input.");
+  expect(container.querySelector("#board .cx-sub")?.textContent).toContain("strips and cheapest seller at 15:1 quotes");
+  await click(buttons[0]);
+  expect(container.querySelector(".cx-price strong")?.textContent).toBe("$0.987");
+  expect(container.querySelector(".cx-proof")?.textContent).toContain("mixed 3:1");
+  const glm = Array.from(container.querySelectorAll(".board-row")).find(r => r.querySelector(".m-name")?.textContent === "GLM 5.3")!;
+  expect(glm.querySelector(".c-median")?.textContent).toBe(`median ${usd(market.models.find(m => m.name === "GLM 5.3")!.median * 2)}`);
+  await click(Array.from(container.querySelectorAll("#board .cx-sort button")).find(b => b.textContent === "Highest median")!);
+  expect(container.querySelector(".board-row .m-name")?.textContent).toBe(cheap.name);
+  // Strips stay on the 15:1 quotes.
+  expect(container.querySelector(".board-row .strip")?.getAttribute("aria-label")).toContain(`median ${usd(cheap.median)}`);
+  // Back to 15:1: no top-level avg value, so the median of the model medians.
+  await click(buttons[1]);
+  expect(container.querySelector(".cx-price strong")?.textContent).toBe(usd(typicalPrice(market)!.median));
+});
+
+test("$ per bn G_n column: formula, nulls as dashes, cheapest first when sorted", async () => {
+  let container = await render(liveFeed());
+  expect(container.querySelector(".c-gn")).toBeNull();
+  expect(Array.from(container.querySelectorAll("#board .cx-sort button")).map(b => b.textContent)).not.toContain("$ per bn G_n");
+  await cleanup?.();
+  container = await render(liveFeed(Date.now(), m => ({
+    ...m, compute_price: { median_usd_per_bn_gn: 0.0021, p25: 0.0012, p75: 0.0045, n_models: 19 },
+    models: m.models.map((x, i) => ({ ...x, usd_per_bn_gn: i === 0 ? null : 0.001 * (i + 1), compute: i === 1 ? { params: 27e9, gn_per_token: 54, source: "2 × parameters" } : null })),
+  })));
+  const head = container.querySelector(".board-cols .c-gn")!;
+  expect(head.textContent).toBe("$ / bn G_n");
+  expect(head.getAttribute("title")).toContain("Price per 1M tokens ÷ compute per token");
+  expect(head.getAttribute("title")).toContain("otherwise 2 × parameters");
+  expect(container.querySelector(".cx-gn-note")?.textContent).toContain("Across 19 models the median is $0.0021, middle half $0.0012 to $0.0045");
+  const rows = container.querySelectorAll(".board-row");
+  expect(rows[0].querySelector(".c-gn b")?.textContent).toBe("—");
+  expect(rows[0].querySelector(".gn-track")).toBeNull();
+  expect(rows[1].querySelector(".c-gn b")?.textContent).toBe("$0.002");
+  expect(rows[1].querySelector(".gn-dot")).not.toBeNull();
+  await click(rows[1].querySelector(".board-head")!);
+  expect(rows[1].querySelector(".panel-meta")?.textContent).toContain("54 G_n per token (2 × parameters)");
+  await click(Array.from(container.querySelectorAll("#board .cx-sort button")).find(b => b.textContent === "$ per bn G_n")!);
+  const sorted = Array.from(container.querySelectorAll(".board-row .c-gn b"), b => b.textContent);
+  expect(sorted[0]).toBe("$0.002");
+  expect(sorted[sorted.length - 1]).toBe("—");
+});
+
+test("FLOP panel: implied FLOP price, labelled derived, only when the feed has it", async () => {
+  let container = await render(liveFeed());
+  expect(container.querySelector(".flop-implied")).toBeNull();
+  await cleanup?.();
+  const basis = marketFixture().models.find(m => m.name === "Qwen3.8-27B")!;
+  container = await render(liveFeed(Date.now(), m => ({ ...m, flop: { gn_price_flop: 0.0029, implied_flop_usd: 0.0123, basis_model: basis.id } })));
+  const implied = container.querySelector(".flop-implied")!;
+  expect(implied.querySelector(".cx-k")?.textContent).toBe("Implied FLOP price · derived");
+  expect(implied.querySelector("strong")?.textContent).toBe("$0.0123");
+  expect(implied.querySelector(".perp-why")?.textContent).toBe("The FLOP price at which FLOP's rate equals what the open market pays for the same compute on Qwen3.8-27B.");
+  await cleanup?.();
+  container = await render(liveFeed(Date.now(), m => ({ ...m, flop: { gn_price_flop: null, implied_flop_usd: null, basis_model: null } })));
+  expect(container.querySelector(".flop-implied")).toBeNull();
+});
