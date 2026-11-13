@@ -19,6 +19,11 @@ pub struct Params {
     pub min_frac_of_median: f64,
     /// The clamp applies only to a set with at least this many up endpoints.
     pub clamp_min_set: usize,
+    /// An endpoint that goes down or leaves the listing counts at its last up
+    /// price for this long (`Holder`). 0 = off.
+    pub hold_missing_s: u64,
+    /// Only a price the endpoint has been seen up at for this long is held.
+    pub hold_confirm_s: u64,
 }
 
 /// The live rule (owner decisions 2026-11-11): 15:1 blend, bf16 then fp16,
@@ -31,6 +36,10 @@ pub const SPEC: Params = Params {
     weighting: "inverse_square",
     min_frac_of_median: 0.5,
     clamp_min_set: 3,
+    // Off until the hold length is chosen on recorder data (owner, 2026-11-13:
+    // rule approved; score 2 h, 6 h and 12 h on the first full week).
+    hold_missing_s: 0,
+    hold_confirm_s: 3600,
 };
 
 /// One OpenRouter endpoint for the benchmark model, prices in USD per token.
@@ -43,6 +52,110 @@ pub struct OrEndpoint {
     /// OpenRouter's endpoint status: 0 is up. Only up endpoints count.
     #[serde(default)]
     pub status: i64,
+}
+
+/// The pusher's filter for a usable price (status aside).
+fn priced(e: &OrEndpoint) -> bool {
+    e.prompt.is_finite() && e.completion.is_finite() && e.prompt >= 0.0 && e.completion >= 0.0 && e.prompt + e.completion > 0.0
+}
+
+/// An endpoint counted at its last up price while it is down or unlisted.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Held {
+    pub provider: String,
+    pub quantization: String,
+    /// When it was last seen up, at the price now counted.
+    pub last_up_ms: u64,
+}
+
+/// Holds a missing endpoint at its last up price (owner, 2026-11-13). An
+/// endpoint that is down, unpriced or gone from the listing keeps counting,
+/// as up and at the price it last had while up, until it has been missing
+/// longer than `hold_ms`; then it is dropped as before. One that comes back
+/// counts at its new price at once. So a short outage, or a provider stepping
+/// out of the listing, does not move the mark; a real exit moves it `hold_ms`
+/// late.
+///
+/// Only a price the endpoint has been seen up at for `confirm_ms` is held: without
+/// that, a provider could list any price for one fetch, go down, and have it
+/// counted for the whole hold without ever selling at it. An endpoint that
+/// goes down sooner is dropped, as with no hold. A provider with more than
+/// one endpoint in a quantization is not held either: its rows can't be told
+/// apart between fetches. State is in memory: after a restart nothing is
+/// held until an endpoint has stood at its price for `confirm_ms` again.
+#[derive(Clone, Debug, Default)]
+pub struct Holder {
+    hold_ms: u64,
+    confirm_ms: u64,
+    /// By (provider, quantization): the last up row, when it was first seen
+    /// up at that price (outages inside the hold don't reset it), and when it
+    /// was last seen up.
+    last_up: std::collections::BTreeMap<(String, String), (OrEndpoint, u64, u64)>,
+}
+
+impl Holder {
+    pub fn new(hold_ms: u64, confirm_ms: u64) -> Self {
+        Self { hold_ms, confirm_ms, last_up: Default::default() }
+    }
+
+    /// The listing to price at `at_ms`: `endpoints` with each missing one
+    /// inside its hold replaced by (or, if unlisted, added as) its last up
+    /// row. Also returns which were held. `hold_ms` 0 returns the input.
+    pub fn apply(&mut self, at_ms: u64, endpoints: &[OrEndpoint]) -> (Vec<OrEndpoint>, Vec<Held>) {
+        if self.hold_ms == 0 {
+            return (endpoints.to_vec(), Vec::new());
+        }
+        let (hold_ms, confirm_ms) = (self.hold_ms, self.confirm_ms);
+        let key = |e: &OrEndpoint| (e.provider.clone(), e.quantization.clone());
+        let mut rows = std::collections::BTreeMap::<(String, String), usize>::new();
+        for e in endpoints {
+            *rows.entry(key(e)).or_default() += 1;
+        }
+        // Forgotten: older than the hold, stamped in the future (the clock
+        // stepped back), or a provider now listing several rows in the tier.
+        self.last_up.retain(|k, (_, _, t)| *t <= at_ms && at_ms - *t <= hold_ms && rows.get(k).copied().unwrap_or(0) <= 1);
+        // Held: the price stood for `confirm_ms` before the endpoint went missing.
+        let confirmed = |since: u64, t: u64| t.saturating_sub(since) >= confirm_ms;
+        let note = |e: &OrEndpoint, t: u64| Held { provider: e.provider.clone(), quantization: e.quantization.clone(), last_up_ms: t };
+        let (mut out, mut held) = (Vec::with_capacity(endpoints.len()), Vec::new());
+        for e in endpoints {
+            let k = key(e);
+            if rows[&k] > 1 {
+                out.push(e.clone());
+            } else if e.status == 0 && priced(e) {
+                // A new price starts its own count. The same price after an
+                // outage inside the hold keeps it: it was already sold at.
+                let since = match self.last_up.get(&k) {
+                    Some((old, since, _)) if old.prompt == e.prompt && old.completion == e.completion => *since,
+                    _ => at_ms,
+                };
+                self.last_up.insert(k, (e.clone(), since, at_ms));
+                out.push(e.clone());
+            } else {
+                match self.last_up.get(&k) {
+                    Some((old, since, t)) if confirmed(*since, *t) => {
+                        held.push(note(old, *t));
+                        out.push(old.clone());
+                    }
+                    _ => {
+                        self.last_up.remove(&k);
+                        out.push(e.clone());
+                    }
+                }
+            }
+        }
+        let unlisted: Vec<_> = self.last_up.keys().filter(|k| !rows.contains_key(*k)).cloned().collect();
+        for k in unlisted {
+            let (old, since, t) = &self.last_up[&k];
+            if confirmed(*since, *t) {
+                held.push(note(old, *t));
+                out.push(old.clone());
+            } else {
+                self.last_up.remove(&k);
+            }
+        }
+        (out, held)
+    }
 }
 
 /// One endpoint in the priced set: blended USD per 1M tokens as listed, and
@@ -79,8 +192,12 @@ pub struct OrQuote {
     /// The cheap-outlier guard on this set: "on", "off (n<3)" (set too small
     /// for a median floor) or "off" (disabled).
     pub clamp: String,
-    /// Every priced endpoint fetched, so the push log can be recomputed.
+    /// Every priced endpoint fetched, so the push log can be recomputed. A
+    /// held endpoint (`held`) is here as its last up row.
     pub endpoints: Vec<OrEndpoint>,
+    /// Endpoints counted at their last up price (`Holder`); the caller that
+    /// ran the holder fills it in.
+    pub held: Vec<Held>,
 }
 
 /// The SPEC rule on one endpoint list, as the pusher runs it with the
@@ -121,8 +238,7 @@ pub fn or_quote_with(
     endpoints: &[OrEndpoint], at_ms: u64, blend: f64, quantizations: &[String], min_endpoints: usize, weighting: &str,
     min_frac_of_median: f64, guard: Guard,
 ) -> Result<OrQuote> {
-    let priced = |e: &&OrEndpoint| e.prompt.is_finite() && e.completion.is_finite() && e.prompt >= 0.0 && e.completion >= 0.0 && e.prompt + e.completion > 0.0;
-    let valid: Vec<&OrEndpoint> = endpoints.iter().filter(priced).filter(|e| e.status == 0).collect();
+    let valid: Vec<&OrEndpoint> = endpoints.iter().filter(|e| priced(e)).filter(|e| e.status == 0).collect();
     let tier = |qs: &[String]| valid.iter().copied().filter(|e| qs.iter().any(|q| q == &e.quantization)).collect::<Vec<_>>();
     // Sets in order: each preferred quantization alone, then the preferred
     // ones together, then every up endpoint. The first with `min_endpoints`
@@ -209,8 +325,8 @@ pub fn or_quote_with(
         bail!("openrouter: {weighting} {price} USD per 1M tokens out of range");
     }
     // Every priced endpoint, down ones included, so the log can be recomputed.
-    let endpoints = endpoints.iter().filter(priced).cloned().collect();
-    Ok(OrQuote { usd_e6: usd_e6 as u64, at_ms, used, set: name, clamp, endpoints })
+    let endpoints = endpoints.iter().filter(|e| priced(e)).cloned().collect();
+    Ok(OrQuote { usd_e6: usd_e6 as u64, at_ms, used, set: name, clamp, endpoints, held: Vec::new() })
 }
 
 #[cfg(test)]
@@ -229,5 +345,139 @@ mod tests {
         assert_eq!(o["or_weighting"].as_str(), Some(s.weighting));
         assert_eq!(o["or_min_frac_of_median"].as_float(), Some(s.min_frac_of_median));
         assert_eq!(o["or_clamp_min_endpoints"].as_integer(), Some(s.clamp_min_set as i64));
+        assert_eq!(o["or_hold_missing_s"].as_integer(), Some(s.hold_missing_s as i64));
+        assert_eq!(o["or_hold_confirm_s"].as_integer(), Some(s.hold_confirm_s as i64));
+    }
+
+    use super::{spec_quote, Holder, OrEndpoint};
+
+    fn ep(provider: &str, usd_in: f64, usd_out: f64, status: i64) -> OrEndpoint {
+        OrEndpoint { provider: provider.into(), quantization: "bf16".into(), prompt: usd_in / 1e6, completion: usd_out / 1e6, status }
+    }
+    const H: u64 = 3_600_000;
+    fn mark(h: &mut Holder, at: u64, eps: &[OrEndpoint]) -> Option<u64> {
+        spec_quote(&h.apply(at, eps).0, at).ok().map(|q| q.usd_e6)
+    }
+    fn plain(eps: &[OrEndpoint]) -> Option<u64> {
+        spec_quote(eps, 0).ok().map(|q| q.usd_e6)
+    }
+    // The live bf16 pair and a third, so the outage leaves a set of two.
+    fn trio(gmi_status: i64) -> Vec<OrEndpoint> {
+        vec![ep("DeepInfra", 0.15, 1.875, 0), ep("GMICloud", 0.45, 3.2, gmi_status), ep("Novita", 0.30, 2.4, 0)]
+    }
+    /// A 6 h hold with a 1 h confirm, with `trio(0)` seen up from 0 to 1 h.
+    fn confirmed() -> (Holder, u64) {
+        let mut h = Holder::new(6 * H, H);
+        mark(&mut h, 0, &trio(0));
+        let up = mark(&mut h, H, &trio(0)).unwrap();
+        (h, up)
+    }
+
+    #[test]
+    fn a_short_outage_does_not_move_the_mark() {
+        let (mut h, up) = confirmed();
+        // Without the hold the outage moves it.
+        assert_ne!(plain(&trio(-2)), Some(up));
+        for t in [H + H / 12, 2 * H, 7 * H] {
+            assert_eq!(mark(&mut h, t, &trio(-2)), Some(up), "held at {t}");
+        }
+        let (_, held) = h.apply(7 * H, &trio(-2));
+        assert_eq!(held.len(), 1);
+        assert_eq!((held[0].provider.as_str(), held[0].last_up_ms), ("GMICloud", H));
+    }
+
+    #[test]
+    fn a_long_outage_drops_the_endpoint_after_the_hold() {
+        let (mut h, up) = confirmed();
+        assert_eq!(mark(&mut h, 7 * H, &trio(-2)), Some(up));
+        assert_eq!(mark(&mut h, 7 * H + 1, &trio(-2)), plain(&trio(-2)));
+        assert!(h.apply(8 * H, &trio(-2)).1.is_empty());
+    }
+
+    #[test]
+    fn an_unlisted_endpoint_is_held_like_a_down_one() {
+        let (mut h, up) = confirmed();
+        let without: Vec<OrEndpoint> = trio(0).into_iter().filter(|e| e.provider != "GMICloud").collect();
+        assert_eq!(mark(&mut h, 2 * H, &without), Some(up));
+        assert_eq!(mark(&mut h, 8 * H, &without), plain(&without));
+    }
+
+    #[test]
+    fn a_returning_endpoint_counts_at_its_new_price_at_once() {
+        let (mut h, _) = confirmed();
+        mark(&mut h, 2 * H, &trio(-2));
+        let mut back = trio(0);
+        back[1] = ep("GMICloud", 0.30, 2.0, 0);
+        assert_eq!(mark(&mut h, 3 * H, &back), plain(&back));
+    }
+
+    #[test]
+    fn a_price_flashed_for_one_fetch_is_not_held() {
+        // Review 2026-11-13: list $0.01 for one fetch, go down, and the hold
+        // would count it for hours though nobody could buy at it.
+        let (mut h, _) = confirmed();
+        let mut flash = trio(0);
+        flash[1] = ep("GMICloud", 0.01, 0.01, 0);
+        mark(&mut h, H + H / 12, &flash);
+        // Down a fetch later: dropped, exactly as with no hold.
+        assert_eq!(mark(&mut h, H + H / 6, &trio(-2)), plain(&trio(-2)));
+        assert!(h.apply(H + H / 4, &trio(-2)).1.is_empty());
+        // Nor is a new price held before it has stood for the confirm time.
+        let mut h = Holder::new(6 * H, H);
+        mark(&mut h, 0, &flash);
+        mark(&mut h, H - 1, &flash);
+        assert_eq!(mark(&mut h, H, &trio(-2)), plain(&trio(-2)));
+    }
+
+    #[test]
+    fn a_flapping_endpoint_stays_held_at_its_confirmed_price() {
+        // GMICloud's pattern: up and down many times at one price.
+        let (mut h, up) = confirmed();
+        let mut t = H;
+        for _ in 0..6 {
+            t += H / 2;
+            assert_eq!(mark(&mut h, t, &trio(-2)), Some(up));
+            t += H / 12;
+            assert_eq!(mark(&mut h, t, &trio(0)), Some(up));
+        }
+    }
+
+    #[test]
+    fn a_price_changed_while_down_is_not_used() {
+        // A down endpoint's listed price is not a price anyone can buy at.
+        let (mut h, up) = confirmed();
+        let mut down = trio(-2);
+        down[1] = ep("GMICloud", 0.001, 0.001, -2);
+        assert_eq!(mark(&mut h, 2 * H, &down), Some(up));
+    }
+
+    #[test]
+    fn nothing_is_held_before_it_was_seen_up_and_zero_is_off() {
+        let mut h = Holder::new(6 * H, H);
+        assert_eq!(mark(&mut h, 0, &trio(-2)), plain(&trio(-2)));
+        let mut off = Holder::new(0, 0);
+        mark(&mut off, 0, &trio(0));
+        assert_eq!(mark(&mut off, 2 * H, &trio(-2)), plain(&trio(-2)));
+    }
+
+    #[test]
+    fn a_provider_with_two_endpoints_in_a_tier_is_not_held() {
+        // Rows of one provider and tier can't be told apart between fetches
+        // (review 2026-11-13: a reorder gave one row the other's price).
+        let mut h = Holder::new(6 * H, 0);
+        let two = |first: OrEndpoint, second: OrEndpoint| vec![first, second, ep("B", 0.2, 2.0, 0)];
+        mark(&mut h, 0, &two(ep("A", 0.1, 1.0, 0), ep("A", 0.4, 3.0, 0)));
+        let reordered = two(ep("A", 0.4, 3.0, 0), ep("A", 0.1, 1.0, -2));
+        assert_eq!(mark(&mut h, H, &reordered), plain(&reordered));
+        assert!(h.apply(H, &reordered).1.is_empty());
+        // One of the two removed: the one left is priced as listed, nothing held.
+        let one = vec![ep("A", 0.4, 3.0, 0), ep("B", 0.2, 2.0, 0)];
+        assert_eq!(mark(&mut h, 2 * H, &one), plain(&one));
+    }
+
+    #[test]
+    fn a_clock_stepping_back_does_not_stretch_a_hold() {
+        let (mut h, _) = confirmed();
+        assert_eq!(mark(&mut h, H / 2, &trio(-2)), plain(&trio(-2)));
     }
 }
