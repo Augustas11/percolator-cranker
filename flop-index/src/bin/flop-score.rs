@@ -2,6 +2,7 @@
 //! data. See docs/flop-compute/SCORER.md.
 //!
 //!   flop-score --data <pin dir> --rule <name> [--base spec] [--split tune|heldout|all] [--seed N]
+//!   (a rule or base may be wasm:<file.wasm>, docs/flop-compute/CHALLENGE_ABI.md)
 //!   flop-score pin <dir> <loader>:<file>...
 //!   flop-score list
 //!
@@ -11,7 +12,7 @@ use anyhow::{bail, Context, Result};
 use flop_index::score::{self, data, rules, Split, SCENARIOS};
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: flop-score --data <pin dir> --rule <name> [--base spec] [--split tune|heldout|all] [--seed N]\n       flop-score pin <dir> <loader>:<file>...\n       flop-score list";
+const USAGE: &str = "usage: flop-score --data <pin dir> --rule <name|wasm:file> [--base spec] [--split tune|heldout|all] [--seed N]\n       flop-score pin <dir> <loader>:<file>...\n       flop-score list";
 
 fn day(d: u64) -> String {
     // Civil from days (H. Hinnant), for the report's date range.
@@ -57,8 +58,13 @@ fn run(args: &[String]) -> Result<()> {
     }
     let data_dir = data_dir.context(USAGE)?;
     let rule = rule.context(USAGE)?;
-    let cand = rules::by_name(&rule).with_context(|| format!("no rule {rule:?}; flop-score list"))?;
-    let base_rule = rules::by_name(&base).with_context(|| format!("no rule {base:?}; flop-score list"))?;
+    let get = |name: &str| -> Result<Box<dyn rules::Rule>> {
+        match name.strip_prefix("wasm:") {
+            Some(path) => Ok(Box::new(score::wasm::WasmRule::load(path.as_ref())?)),
+            None => rules::by_name(name).with_context(|| format!("no rule {name:?}; flop-score list")),
+        }
+    };
+    let (cand, base_rule) = (get(&rule)?, get(&base)?);
     let (series, manifest) = data::load(&data_dir)?;
     let snaps: usize = series.iter().map(|s| s.snaps.len()).sum();
     let r = score::score(cand.as_ref(), base_rule.as_ref(), &series, seed, split)?;

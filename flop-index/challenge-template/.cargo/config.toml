@@ -1,0 +1,4 @@
+[target.wasm32-unknown-unknown]
+# 64 KiB stack (Rust's default is 1 MiB, over the scorer's 1 MiB memory cap)
+# and a declared maximum equal to that cap.
+rustflags = ["-C", "link-arg=-zstack-size=65536", "-C", "link-arg=--max-memory=1048576"]

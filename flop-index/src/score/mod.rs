@@ -22,6 +22,7 @@
 pub mod candidates;
 pub mod data;
 pub mod rules;
+pub mod wasm;
 
 use anyhow::{bail, Context, Result};
 use data::{Series, DAY_MS};

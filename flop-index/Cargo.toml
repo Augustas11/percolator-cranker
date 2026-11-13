@@ -12,6 +12,11 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# Rules supplied as WebAssembly (src/score/wasm.rs): an interpreter, with
+# NaN canonicalisation ("deterministic") and no WAT parser.
+wasmi = { version = "2", default-features = false, features = ["std", "validate", "deterministic"] }
+# The version wasmi uses; reads a module before it is loaded.
+wasmparser = { version = "0.228", default-features = false, features = ["std"] }
 
 [[bin]]
 name = "flop-score"
