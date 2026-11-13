@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { clock, config, runAgent, type Clock, type Config, type Position } from "./agent";
-import type { Strategy } from "./strategies/types";
+import type { Book, HouseStrategy, Plan, Strategy } from "./strategies/types";
+
+const house = (plan: (book: Book) => Plan): HouseStrategy => ({ name: "house", house: true, observe: async book => plan(book) });
 
 const position: Position = {
   wallet: "test-wallet", sol_balance: 1, wallet_usdc: 1000,
@@ -11,6 +13,7 @@ async function run(options: {
   ticks?: number;
   position?: Partial<Position>;
   target?: Strategy["decide"];
+  strategy?: HouseStrategy;
   cfg?: Partial<Config>;
   error?: (name: string, count: number) => boolean;
 } = {}) {
@@ -28,7 +31,7 @@ async function run(options: {
     },
   };
   const close = vi.fn(async () => {});
-  await runAgent({ name: "test", decide: options.target ?? (() => 0) }, {
+  await runAgent(options.strategy ?? { name: "test", decide: options.target ?? (() => 0) }, {
     ...config({}, stop.signal), log: event => events.push(event), ...options.cfg,
   }, {
     async call(name, args) {
@@ -141,6 +144,31 @@ describe("agent loop", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+  it("tags house agents and logs their inputs on every tick", async () => {
+    const books: Book[] = [];
+    const result = await run({ strategy: house(book => { books.push(book); return { target: 0, inputs: { basis: 0.01, reason: "hold" } }; }) });
+    expect(result.events[0]).toEqual({ agent: "house", event: "start", house: true });
+    expect(result.events.find(event => event.event === "tick")).toEqual({
+      agent: "house", event: "tick", house: true, basis: 0.01, reason: "hold", mark: 100, target: 0, current: 0, size: 0.5, resize: false,
+    });
+    expect(books).toEqual([{ mark: 100, current: 0, size: 0, now: 0 }]);
+    expect(result.calls.every(call => call.name === "get_position")).toBe(true);
+  });
+  it("opens a house plan at its own size and re-sizes by closing then reopening", async () => {
+    const opened = await run({ strategy: house(() => ({ target: -1, size: 120, inputs: {} })) });
+    expect(opened.calls.at(-1)).toEqual({ name: "open_position", args: { side: "short", size: 120 } });
+    const resized = await run({ position: { position: { side: "long", size: 80 } }, strategy: house(book => ({ target: 1, size: 100, resize: book.size !== 100, inputs: {} })) });
+    expect(resized.calls.slice(-2)).toEqual([{ name: "close_position" }, { name: "open_position", args: { side: "long", size: 100 } }]);
+    const held = await run({ position: { position: { side: "long", size: 80 } }, strategy: house(() => ({ target: 1, size: 100, inputs: {} })) });
+    expect(held.calls.every(call => call.name === "get_position")).toBe(true);
+    const flat = await run({ strategy: house(() => ({ target: 0, resize: true, inputs: {} })) });
+    expect(flat.calls.every(call => call.name === "get_position")).toBe(true);
+  });
+  it("refuses an invalid house size without trading", async () => {
+    const result = await run({ strategy: house(() => ({ target: 1, size: Number.NaN, inputs: {} })) });
+    expect(result.calls.every(call => call.name === "get_position")).toBe(true);
+    expect(result.events.some(event => event.event === "error" && event.message === "Invalid plan size")).toBe(true);
   });
   it("validates configuration", () => {
     const signal = new AbortController().signal;

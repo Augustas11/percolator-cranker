@@ -10,6 +10,7 @@ describe("wallet selection", () => {
     expect(() => agentEnvs(["toString"], {})).toThrow("Choose strategies");
     expect(() => agentEnvs(["trend", "trend"], {})).toThrow("Duplicate");
     expect(() => agentEnvs(["trend"], {})).toThrow("own wallet file");
+    expect(() => agentEnvs(["hedger", "basis"], {})).toThrow("DRIP_KEYPAIR_HEDGER");
     expect(() => agentEnvs(["trend", "meanrev"], { DRIP_KEYPAIR: "shared" })).toThrow("DRIP_KEYPAIR_TREND");
   });
   it("passes separate wallets and rejects the same wallet via symlink or copy", () => {
