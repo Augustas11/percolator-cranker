@@ -1,8 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { Connection, Keypair, Transaction, VersionedTransaction } from "@solana/web3.js";
-import type { PublicKey, TransactionInstruction } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
+import type { TransactionInstruction } from "@solana/web3.js";
 import { devnetConfig } from "../../frontend/src/chain/config";
 import { parseMarket, parsePortfolio } from "../../frontend/src/chain/accounts";
 import { i128, u64, u128 } from "../../frontend/src/chain/bytes";
@@ -90,15 +90,63 @@ export function checkMatcher(state: ReturnType<typeof parseMatcher>, signedSize:
   if (abs(next) > state.inventoryCap && abs(next) >= abs(state.inventory)) throw new Error("Trade would exceed the LP inventory cap without reducing risk");
 }
 
+/// The built-in market is the devnet compute perp (FLOP oracle). The frontend
+/// config still defaults to the retired SOL-PERP market, so override it here.
+export const computeMarket = {
+  market: new PublicKey("uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J"),
+  mint: new PublicKey("4NS7ozkPTEisCTSeigw33vjjWkWZ7NechuPddhXnA5Zf"),
+  lpPortfolio: new PublicKey("GcS4f5uCiYozfEtHzmttMKkHab2ympTasA9MvHashhSZ"),
+  matcherProgram: new PublicKey("8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE"),
+  matcherContext: new PublicKey("C2uacd9rM16jMBJuseqLByDeVorD6eacaJQKR4seHczq"),
+};
+export const marketDefaults = { ...devnetConfig, ...computeMarket };
+
+/// Market addresses from DRIP_* env, over the frontend defaults. The defaults are
+/// baked at build time (import.meta.env is empty under node), so a market relaunch
+/// would otherwise need a code change. A relaunch sets the full set (market, mint,
+/// LP portfolio, matcher pair). DRIP_MATCHER_PROGRAM / DRIP_MATCHER_CONTEXT = none
+/// disables trading; the matcher program and context are set together or not at all.
+export function marketOverrides(env: NodeJS.ProcessEnv, defaults: Partial<typeof devnetConfig> = marketDefaults) {
+  const raw = (name: string) => env[name]?.trim() || undefined;
+  const key = (name: string) => {
+    const value = raw(name);
+    if (!value) return undefined;
+    try { return new PublicKey(value); } catch { throw new Error(`${name} is not a valid public key`); }
+  };
+  const out: Partial<typeof devnetConfig> = {};
+  const programId = key("DRIP_PROGRAM_ID"), market = key("DRIP_MARKET");
+  const mint = key("DRIP_MINT"), lpPortfolio = key("DRIP_LP_PORTFOLIO");
+  if (programId) out.programId = programId;
+  if (market) out.market = market;
+  if (mint) out.mint = mint;
+  if (lpPortfolio) out.lpPortfolio = lpPortfolio;
+  const ctx = raw("DRIP_MATCHER_CONTEXT"), program = raw("DRIP_MATCHER_PROGRAM");
+  if (ctx === "none" || program === "none") {
+    out.matcherProgram = undefined;
+    out.matcherContext = undefined;
+  } else if (ctx || program) {
+    const matcherContext = ctx ? key("DRIP_MATCHER_CONTEXT") : defaults.matcherContext;
+    const matcherProgram = program ? key("DRIP_MATCHER_PROGRAM") : defaults.matcherProgram;
+    if (!matcherContext || !matcherProgram) {
+      throw new Error("DRIP_MATCHER_PROGRAM and DRIP_MATCHER_CONTEXT must be set together");
+    }
+    out.matcherContext = matcherContext;
+    out.matcherProgram = matcherProgram;
+  }
+  return out;
+}
+
 export class Drip {
   readonly cfg;
   readonly conn: Connection;
   readonly apiUrl: string;
+  readonly symbol: string;
   readonly guard;
   private agent?: ReturnType<typeof loadKeypair>;
 
   constructor(private env: NodeJS.ProcessEnv = process.env) {
-    this.cfg = { ...devnetConfig, rpcUrl: env.DRIP_RPC_URL || "https://api.devnet.solana.com" };
+    this.cfg = { ...marketDefaults, ...marketOverrides(env), rpcUrl: env.DRIP_RPC_URL || "https://api.devnet.solana.com" };
+    this.symbol = env.DRIP_SYMBOL?.trim() || "COMPUTE-PERP";
     this.apiUrl = (env.DRIP_API_URL || "https://drip-devnet.vercel.app").replace(/\/$/, "");
     this.conn = new Connection(this.cfg.rpcUrl, "confirmed");
     this.guard = genesisGuard(this.conn);
@@ -130,9 +178,9 @@ export class Drip {
     if (!this.cfg.matcherContext) throw new Error("Matcher context is not configured");
     const state = parseMatcher((await this.account(this.cfg.matcherContext)).data);
     return { state, output: {
-      paused: state.paused, max_fill_sol: units(state.maxFill), max_fill_atoms: state.maxFill.toString(),
-      lp_inventory_sol: units(state.inventory), inventory_atoms: state.inventory.toString(),
-      inventory_cap_sol: units(state.inventoryCap), inventory_cap_atoms: state.inventoryCap.toString(),
+      paused: state.paused, max_fill: units(state.maxFill), max_fill_atoms: state.maxFill.toString(),
+      lp_inventory: units(state.inventory), inventory_atoms: state.inventory.toString(),
+      inventory_cap: units(state.inventoryCap), inventory_cap_atoms: state.inventoryCap.toString(),
       ref_price: units(state.refPrice), ref_age_slots: (BigInt(await this.conn.getSlot()) - state.refSlot).toString(),
     } };
   }

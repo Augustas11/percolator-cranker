@@ -5,7 +5,7 @@ import { Keypair, SystemProgram } from "@solana/web3.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { atoms, checkMatcher, DEVNET_GENESIS, Drip, genesisGuard, loadKeypair, parseMatcher, redactRpc, safeError } from "./drip";
+import { atoms, checkMatcher, DEVNET_GENESIS, Drip, genesisGuard, loadKeypair, marketOverrides, parseMatcher, redactRpc, safeError } from "./drip";
 import { createServer } from "./index";
 import { tools as registeredTools } from "./tools";
 import * as tx from "../../frontend/src/chain/tx";
@@ -107,31 +107,31 @@ describe("closing", () => {
   }
   it.each(["long", "short"] as const)("closes a large %s in capped reducing fills", async side => {
     const { drip, portfolio, trade, close, send } = setup(side, [25_000_000n, 15_000_000n, 5_000_000n]);
-    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1", "sig-2", "sig-3"], explorer: ["explorer-1", "explorer-2", "explorer-3"], closed_sol: 25, complete: true, remaining_sol: 0 });
+    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1", "sig-2", "sig-3"], explorer: ["explorer-1", "explorer-2", "explorer-3"], closed: 25, complete: true, remaining: 0 });
     expect(send).toHaveBeenCalledTimes(3); expect(portfolio).toHaveBeenCalledTimes(5);
     expect(trade).not.toHaveBeenCalled(); expect(close).toHaveBeenCalledTimes(3);
     for (const call of close.mock.calls) expect(call.slice(4)).toEqual([50n, 12n, 10_000_000n]);
   });
   it("keeps the common single-fill buildClose path", async () => {
     const { drip, trade, close, send } = setup("long", [5_000_000n]);
-    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed_sol: 5, complete: true, remaining_sol: 0 });
+    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed: 5, complete: true, remaining: 0 });
     expect(trade).not.toHaveBeenCalled(); expect(close).toHaveBeenCalledTimes(1); expect(send).toHaveBeenCalledTimes(1);
   });
   it("refreshes the cap and keeps closing while a position remains", async () => {
     const { drip, close, send } = setup("long", [5_000_000n, 3_000_000n, 0n]);
     vi.mocked(drip.matcher).mockResolvedValueOnce({ state: { maxFill: 6_000_000n } } as Awaited<ReturnType<Drip["matcher"]>>);
-    expect(await closePosition.run(drip, {})).toMatchObject({ closed_sol: 5, complete: true, remaining_sol: 0 });
+    expect(await closePosition.run(drip, {})).toMatchObject({ closed: 5, complete: true, remaining: 0 });
     expect(send).toHaveBeenCalledTimes(2);
     expect(close.mock.calls.map(call => call[6])).toEqual([6_000_000n, 10_000_000n]);
   });
   it("reports the actual closed size after a post-crank shrink empties the position", async () => {
     const { drip, send } = setup("long", [25_000_000n, 0n]);
-    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed_sol: 25, complete: true, remaining_sol: 0 });
+    expect(await closePosition.run(drip, {})).toEqual({ signatures: ["sig-1"], explorer: ["explorer-1"], closed: 25, complete: true, remaining: 0 });
     expect(send).toHaveBeenCalledTimes(1);
   });
   it("limits each call to ten fills", async () => {
     const { drip, send } = setup("short", Array.from({ length: 11 }, (_, i) => BigInt(110 - 10 * i) * 1_000_000n));
-    expect(await closePosition.run(drip, {})).toMatchObject({ closed_sol: 100, complete: false, remaining_sol: 10 });
+    expect(await closePosition.run(drip, {})).toMatchObject({ closed: 100, complete: false, remaining: 10 });
     expect(send).toHaveBeenCalledTimes(10);
   });
   it("does not send for an empty position", async () => {
@@ -319,10 +319,60 @@ describe("MCP", () => {
     const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(a); await client.connect(b);
     try {
       for (const tool of (await client.listTools()).tools) {
-        const result = await client.callTool({ name: tool.name, arguments: { amount_usdc: 1, side: "long", size_sol: 1 } });
+        const result = await client.callTool({ name: tool.name, arguments: { amount_usdc: 1, side: "long", size: 1 } });
         expect(result.isError).toBe(true); expect(JSON.stringify(result.content)).toContain("Refusing non-devnet");
       }
       expect(account).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
     } finally { await client.close(); await server.close(); }
+  });
+});
+
+describe("marketOverrides", () => {
+  it("keeps the defaults when no DRIP_* market env is set", () => {
+    expect(marketOverrides({})).toEqual({});
+    const drip = new Drip({});
+    expect(drip.cfg.market.toBase58()).toBe(new Drip({ DRIP_MARKET: "" }).cfg.market.toBase58());
+  });
+
+  it("defaults to the devnet compute market", () => {
+    const cfg = new Drip({}).cfg;
+    expect(cfg.market.toBase58()).toBe("uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J");
+    expect(new Drip({}).symbol).toBe("COMPUTE-PERP");
+    expect(new Drip({ DRIP_SYMBOL: " SOL-PERP " }).symbol).toBe("SOL-PERP");
+    expect(cfg.mint.toBase58()).toBe("4NS7ozkPTEisCTSeigw33vjjWkWZ7NechuPddhXnA5Zf");
+    expect(cfg.lpPortfolio.toBase58()).toBe("GcS4f5uCiYozfEtHzmttMKkHab2ympTasA9MvHashhSZ");
+    expect(cfg.matcherProgram?.toBase58()).toBe("8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE");
+    expect(cfg.matcherContext?.toBase58()).toBe("C2uacd9rM16jMBJuseqLByDeVorD6eacaJQKR4seHczq");
+    expect(new Drip({ DRIP_MATCHER_PROGRAM: "8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE" }).cfg.matcherContext?.toBase58())
+      .toBe("C2uacd9rM16jMBJuseqLByDeVorD6eacaJQKR4seHczq");
+  });
+
+  it("points the MCP at another market from env", () => {
+    const [market, mint, lp, ctx, program] = Array.from({ length: 5 }, () => Keypair.generate().publicKey.toBase58());
+    const drip = new Drip({ DRIP_MARKET: market, DRIP_MINT: mint, DRIP_LP_PORTFOLIO: lp, DRIP_MATCHER_CONTEXT: ctx, DRIP_MATCHER_PROGRAM: program });
+    expect(drip.cfg.market.toBase58()).toBe(market);
+    expect(drip.cfg.mint.toBase58()).toBe(mint);
+    expect(drip.cfg.lpPortfolio.toBase58()).toBe(lp);
+    expect(drip.cfg.matcherContext?.toBase58()).toBe(ctx);
+    expect(drip.cfg.matcherProgram?.toBase58()).toBe(program);
+  });
+
+  it("disables trading with DRIP_MATCHER_CONTEXT=none and rejects bad keys", () => {
+    const drip = new Drip({ DRIP_MATCHER_CONTEXT: "none" });
+    expect(drip.cfg.matcherContext).toBeUndefined();
+    expect(drip.cfg.matcherProgram).toBeUndefined();
+    expect(() => new Drip({ DRIP_MARKET: "not-a-key" })).toThrow("DRIP_MARKET is not a valid public key");
+    expect(new Drip({ DRIP_MATCHER_PROGRAM: " none " }).cfg.matcherContext).toBeUndefined();
+  });
+
+  it("sets the matcher program and context together", () => {
+    const [ctx, program] = Array.from({ length: 2 }, () => Keypair.generate().publicKey);
+    const defaults = { matcherProgram: program, matcherContext: ctx };
+    const other = Keypair.generate().publicKey.toBase58();
+    expect(marketOverrides({ DRIP_MATCHER_PROGRAM: other }, defaults).matcherContext?.toBase58()).toBe(ctx.toBase58());
+    expect(marketOverrides({ DRIP_MATCHER_PROGRAM: other }, defaults).matcherProgram?.toBase58()).toBe(other);
+    expect(() => marketOverrides({ DRIP_MATCHER_CONTEXT: other }, {})).toThrow("must be set together");
+    expect(() => marketOverrides({ DRIP_MATCHER_PROGRAM: other }, {})).toThrow("must be set together");
+    expect(marketOverrides({ DRIP_MARKET: ` ${other} ` }).market?.toBase58()).toBe(other);
   });
 });
