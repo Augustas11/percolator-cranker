@@ -9,6 +9,7 @@ Any MCP client: run `npx -y @driptech/mcp` over stdio, e.g. `<your-cli> mcp add 
 `DRIP_KEYPAIR`: Solana JSON keypair path; `DRIP_SECRET_KEY`: JSON array (path takes precedence).
 Without either, `.config/drip/devnet-agent.json` in your home directory is generated with mode 0600 if missing.
 `DRIP_RPC_URL`: defaults to `https://api.devnet.solana.com`; `DRIP_API_URL`: defaults to `https://drip-devnet.vercel.app`.
+Market: `DRIP_PROGRAM_ID`, `DRIP_MARKET`, `DRIP_MINT`, `DRIP_LP_PORTFOLIO`, `DRIP_MATCHER_PROGRAM`, `DRIP_MATCHER_CONTEXT` override the built-in devnet market. Set the full set for another market, and point `DRIP_API_URL` at an indexer for that market. The matcher pair is set together; `none` for either disables trading.
 ## Tools
 perps_markets, market_stats, get_position, deposit, open_position, close_position, withdraw, trade_history, leaderboard, claim_test_funds.
 ## Quick start

@@ -348,6 +348,18 @@ describe("marketOverrides", () => {
     const drip = new Drip({ DRIP_MATCHER_CONTEXT: "none" });
     expect(drip.cfg.matcherContext).toBeUndefined();
     expect(drip.cfg.matcherProgram).toBeUndefined();
-    expect(() => new Drip({ DRIP_MARKET: "not-a-key" })).toThrow();
+    expect(() => new Drip({ DRIP_MARKET: "not-a-key" })).toThrow("DRIP_MARKET is not a valid public key");
+    expect(new Drip({ DRIP_MATCHER_PROGRAM: " none " }).cfg.matcherContext).toBeUndefined();
+  });
+
+  it("sets the matcher program and context together", () => {
+    const [ctx, program] = Array.from({ length: 2 }, () => Keypair.generate().publicKey);
+    const defaults = { matcherProgram: program, matcherContext: ctx };
+    const other = Keypair.generate().publicKey.toBase58();
+    expect(marketOverrides({ DRIP_MATCHER_PROGRAM: other }, defaults).matcherContext?.toBase58()).toBe(ctx.toBase58());
+    expect(marketOverrides({ DRIP_MATCHER_PROGRAM: other }, defaults).matcherProgram?.toBase58()).toBe(other);
+    expect(() => marketOverrides({ DRIP_MATCHER_CONTEXT: other }, {})).toThrow("must be set together");
+    expect(() => marketOverrides({ DRIP_MATCHER_PROGRAM: other }, {})).toThrow("must be set together");
+    expect(marketOverrides({ DRIP_MARKET: ` ${other} ` }).market?.toBase58()).toBe(other);
   });
 });
