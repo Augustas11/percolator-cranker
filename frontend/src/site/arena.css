@@ -1,0 +1,33 @@
+/* /arena: COMPUTE-PERP leaderboard, live stats, recent fills, ranking rules. */
+.site .arena { display: grid; gap: 24px; }
+.site .arena-hero { display: grid; gap: 8px; padding: 8px 0 0; }
+.site .arena-hero h1 { margin: 0; }
+.site .arena-lead { margin: 0; max-width: 720px; font-size: 18px; line-height: 1.45; color: var(--site-secondary); }
+.site .arena-season { margin: 0; font: 13px var(--site-mono); letter-spacing: 1px; text-transform: uppercase; color: var(--site-accent); }
+.site .arena-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.site .arena-stats > div { display: grid; gap: 6px; padding: 18px 20px; background: var(--site-surface-2); border: 1px solid var(--site-line-7); border-radius: 16px; }
+.site .arena-stats dt { font: 11px var(--site-mono); letter-spacing: 1.5px; text-transform: uppercase; color: var(--site-muted); }
+.site .arena-stats dd { margin: 0; text-align: left; font: 700 24px var(--site-mono); color: var(--site-text); }
+.site .arena-section > h2 { margin: 0 0 14px; }
+.site .arena table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.site .arena th { padding: 12px 10px; font: 400 11px var(--site-mono); letter-spacing: 1px; text-transform: uppercase; color: var(--site-muted); border: 0; text-align: left; }
+.site .arena td { padding: 13px 10px; border: 0; border-top: 1px solid var(--site-line-5); font-size: 14px; }
+.site .arena th:nth-child(n+3), .site .arena td:nth-child(n+3) { text-align: right; }
+.site .arena-board td:first-child { font-weight: 700; color: var(--site-muted); }
+.site .arena-board tr:nth-child(-n+3) td:first-child { color: var(--site-accent); }
+.site .arena td a { color: var(--site-text); font-family: var(--site-mono); font-size: 13px; }
+.site .house-tag { margin-left: 8px; padding: 1px 7px; font: 10px var(--site-mono); letter-spacing: 1px; text-transform: uppercase; color: var(--site-body-muted); border: 1px solid var(--site-line-9); border-radius: 6px; white-space: nowrap; }
+.site .pnl-up { color: var(--site-up); }
+.site .pnl-down { color: var(--site-down); }
+.site .arena-state { margin: 0; color: var(--site-secondary); font-size: 15px; }
+.site .arena-state p { margin: 0 0 14px; }
+.site .arena-actions, .site .arena-cta { display: flex; flex-wrap: wrap; gap: 12px; }
+.site .arena-rules { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+.site .arena-rules li { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 14px; padding: 11px 0; border-top: 1px solid var(--site-line-6); font-size: 15px; color: var(--site-secondary); }
+.site .arena-rules b { color: var(--site-text); font-weight: 600; }
+@media (max-width: 720px) {
+  .site .arena-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .site .arena-rules li { grid-template-columns: 1fr; gap: 2px; }
+}
+.site .board-card .arena-state { padding: 20px 24px; }
+.site .board-card .arena-board td a { color: var(--site-text); }

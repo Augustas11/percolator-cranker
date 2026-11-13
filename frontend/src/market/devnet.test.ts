@@ -26,6 +26,8 @@ beforeEach(() => {
   vi.spyOn(Connection.prototype, "getSlot").mockResolvedValue(123);
   vi.spyOn(Connection.prototype, "simulateTransaction").mockResolvedValue({ context: { slot: 123 }, value: { err: "InvalidArgument", logs: [] } });
   vi.spyOn(Connection.prototype, "sendRawTransaction").mockResolvedValue("signature");
+  vi.spyOn(Connection.prototype, "getBalance").mockResolvedValue(1e9);
+  vi.spyOn(Connection.prototype, "getTokenAccountBalance").mockResolvedValue({ context: { slot: 123 }, value: { amount: "100000000000", decimals: 6, uiAmount: 100000 } });
   vi.spyOn(Connection.prototype, "confirmTransaction").mockResolvedValue({ context: { slot: 123 }, value: { err: null } });
   vi.stubGlobal("window", { solflare: {
     publicKey: null as typeof tester.publicKey | null,
@@ -61,7 +63,7 @@ it("creates a portfolio with its keypair signature before depositing and creatin
   const send = vi.mocked(Connection.prototype.sendRawTransaction);
   client = new DevnetMarketClient({ ...devnetConfig, matcherProgram: undefined, matcherContext: undefined });
   await client.connect();
-  await expect(client.deposit(0.0000001)).rejects.toThrow(/positive/);
+  await expect(client.deposit(0.0000001)).rejects.toThrow(/above zero/);
   expect(send).not.toHaveBeenCalled();
   await client.deposit(1.25);
   const [create, deposit] = send.mock.calls.map(call => Transaction.from(call[0]));
@@ -160,4 +162,64 @@ it("keeps flat health margins at zero and free collateral available", async () =
   const { collateral, legs, health } = client.getSnapshot().portfolio;
   expect(legs).toEqual([]);
   expect(health).toEqual({ equity: collateral, initialMarginUsed: 0, maintenanceMargin: 0, freeCollateral: collateral, ratio: Infinity, status: "healthy" });
+});
+
+it.each([0, NaN, -1, 1e-7, 1e20])("rejects deposit and openPosition of %s before asking the wallet to sign", async bad => {
+  client = new DevnetMarketClient({ ...devnetConfig, matcherProgram: tester.publicKey, matcherContext: portfolio });
+  await client.connect();
+  const sign = vi.spyOn((globalThis as unknown as { window: { solflare: { signTransaction: () => unknown } } }).window.solflare, "signTransaction");
+  await expect(client.deposit(bad)).rejects.toThrow(/above zero, with at most 6 decimals/);
+  await expect(client.withdraw(bad)).rejects.toThrow(/above zero, with at most 6 decimals/);
+  for (const side of ["long", "short"] as const) await expect(client.openPosition(side, bad, 1)).rejects.toThrow(/above zero, with at most 6 decimals/);
+  expect(sign).not.toHaveBeenCalled();
+  expect(Connection.prototype.sendRawTransaction).not.toHaveBeenCalled();
+});
+
+it("reports no leverage or margin ratio when the market's initial margin is zero", async () => {
+  const zero = Buffer.from(market);
+  const offset = layout.MARKET_GROUP_OFF + layout["group.config"] + layout["config.initial_margin_bps"];
+  zero.writeBigUInt64LE(0n, offset);
+  vi.mocked(Connection.prototype.getMultipleAccountsInfo).mockImplementation(async keys => keys.map(key =>
+    account(key.equals(devnetConfig.market) ? zero : key.equals(devnetConfig.lpPortfolio) ? lp : data)));
+  client = new DevnetMarketClient(devnetConfig);
+  await vi.advanceTimersByTimeAsync(0);
+  const { maxLeverage, initialMarginRatio } = client.getSnapshot().market;
+  expect(maxLeverage).toBeNaN();
+  expect(initialMarginRatio).toBeNaN();
+  // With the fixture's own value: 20% initial margin, 5x.
+  vi.mocked(Connection.prototype.getMultipleAccountsInfo).mockImplementation(async keys => keys.map(key =>
+    account(key.equals(devnetConfig.market) ? market : key.equals(devnetConfig.lpPortfolio) ? lp : data)));
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(client.getSnapshot().market).toMatchObject({ maxLeverage: 5, initialMarginRatio: 0.2 });
+});
+
+it("says plainly when the wallet has no test USDC, before asking it to sign", async () => {
+  client = new DevnetMarketClient(devnetConfig);
+  await client.connect();
+  const sign = vi.spyOn((globalThis as unknown as { window: { solflare: { signTransaction: () => unknown } } }).window.solflare, "signTransaction");
+  const balance = vi.mocked(Connection.prototype.getTokenAccountBalance);
+  balance.mockRejectedValue(new Error("could not find account"));
+  await expect(client.deposit(10)).rejects.toThrow("You have no test USDC yet: get some from the faucet.");
+  expect(await client.walletBalances()).toEqual({ sol: 1, usdc: null });
+  balance.mockResolvedValue({ context: { slot: 123 }, value: { amount: "0", decimals: 6, uiAmount: 0 } });
+  await expect(client.deposit(10)).rejects.toThrow("You have no test USDC yet: get some from the faucet.");
+  balance.mockResolvedValue({ context: { slot: 123 }, value: { amount: "2500000", decimals: 6, uiAmount: 2.5 } });
+  await expect(client.deposit(10)).rejects.toThrow("You have 2.5 test USDC: deposit that much or less.");
+  expect(sign).not.toHaveBeenCalled();
+  await client.createTokenAccount();
+  const tx = Transaction.from(vi.mocked(Connection.prototype.sendRawTransaction).mock.calls[0][0]);
+  expect(tx.instructions.map(ix => ix.programId.toBase58())).toEqual(["ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"]);
+});
+
+it("marks fills paused when the matcher's reference price is too old or too far from the mark", async () => {
+  const { fillsPaused } = await import("./types");
+  const base = { spreadBps: 0, maxFill: 100, maxLong: 100, maxShort: 100, paused: false, deviationBps: 500, refPrice: 0.3, maxAgeSlots: 300 };
+  expect(fillsPaused({ ...base, refAgeSlots: 10 }, 0.31)).toBeNull();
+  expect(fillsPaused({ ...base, refAgeSlots: 301 }, 0.31)).toBe("stale");
+  expect(fillsPaused({ ...base, refAgeSlots: null }, 0.31)).toBe("stale");
+  expect(fillsPaused({ ...base, refAgeSlots: 10 }, 0.32)).toBe("deviates");
+  expect(fillsPaused({ ...base, paused: true, refAgeSlots: 10 }, 0.3)).toBe("paused");
+  // Without a slot read, age is unknown and never pauses.
+  expect(fillsPaused(base, 0.3)).toBeNull();
+  expect(fillsPaused(null, 0.3)).toBeNull();
 });

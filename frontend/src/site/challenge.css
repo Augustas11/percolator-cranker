@@ -1,0 +1,53 @@
+/* /challenge: the Compute Oracle Challenge. Shares the compute page's sections and the arena's tables. */
+.site .challenge { display: grid; gap: 8px; }
+.site .ch-hero { display: grid; gap: 14px; padding: 8px 0 12px; }
+.site .ch-title { margin: 0; max-width: 820px; font: 700 clamp(32px, 4.4vw, 56px)/1.05 var(--site-display, var(--site-font)); letter-spacing: -0.5px; color: var(--site-text); }
+.site .ch-pitch { margin: 0; max-width: 680px; font-size: 19px; line-height: 1.45; color: var(--site-secondary); }
+.site .ch-hero .hero-actions { margin-top: 6px; }
+
+.site .ch-dates { display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 0; }
+.site .ch-dates > div { display: grid; gap: 6px; min-width: 180px; padding: 16px 20px; background: var(--site-surface-2); border: 1px solid var(--site-line-7); border-radius: 16px; }
+.site .ch-dates dt { font: 11px var(--site-mono); letter-spacing: 1.5px; text-transform: uppercase; color: var(--site-muted); }
+.site .ch-dates dd { margin: 0; font: 700 17px var(--site-mono); color: var(--site-text); }
+.site .ch-dates .ch-next { border-color: color-mix(in srgb, var(--site-accent) 45%, transparent); }
+.site .ch-dates .ch-next dd { font-size: 24px; color: var(--site-accent); font-variant-numeric: tabular-nums; }
+
+.site .ch-lines { margin: 0; padding: 0; list-style: none; counter-reset: line; display: grid; gap: 0; }
+.site .ch-lines li { counter-increment: line; display: grid; grid-template-columns: 44px minmax(0, 1fr); padding: 14px 0; border-top: 1px solid var(--site-line-6); font-size: 18px; line-height: 1.4; color: var(--site-text); }
+.site .ch-lines li::before { content: counter(line, decimal-leading-zero); font: 12px/1.9 var(--site-mono); color: var(--site-accent); }
+
+.site .ch-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
+.site .challenge .cx-section > h2 { margin-bottom: 14px; }
+.site .ch-board-block:first-of-type { margin-top: 6px; }
+.site .ch-grid p { color: var(--site-secondary); line-height: 1.5; }
+.site .ch-limits { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
+.site .ch-limits li { padding: 7px 12px; font: 13px var(--site-mono); color: var(--site-body-muted); background: var(--site-surface-chip); border: 1px solid var(--site-line-7); border-radius: 10px; }
+.site .ch-limits b { color: var(--site-text); }
+.site .ch-bullets { margin: 0; padding-left: 18px; display: grid; gap: 8px; color: var(--site-secondary); line-height: 1.5; }
+.site .ch-prizes { font: 600 15px var(--site-mono); color: var(--site-accent) !important; }
+
+.site .ch-board-block { display: grid; gap: 6px; margin-bottom: 28px; }
+.site .ch-board-block h3 { margin: 0; }
+.site .ch-board { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.site .ch-board th { padding: 12px 10px; font: 400 11px var(--site-mono); letter-spacing: 1px; text-transform: uppercase; color: var(--site-muted); text-align: left; border: 0; }
+.site .ch-board td { padding: 13px 10px; border-top: 1px solid var(--site-line-5); font-size: 14px; vertical-align: top; }
+.site .ch-board .num { text-align: right; white-space: nowrap; }
+.site .ch-board td:first-child { font-weight: 700; color: var(--site-muted); }
+.site .ch-board tr.is-ref td { background: var(--site-surface-band); color: var(--site-body-muted); }
+.site .ch-board small { color: var(--site-muted); }
+.site .ch-handle { font-weight: 600; color: var(--site-text); }
+.site .ch-kind { margin-left: 8px; padding: 1px 7px; font: 10px var(--site-mono); letter-spacing: 1px; text-transform: uppercase; color: var(--site-body-muted); border: 1px solid var(--site-line-9); border-radius: 6px; }
+.site .ch-kind.ch-agent { color: var(--site-accent); border-color: color-mix(in srgb, var(--site-accent) 40%, transparent); }
+.site .ch-terms { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; font: 11px var(--site-mono); color: var(--site-muted); }
+.site .ch-beats { color: var(--site-up); font-weight: 600; }
+.site .ch-no { color: var(--site-muted); }
+.site .ch-hash { font-size: 12px; color: var(--site-body-muted); }
+.site .challenge .arena-cta { margin-top: 24px; }
+
+@media (max-width: 760px) {
+  .site .ch-grid { grid-template-columns: 1fr; }
+  .site .ch-lines li { font-size: 16px; grid-template-columns: 34px minmax(0, 1fr); }
+  .site .ch-dates > div { flex: 1 1 140px; min-width: 0; }
+}
+
+.site .ch-score-line { margin: 0; max-width: 680px; font-size: 17px; line-height: 1.45; color: var(--site-secondary); }

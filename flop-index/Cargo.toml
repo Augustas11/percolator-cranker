@@ -10,12 +10,18 @@ publish = false
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Exact f64 round-trip: index-state.json must reload to the same bits.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
 
 [[bin]]
 name = "flop-score"
 path = "src/bin/flop-score.rs"
+
+# Public JSON for the site's /compute page (docs/flop-compute/FEED.md).
+[[bin]]
+name = "flop-feed"
+path = "src/bin/flop-feed.rs"
 
 [dev-dependencies]
 # Only to check SPEC against launch/flop-compute.toml in CI (staging's own

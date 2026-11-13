@@ -3,3 +3,5 @@ dist
 .roundtrip/
 roundtrip-result.json
 .vercel
+public/compute-feed/
+tsconfig.tsbuildinfo

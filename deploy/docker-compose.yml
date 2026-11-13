@@ -105,12 +105,38 @@ services:
     pids_limit: 128
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 
+  # Compute price feed for the site's /compute page (docs/flop-compute/FEED.md):
+  # reads the FLOP market's push log, the OpenRouter recorder and the wide
+  # collector, writes latest.json, history.json and market.json to
+  # COMPUTE_FEED_DIR, which indexer-proxy serves at /compute-feed/.
+  # Opt-in: --profile compute-feed. Compose cannot chown a bind mount: create
+  # the out dir once, owned by the service user:
+  #   install -d -o "$LAUNCH_UID" -g "$LAUNCH_GID" /opt/drip/compute-feed
+  compute-feed:
+    build: { context: .., dockerfile: deploy/Dockerfile.flop-feed }
+    image: flop-feed:local
+    restart: unless-stopped
+    user: "${LAUNCH_UID:?set LAUNCH_UID}:${LAUNCH_GID:?set LAUNCH_GID}"
+    command: ["/flop-run/bots.log", "/or-prices", "/feed", "--oracle", "${FLOP_ORACLE_PUBKEY:?set FLOP_ORACLE_PUBKEY (the FLOP oracle authority pubkey)}", "--wide", "/or-prices-wide", "--loop", "60"]
+    volumes:
+      - "${FLOP_RUN_DIR:-/opt/drip/flop-devnet}/bots.log:/flop-run/bots.log:ro"
+      - "${OR_PRICES_DIR:-/opt/drip/or-prices}:/or-prices:ro"
+      - "${OR_PRICES_WIDE_DIR:-/opt/drip/or-prices-wide}:/or-prices-wide:ro"
+      - "${COMPUTE_FEED_DIR:-/opt/drip/compute-feed}:/feed"
+    profiles: [compute-feed]
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 32
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
   indexer-proxy:
     image: nginx:1.27-alpine
     restart: unless-stopped
     depends_on: [indexer, faucet]
     network_mode: "service:indexer"
-    volumes: ["./indexer-nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    volumes:
+      - ./indexer-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - "${COMPUTE_FEED_DIR:-/opt/drip/compute-feed}:/srv/compute-feed:ro"
     cpus: 0.25
     mem_limit: 128m
     pids_limit: 64

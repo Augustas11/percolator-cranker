@@ -1,0 +1,44 @@
+/* /agents: one flow from install to the Arena. */
+.site .ag-hero { padding: 8px 0 4px; }
+.site .ag-lead { margin: 16px 0 0; max-width: 880px; font: 600 clamp(24px, 2.6vw, 34px)/1.25 var(--site-font); color: var(--site-text); }
+.site .ag-sub { margin: 14px 0 0; max-width: 760px; font-size: 17px; line-height: 1.5; color: var(--site-secondary); }
+.site .agents .cx-section > h2 { margin: 6px 0 16px; }
+.site .ag-h3 { margin: 22px 0 10px; font-size: 16px; }
+.site .ag-step { margin-top: 26px; }
+.site .ag-note { margin: 12px 0 0; font-size: 14px; color: var(--site-muted); }
+.site .ag-more { margin-top: 8px; }
+.site .ag-more summary { cursor: pointer; color: var(--site-accent); font-size: 14px; }
+.site .agents .code-block { position: relative; }
+.site .agents .code-block pre { margin: 0; padding-right: 110px; white-space: pre-wrap; }
+.site .agents .code-block button { position: absolute; top: 12px; right: 12px; min-height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--site-accent-40); background: transparent; color: var(--site-accent); font-size: 13px; }
+.site .agents .code-block + .code-block { margin-top: 10px; }
+.site .ag-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+.site .ag-groups h3 { margin: 0 0 10px; font: 400 12px var(--site-mono); letter-spacing: 1.5px; text-transform: uppercase; color: var(--site-accent); }
+.site .ag-groups dl { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+.site .ag-groups dl > div { padding: 12px 0; border-top: 1px solid var(--site-line-6); }
+.site .ag-groups dt code { font-size: 14px; color: var(--site-text); }
+.site .ag-groups dd { margin: 4px 0 0; text-align: left; font: 14px/1.5 var(--site-font); color: var(--site-body-muted); }
+.site .ag-compute { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.site .ag-compute > div { padding: 20px; background: var(--site-surface-terminal); border: 1px solid var(--site-accent-25); border-radius: 16px; }
+.site .ag-compute > div:last-child { border-color: var(--site-coral-45); }
+.site .ag-compute h3 { margin: 8px 0 0; font-size: 20px; }
+.site .ag-compute p:last-child { margin: 8px 0 0; font-size: 15px; line-height: 1.5; color: var(--site-secondary); }
+.site .ag-starters { list-style: none; margin: 0 0 12px; padding: 0; }
+.site .ag-starters li { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 14px; margin: 0; padding: 10px 0; border-top: 1px solid var(--site-line-6); font-size: 14px; color: var(--site-secondary); }
+.site .ag-starters code { color: var(--site-accent); }
+.site .ag-cta { margin: 20px 0 0; }
+.site .ag-code { list-style: none; margin: 0 0 16px; padding: 0; }
+.site .ag-code li { display: grid; grid-template-columns: minmax(180px, 280px) minmax(0, 1fr); gap: 14px; margin: 0; padding: 10px 0; border-top: 1px solid var(--site-line-6); font-size: 14px; }
+.site .ag-code span { color: var(--site-muted); }
+@media (max-width: 900px) {
+  .site .ag-groups, .site .ag-compute { grid-template-columns: 1fr; }
+  .site .ag-code li, .site .ag-starters li { grid-template-columns: 1fr; gap: 2px; }
+  .site .agents .code-block pre { padding-right: 22px; padding-top: 52px; }
+}
+.site .ag-more + .ag-step { margin-top: 28px; }
+.site .ag-files { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+.site .ag-files > div { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 14px; padding: 12px 0; border-top: 1px solid var(--site-line-6); }
+.site .ag-files dt code { font-size: 14px; color: var(--site-text); }
+.site .ag-files dd { margin: 0; text-align: left; font: 14px/1.5 var(--site-font); color: var(--site-body-muted); }
+.site .ag-files dd a { display: block; margin-top: 2px; font: 13px var(--site-mono); overflow-wrap: anywhere; }
+@media (max-width: 900px) { .site .ag-files > div { grid-template-columns: 1fr; gap: 4px; } }

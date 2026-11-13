@@ -1,0 +1,11 @@
+# Compute price feed image (docs/flop-compute/FEED.md). flop-index has no
+# Solana deps, so only it enters the build.
+FROM rust:1.98-bookworm AS build
+WORKDIR /src
+COPY flop-index flop-index
+RUN cargo build --release --locked --manifest-path flop-index/Cargo.toml --bin flop-feed
+
+FROM debian:bookworm-slim
+COPY --from=build /src/flop-index/target/release/flop-feed /usr/local/bin/
+USER 10001
+ENTRYPOINT ["flop-feed"]

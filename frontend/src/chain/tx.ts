@@ -49,7 +49,7 @@ export async function withFreshCrank(
   if (!kept.length) {
     const accounts = await conn.getMultipleAccountsInfo(readAccounts);
     return { ixs, accounts: accounts.map(account => {
-      if (!account) throw new Error("Crank account not found");
+      if (!account) throw new Error("Market refresh: account not found");
       return account.data;
     }) };
   }
@@ -60,11 +60,11 @@ export async function withFreshCrank(
     sigVerify: false, replaceRecentBlockhash: true,
     accounts: { encoding: "base64", addresses: readAccounts.map(key => key.toBase58()) },
   });
-  if (result.value.err) throw new Error(`Crank simulation failed: ${JSON.stringify(result.value.err)}`);
+  if (result.value.err) throw new Error(`Market refresh simulation failed: ${JSON.stringify(result.value.err)}`);
   const accounts = result.value.accounts;
-  if (!accounts || accounts.length !== readAccounts.length) throw new Error("Crank accounts missing");
+  if (!accounts || accounts.length !== readAccounts.length) throw new Error("Market refresh: accounts missing");
   return { ixs, accounts: accounts.map(account => {
-    if (!account) throw new Error("Crank account not found");
+    if (!account) throw new Error("Market refresh: account not found");
     return Buffer.from(account.data[0], "base64");
   }) };
 }
@@ -80,7 +80,7 @@ async function crankSet(conn: Connection, cfg: DevnetConfig, first: PublicKey[])
   if (!marketAccount) throw new Error("Market account not found");
   const positioned = await positionedPortfolios(conn, cfg.programId, parseMarket(marketAccount.data));
   const portfolios = [...new Set([...first, ...positioned].map(key => key.toBase58()))].map(key => new PublicKey(key));
-  if (portfolios.length > MAX_CRANKS) throw new Error(`${portfolios.length} portfolios need a crank; more than ${MAX_CRANKS} fit in one transaction`);
+  if (portfolios.length > MAX_CRANKS) throw new Error(`${portfolios.length} portfolios need a market refresh; more than ${MAX_CRANKS} fit in one transaction`);
   return portfolios;
 }
 

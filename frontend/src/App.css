@@ -31,3 +31,13 @@ button:focus-visible, input:focus-visible { outline: 3px solid #2782ac; outline-
 table { width: 100%; border-collapse: collapse; text-align: left; font-variant-numeric: tabular-nums; }
 th, td { padding: 10px 8px; border-bottom: 1px solid #e3e9ed; white-space: nowrap; }
 @media (max-width: 420px) { main { padding: 16px; } .panels { grid-template-columns: 1fr; } header { flex-wrap: wrap; } }
+/* COMPUTE-PERP trade page additions */
+.trade-title { display: grid; gap: 4px; }
+.trade-sub { margin: 0; font-size: 14px; color: var(--site-secondary, #526675); }
+.trade-sub a { color: var(--site-accent, #2782ac); }
+.trade-cases { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 4px; font-size: 13px; line-height: 1.45; color: var(--site-secondary, #526675); }
+.trade-cases b { color: var(--site-text, inherit); }
+.trade-help { margin: 6px 0 0; font-size: 13px; color: var(--site-muted, #526675); }
+.trade-notional { color: var(--site-text, inherit); font-variant-numeric: tabular-nums; }
+.trade-help.is-over { color: var(--site-down, #a12626); }
+.trade .trade-note { font: 11px var(--site-mono, monospace); letter-spacing: 1.5px; text-transform: uppercase; color: var(--site-muted, #526675); }

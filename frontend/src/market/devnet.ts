@@ -1,23 +1,27 @@
 import { Connection, SendTransactionError, Transaction } from "@solana/web3.js";
 import type { Keypair, PublicKey, TransactionInstruction } from "@solana/web3.js";
+import { PERP } from "./types";
 import type { Fill, MarketClient, MarketSnapshot, Side } from "./types";
 import type { DevnetConfig } from "../chain/config";
 import { effectiveAbsQ, parseMarket, parsePortfolio } from "../chain/accounts";
-import { createAtaIdempotentIx } from "../chain/pda";
+import { ata, createAtaIdempotentIx } from "../chain/pda";
 import { buildClose, buildCreatePortfolio, buildDeposit, buildTrade, buildWithdraw, findPortfolio } from "../chain/tx";
 import { getWallet } from "../chain/wallet";
+import { liquidityFrom, parseMatcher } from "../chain/matcher";
 import type { Wallet } from "../chain/wallet";
 
 function atoms(value: number, name: string) {
   const rounded = Math.round(value * 1e6);
   if (!Number.isFinite(value) || value <= 0 || !Number.isSafeInteger(rounded) || rounded <= 0) {
-    throw new Error(`${name} must be positive and representable in millionths`);
+    throw new Error(`Enter ${name} above zero, with at most 6 decimals.`);
   }
   return BigInt(rounded);
 }
 
 export class DevnetMarketClient implements MarketClient {
   readonly tradingReady: boolean;
+  /** The engine's funding is not read; the snapshot's funding fields are placeholders. */
+  private matcherReadAt = 0;
   private conn: Connection;
   private wallet?: Wallet;
   private portfolio?: PublicKey;
@@ -25,7 +29,7 @@ export class DevnetMarketClient implements MarketClient {
   private timer?: ReturnType<typeof setTimeout>;
   private disposed = false;
   private snapshot: MarketSnapshot = {
-    market: { symbol: "SOL-PERP", collateral: "USDC", maxLeverage: 1, maintenanceMarginRatio: 0 },
+    market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 1, maintenanceMarginRatio: 0 },
     mark: { price: NaN, ts: Date.now() },
     funding: { rate: 0, nextFundingTs: Date.now() },
     portfolio: {
@@ -48,7 +52,19 @@ export class DevnetMarketClient implements MarketClient {
     return () => { this.listeners.delete(listener); };
   };
 
+  private async readMatcher() {
+    if (!this.cfg.matcherContext || Date.now() - this.matcherReadAt < 10_000) return;
+    this.matcherReadAt = Date.now();
+    try {
+      const [account, slot] = await Promise.all([this.conn.getAccountInfo(this.cfg.matcherContext), this.conn.getSlot("confirmed").catch(() => undefined)]);
+      if (!account || this.disposed) return;
+      this.snapshot = { ...this.snapshot, liquidity: liquidityFrom(parseMatcher(account.data), slot) };
+      for (const listener of this.listeners) listener(this.snapshot);
+    } catch { /* keep the last read; the Quotes panel says when it has none */ }
+  }
+
   private async poll() {
+    void this.readMatcher();
     try { await this.refresh(); } catch {}
     finally {
       if (!this.disposed) this.timer = setTimeout(() => { void this.poll(); }, 2000);
@@ -67,6 +83,7 @@ export class DevnetMarketClient implements MarketClient {
     // The engine counts only realizable positive PnL (v16.rs:12353-12378).
     const collateral = pf ? Number(pf.capital + (pf.pnl < 0n ? pf.pnl : 0n)) / 1e6 : 0;
     const mmRatio = Number(market.maintenanceMarginBps) / 10000;
+    const imBps = Number(market.initialMarginBps);
     // Engine health (floors, lag penalty, v16.rs:4095-4139) is not reproduced client-side.
     const maintenanceMargin = size ? NaN : 0;
     const initialMarginUsed = size ? NaN : 0;
@@ -74,7 +91,9 @@ export class DevnetMarketClient implements MarketClient {
     if (this.disposed) return;
     const now = Date.now();
     this.snapshot = {
-      market: { symbol: "SOL-PERP", collateral: "USDC", maxLeverage: 10000 / Number(market.initialMarginBps), maintenanceMarginRatio: mmRatio },
+      market: { symbol: PERP.name, collateral: "USDC", maxLeverage: imBps > 0 ? 10000 / imBps : NaN, initialMarginRatio: imBps > 0 ? imBps / 10000 : NaN, maintenanceMarginRatio: mmRatio,
+        // The fee buildTrade sends: 12 bps, floored at the market's own base fee (chain/tx.ts).
+        feeBps: Math.max(12, Number(market.config.tradeFeeBaseBps)) },
       mark: { price, ts: now }, funding: { rate: 0, nextFundingTs: now },
       portfolio: {
         owner: this.wallet?.publicKey.toBase58() ?? null, collateral, realizedPnl: NaN,
@@ -85,6 +104,7 @@ export class DevnetMarketClient implements MarketClient {
         },
       },
       fills: this.snapshot.fills,
+      liquidity: this.snapshot.liquidity ?? null,
     };
     for (const listener of this.listeners) listener(this.snapshot);
   }
@@ -99,12 +119,12 @@ export class DevnetMarketClient implements MarketClient {
   }
 
   private connected() {
-    if (!this.wallet) throw new Error("connect wallet first");
+    if (!this.wallet) throw new Error("Connect a wallet first.");
     return this.wallet;
   }
 
   private requirePortfolio() {
-    if (!this.portfolio) throw new Error("deposit collateral first");
+    if (!this.portfolio) throw new Error("Deposit test USDC first.");
     return this.portfolio;
   }
 
@@ -132,15 +152,33 @@ export class DevnetMarketClient implements MarketClient {
     }
     onConfirmed?.();
     if (fill) this.snapshot = { ...this.snapshot, fills: [
-      { ...fill, id: signature, price, ts: Date.now(), mine: true }, ...this.snapshot.fills,
+      { ...fill, id: signature, price, ts: Date.now(), mine: true, wallet: this.snapshot.portfolio.owner ?? undefined }, ...this.snapshot.fills,
     ].slice(0, 20) };
     await this.refresh().catch(() => {});
     return signature;
   }
 
+  async walletBalances() {
+    const wallet = this.connected();
+    const [lamports, token] = await Promise.all([
+      this.conn.getBalance(wallet.publicKey, "confirmed"),
+      this.conn.getTokenAccountBalance(ata(wallet.publicKey, this.cfg.mint), "confirmed").then(r => Number(r.value.amount) / 1e6, () => null),
+    ]);
+    return { sol: lamports / 1e9, usdc: token };
+  }
+
+  async createTokenAccount() {
+    const wallet = this.connected();
+    await this.send([createAtaIdempotentIx(wallet.publicKey, wallet.publicKey, this.cfg.mint)]);
+  }
+
   async deposit(usd: number) {
     const wallet = this.connected();
-    const amount = atoms(usd, "amount");
+    const amount = atoms(usd, "an amount");
+    // Say plainly when the wallet has no test USDC, before the wallet is asked to sign a transfer that would fail.
+    const held = await this.conn.getTokenAccountBalance(ata(wallet.publicKey, this.cfg.mint), "confirmed").then(r => BigInt(r.value.amount), () => null);
+    if (held === null || held === 0n) throw new Error("You have no test USDC yet: get some from the faucet.");
+    if (held < amount) throw new Error(`You have ${(Number(held) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 6 })} test USDC: deposit that much or less.`);
     if (!this.portfolio) {
       const created = await buildCreatePortfolio(this.cfg, wallet.publicKey);
       await this.send(created.ixs, [created.portfolio], undefined, () => { this.portfolio = created.portfolio.publicKey; });
@@ -151,13 +189,13 @@ export class DevnetMarketClient implements MarketClient {
 
   async withdraw(usd: number) {
     const wallet = this.connected();
-    const amount = atoms(usd, "amount");
+    const amount = atoms(usd, "an amount");
     const ixs = await buildWithdraw(this.conn, this.cfg, wallet.publicKey, this.requirePortfolio(), amount);
     await this.send([createAtaIdempotentIx(wallet.publicKey, wallet.publicKey, this.cfg.mint), ...ixs]);
   }
 
   private limit(side: Side) {
-    return atoms(this.snapshot.mark.price * (side === "long" ? 1.005 : 0.995), "limit price");
+    return atoms(this.snapshot.mark.price * (side === "long" ? 1.005 : 0.995), "a limit price");
   }
 
   private async trade(sizeQ: bigint) {
@@ -170,7 +208,7 @@ export class DevnetMarketClient implements MarketClient {
   async openPosition(side: Side, size: number, leverage: number) {
     this.connected();
     if (side !== "long" && side !== "short") throw new Error("invalid side");
-    const q = atoms(size, "size");
+    const q = atoms(size, "a size");
     await this.refresh();
     const max = this.snapshot.market.maxLeverage;
     if (!Number.isFinite(leverage) || leverage < 1 || leverage > max) throw new Error(`leverage must be between 1 and ${max}`);

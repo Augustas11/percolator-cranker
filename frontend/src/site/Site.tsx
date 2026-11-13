@@ -2,17 +2,24 @@ import { useEffect, useState } from "react";
 import App from "../App";
 import type { MarketClient } from "../market/types";
 import type { IndexerClient } from "../indexer/client";
+import type { ComputeFeedClient } from "../compute/client";
 import Home from "../pages/Home";
-import Tools from "../pages/Tools";
 import Arena from "../pages/Arena";
-import Build from "../pages/Build";
+import Agents from "../pages/Agents";
+import Compute from "../pages/Compute";
+import Docs from "../pages/Docs";
+import Challenge from "../pages/Challenge";
+import type { BoardLoader } from "../challenge/board";
+import { applyMeta, notFoundMeta, pageMeta } from "./meta";
 import Nav from "./Nav";
 import Footer from "./Footer";
+import PageBoundary from "./PageBoundary";
 import { site } from "./config";
+import { PERP } from "../market/types";
 import { Link, usePath } from "./router";
 import "./site.css";
 
-export default function Site({ client, indexer, indexerBase = null }: { client: MarketClient; indexer: IndexerClient | null; indexerBase?: string | null }) {
+export default function Site({ client, indexer, indexerBase = null, computeFeed = null, challengeBoard = null }: { client: MarketClient; indexer: IndexerClient | null; indexerBase?: string | null; computeFeed?: ComputeFeedClient | null; challengeBoard?: BoardLoader | null }) {
   const path = usePath();
   const side = path === site.paths.trade ? new URLSearchParams(window.location.search).get("side") : null;
   const requestedSide = side === "long" || side === "short" ? side : undefined;
@@ -31,14 +38,25 @@ export default function Site({ client, indexer, indexerBase = null }: { client: 
   }, []);
   const [tradeMounted, setTradeMounted] = useState(path === site.paths.trade);
   useEffect(() => { if (path === site.paths.trade) setTradeMounted(true); }, [path]);
-  const titles: Record<string, string> = { [site.paths.home]: "drip", [site.paths.tools]: "Tools · drip", [site.paths.arena]: "Arena · drip", [site.paths.build]: "Build · drip", [site.paths.trade]: "Trade · drip" };
-  const title = titles[path] ?? "Page not found · drip";
-  useEffect(() => { document.title = title; }, [title]);
-  const page = path === site.paths.home ? <Home client={client} indexer={indexer} indexerBase={indexerBase} />
-    : path === site.paths.tools ? <Tools />
-    : path === site.paths.arena ? <Arena indexerBase={indexerBase} />
-    : path === site.paths.build ? <Build />
-    : <><h1>Page not found</h1><Link to={site.paths.home}>drip</Link></>;
+  const challenge = site.challenge.enabled;
+  // Old paths keep working: Tools and Build are now /agents; the swarm names are the challenge (only while it is on).
+  const redirect = path === site.paths.tools || path === site.paths.build ? site.paths.agents
+    : challenge && (path === "/swarm" || path === "/swarm-markets") ? site.paths.challenge : null;
+  useEffect(() => {
+    if (!redirect) return;
+    window.history.replaceState({}, "", redirect + window.location.hash);
+    window.dispatchEvent(new Event("site:navigate"));
+  }, [redirect]);
+  const known = path !== site.paths.challenge || challenge;
+  const meta = (known && pageMeta[path]) || notFoundMeta;
+  useEffect(() => { applyMeta(meta); }, [meta]);
+  const page = path === site.paths.home ? <Home client={client} indexer={indexer} indexerBase={indexerBase} computeFeed={computeFeed} />
+    : path === site.paths.agents || path === site.paths.tools || path === site.paths.build ? <Agents feed={computeFeed} />
+    : path === site.paths.arena ? <Arena indexer={indexer} />
+    : path === site.paths.compute ? <Compute feed={computeFeed} />
+    : path === site.paths.docs ? <Docs feed={computeFeed} />
+    : challenge && path === site.paths.challenge ? <Challenge feed={computeFeed} board={challengeBoard} />
+    : <div className="not-found"><h1>Page not found</h1><p>This page does not exist.</p><div className="hero-actions"><Link className="button-link" to={site.paths.compute}>Compute index</Link><Link className="button-link outline" to={site.paths.trade}>Trade {PERP.name}</Link></div></div>;
 
   return <div className="site">
     <div className="site-decoration" aria-hidden="true">
@@ -46,8 +64,8 @@ export default function Site({ client, indexer, indexerBase = null }: { client: 
       <img className="site-watermark" src="/brand/d-mark.svg" alt="" />
     </div>
     <Nav />
-    {tradeMounted && <div hidden={path !== site.paths.trade}><App client={client} indexer={indexer} requestedSide={requestedSide} sideRequest={sideRequest} /></div>}
-    {path !== site.paths.trade && <main className={path === site.paths.home ? "site-home" : "site-page"}>{page}</main>}
+    {tradeMounted && <div hidden={path !== site.paths.trade}><PageBoundary path={site.paths.trade}><App client={client} indexer={indexer} computeFeed={computeFeed} requestedSide={requestedSide} sideRequest={sideRequest} /></PageBoundary></div>}
+    {path !== site.paths.trade && <main className={path === site.paths.home ? "site-home" : "site-page"}><PageBoundary path={path}>{page}</PageBoundary></main>}
     <Footer />
   </div>;
 }
