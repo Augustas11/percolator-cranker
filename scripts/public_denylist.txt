@@ -65,3 +65,12 @@ REPLAY_DATA
 # hedger (hedger/): private by owner decision
 percolator-hedger
 percolator_hedger
+# drip-markets export (2026-11-13): private repos, the bot server, host paths
+percolator-cranker
+flop-markets
+flop-watch
+159.223.165.194
+Pearl
+/opt/drip
+hedger/src
+launch_market

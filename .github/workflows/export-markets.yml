@@ -1,0 +1,62 @@
+# The drip-markets public export (scripts/export_public.py --profile
+# drip-markets): exporter tests, the export with its leak helper, then a build
+# and test of what is cheap in the exported tree (the price rule crate and the
+# Node packages). The Solana crates are built and tested by ci.yml here; the
+# exported tree's own CI builds them after scripts/fetch_upstream.sh.
+# Runs on every change: a new unlisted file under an exported directory fails
+# the export, and that should show up on the change that added it.
+# Kept out of ci.yml, which the drip profile exports.
+name: export-markets
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: export-markets-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  export:
+    name: drip-markets export + leak helper + exported build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/mkt-target
+          key: export-markets-${{ runner.os }}-${{ hashFiles('flop-index/Cargo.lock') }}
+          restore-keys: export-markets-${{ runner.os }}-
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g npm@11.6.2
+      - name: exporter + leak-helper tests
+        run: python3 scripts/test_check_public_tree.py
+      - name: export (draft) + leak helper
+        run: ./scripts/export_public.sh --profile drip-markets "$RUNNER_TEMP/mkt"
+      - name: price rule, scorer and feed (exported tree)
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mkt-target
+        run: cargo test --release --locked --manifest-path "$RUNNER_TEMP/mkt/flop-index/Cargo.toml"
+      - name: site, faucet, MCP, agents (exported tree)
+        run: |
+          for d in frontend faucet mcp agents; do
+            echo "::group::$d"
+            (cd "$RUNNER_TEMP/mkt/$d" && npm ci --no-audit --no-fund && npm test && npm run build)
+            echo "::endgroup::"
+          done

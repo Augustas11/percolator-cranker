@@ -9,8 +9,13 @@
   refused; a failed export leaves nothing behind.
 * Leak helper (check_public_tree.sh): a plain pattern check. One hit per
   pattern, and a clean tree passes. Bypasses are out of scope by design.
+* Profiles: --profile drip-markets reads its own manifest; dir: entries
+  expand committed files and refuse excluded or denylisted ones; skip:,
+  allow-phrase:, anchored and cut rewrites, placeholder substitution and
+  kept placeholders.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -123,6 +128,61 @@ class Helper(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         rc, _ = run_helper(os.path.join(self.root, "missing"))
         self.assertEqual(rc, 2)
+
+    def test_ipv4_only_with_flag(self):
+        self.put("vercel.json", '{"destination": "http://203.' + '45.67.89:8091/"}\n')
+        rc, out = run_helper(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertHit("ipv4 literal", "--ipv4")
+        self.fresh()
+        self.put("ok.rs", "127.0.0.1:8090 10.1.2.3 192.168.1.1 172.20.0.1 0.0.0.0 "
+                          "192.0.2.7 before=01.111.0.0 v1.2.3 999.1.1.1\n")
+        rc, out = run_helper(self.root, "--ipv4")
+        self.assertEqual(rc, 0, out)
+        # Each address is judged alone: a private one next to it hides nothing.
+        self.put("hosts.txt", "10.0.0.1,198." + "18.4.4 and 127.0.0.1 end 198." + "18.9.9.\n")
+        rc, out = run_helper(self.root, "--ipv4")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("198." + "18.4.4 in", out)
+        self.assertIn("198." + "18.9.9 in", out)
+
+    def test_keep_placeholder(self):
+        self.put("vercel.json", "http://@DEPLOY" + "_HOST@:8091\n")
+        self.assertHit("unreplaced placeholder")
+        rc, out = run_helper(self.root, "--keep-placeholder", "DEPLOY_HOST")
+        self.assertEqual(rc, 0, out)
+        self.put("SECURITY.md", "contact @SECURITY" + "_CONTACT@\n")  # others still fail
+        self.assertHit("unreplaced placeholder", "--keep-placeholder", "DEPLOY_HOST")
+        rc, _ = run_helper(self.root, "--keep-placeholder", "bad name")
+        self.assertEqual(rc, 2)
+
+    def test_allow_phrase(self):
+        deny = os.path.join(self.root, "..", os.path.basename(self.root) + "-deny.txt")
+        with open(deny, "w") as f:
+            f.write("Claude\n")
+        try:
+            self.put("Home.tsx", 'one line in Claude Code: "claude mcp add drip"\n')
+            rc, out = run_helper(self.root, deny=deny)
+            self.assertEqual(rc, 1, out)
+            rc, out = run_helper(self.root, "--allow-phrase", "Claude Code",
+                                 "--allow-phrase", "claude mcp add", deny=deny)
+            self.assertEqual(rc, 0, out)
+            self.put("notes.md", "asked Claude about it\n")  # the bare word still hits
+            rc, out = run_helper(self.root, "--allow-phrase", "Claude Code",
+                                 "--allow-phrase", "claude mcp add", deny=deny)
+            self.assertEqual(rc, 1, out)
+            self.assertIn("notes.md", out)
+            os.remove(os.path.join(self.root, "notes.md"))
+            with open(deny, "a") as f:
+                f.write("Codex\n")
+            self.put("x.md", "built with Claude Codex\n")  # the phrase must be a whole word
+            rc, out = run_helper(self.root, "--allow-phrase", "Claude Code", deny=deny)
+            self.assertEqual(rc, 1, out)
+            self.assertIn("x.md", out)
+            rc, _ = run_helper(self.root, "--allow-phrase", "a.b", deny=deny)
+            self.assertEqual(rc, 2)
+        finally:
+            os.remove(deny)
 
     def test_helper_passes_on_its_own_source(self):
         shutil.copy(HELPER, os.path.join(self.root, "check_public_tree.sh"))
@@ -265,6 +325,216 @@ class Exporter(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("injected", p.stderr)
+        self.assertEqual(self.leftovers(), [])
+
+
+# Runs the exporter with one profile's settings patched (JSON on argv), so a
+# throwaway repo needs none of the real profile's rewrite anchors.
+DRIVER = (
+    "import json, sys, runpy\n"
+    "script, dest, prof, patch = sys.argv[1:5]\n"
+    "g = runpy.run_path(script, run_name='export_public')\n"
+    "p = g['PROFILES'][prof]\n"
+    "for k, v in json.loads(patch).items():\n"
+    "    if k == 'rewrites':\n"
+    "        v = [(r, tuple(a) if isinstance(a, list) else a, b) for r, a, b in v]\n"
+    "    p[k] = v\n"
+    "sys.exit(g['main'](['--profile', prof, dest]))\n")
+
+
+class MarketsProfile(unittest.TestCase):
+    """drip-markets: own manifest, dir:/skip:/allow-phrase: lines, rewrites, subs."""
+
+    # The throwaway-repo helpers, without re-running Exporter's tests.
+    setUp, tearDown, write, commit = Exporter.setUp, Exporter.tearDown, Exporter.write, Exporter.commit
+    leftovers, exported, export = Exporter.leftovers, Exporter.exported, Exporter.export
+
+    def commit_markets(self, manifest, deny=""):
+        self.write("scripts/public_manifest.drip-markets.txt", manifest)
+        self.write("scripts/public_denylist.txt", deny)
+        self.commit("")
+
+    def export_markets(self, env=None, **patch):
+        patch.setdefault("rewrites", [])
+        patch.setdefault("subs", {})
+        patch.setdefault("keep", [])
+        p = subprocess.run([sys.executable, "-I", "-c", DRIVER,
+                            os.path.join(self.repo, "scripts", "export_public.py"), self.dest,
+                            "drip-markets", json.dumps(patch)],
+                           capture_output=True, text=True, env={**os.environ, **(env or {})})
+        return p.returncode, p.stdout + p.stderr
+
+    def read(self, rel):
+        with open(os.path.join(self.dest, rel)) as fh:
+            return fh.read()
+
+    def test_profile_selects_its_manifest(self):
+        self.write("c.md", "markets\n")
+        self.commit_markets("c.md README.md\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.exported(), ["README.md"])
+        self.assertEqual(self.read("README.md"), "markets\n")
+
+    def test_unknown_profile_is_usage_error(self):
+        self.commit("a.md README.md\n")
+        p = subprocess.run([sys.executable, "-I", os.path.join(self.repo, "scripts", "export_public.py"),
+                            "--profile", "nope", self.dest], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_dir_entry_expands_committed_files_only(self):
+        self.write("frontend/index.html", "<p>site</p>\n")
+        self.write("frontend/src/app.ts", "export {}\n")
+        self.write("frontend/.gitignore", "dist\n")
+        self.write("frontend/.env.example", "VITE_X=1\n")
+        self.commit_markets("dir: frontend web\nfrontend/.env.example web/env.example\n")
+        self.write("frontend/src/uncommitted.ts", "x\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.exported(), ["web/.gitignore", "web/env.example", "web/index.html",
+                                           "web/src/app.ts"])
+
+    def test_checked_dir_must_be_fully_enumerated(self):
+        self.write("agents/a.ts", "x\n")
+        self.write("agents/b.ts", "x\n")
+        self.commit_markets("agents/a.ts agents/a.ts\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("agents/b.ts", out)
+        self.assertEqual(self.leftovers(), [])
+        self.commit_markets("agents/a.ts agents/a.ts\nskip: agents/b.ts\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.exported(), ["agents/a.ts"])
+
+    def test_dir_entry_refuses_excluded_files_unless_skipped(self):
+        cases = {
+            "frontend/.env.production": "excluded name",
+            "frontend/node_modules/x.js": "excluded directory",
+            "frontend/dist/x.js": "excluded directory",
+            "frontend/.vercel/project.json": "excluded directory",
+            "frontend/keys/lp.json": "excluded directory",
+            "frontend/idx.sqlite-wal": "excluded name",
+            "frontend/deploy-keypair.json": "excluded name",
+            "frontend/big.bin": "*.bin over",
+            "frontend/state.db": "excluded name",
+            "frontend/client_secret.json": "excluded name",
+            "frontend/credentials.txt": "excluded name",
+        }
+        for path, why in cases.items():
+            with self.subTest(path=path):
+                self.tearDown()
+                self.setUp()
+                self.write("frontend/ok.ts", "x\n")
+                self.write(path, "0" * (70 * 1024) if path.endswith(".bin") else "x\n")
+                self.commit_markets("dir: frontend frontend\n")
+                rc, out = self.export_markets()
+                self.assertEqual(rc, 1, out)
+                self.assertIn(why, out)
+                self.assertEqual(self.leftovers(), [])
+                self.commit_markets(f"dir: frontend frontend\nskip: {path}\n")
+                rc, out = self.export_markets()
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(self.exported(), ["frontend/ok.ts"])
+
+    def test_dockerignore_destination_only_in_markets(self):
+        self.write("di", "target/\n")
+        self.commit_markets("di .dockerignore\n")
+        self.write("scripts/public_manifest.txt", "di .dockerignore\ndep.toml crates/cranker/Cargo.toml\n"
+                   "dep.toml crates/bringup/Cargo.toml\n")
+        g = ["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@t.invalid"]
+        subprocess.run(g + ["commit", "-qam", "drip manifest"], check=True)
+        rc, out = self.export()  # drip: refused as before
+        self.assertEqual(rc, 1, out)
+        self.assertIn("dot component", out)
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.exported(), [".dockerignore"])
+
+    def test_rewrites_keep_crlf(self):
+        with open(os.path.join(self.repo, "w.md"), "wb") as fh:
+            fh.write(b"one\r\ntwo repo-x\r\n")
+        self.commit_markets("w.md W.md\n")
+        rc, out = self.export_markets(rewrites=[["W.md", "repo-x", "upstream/x"]])
+        self.assertEqual(rc, 0, out)
+        with open(os.path.join(self.dest, "W.md"), "rb") as fh:
+            self.assertEqual(fh.read(), b"one\r\ntwo upstream/x\r\n")
+
+    def test_dir_entry_refuses_denylisted_name(self):
+        self.write(f"frontend/{OWNER}-notes.md", "x\n")
+        self.commit_markets("dir: frontend frontend\n", deny=OWNER + "\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("denylisted name", out)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_skip_must_name_a_committed_file_and_not_an_exported_one(self):
+        self.commit_markets("a.md README.md\nskip: frontend/gone.ts\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("not a committed file", out)
+        self.write("frontend/x.ts", "x\n")
+        self.commit_markets("frontend/x.ts frontend/x.ts\nskip: frontend/x.ts\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("both exports and skips", out)
+
+    def test_rewrites_global_cut_and_stale_anchor(self):
+        self.write("a.md", "keep\n# BEGIN private\nsecret block\n# END\nrepo-x here\n")
+        self.write("b.md", "repo-x there\n")
+        self.commit_markets("a.md docs/A.md\nb.md docs/B.md\n")
+        rw = [["docs/A.md", ["# BEGIN private", "# END"], ""], ["*", "repo-x", "upstream/x"]]
+        rc, out = self.export_markets(rewrites=rw)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.read("docs/A.md"), "keep\n# END\nupstream/x here\n")
+        self.assertEqual(self.read("docs/B.md"), "upstream/x there\n")
+        for bad in ([["*", "not anywhere", "y"]], [["docs/A.md", "absent", "y"]],
+                    [["docs/A.md", ["# END", "# BEGIN private"], ""]],
+                    [["docs/A.md", ["missing", None], ""]], [["docs/NONE.md", "x", "y"]]):
+            with self.subTest(bad=bad):
+                shutil.rmtree(self.dest, ignore_errors=True)
+                rc, out = self.export_markets(rewrites=bad)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("rewrite", out)
+                self.assertEqual(self.leftovers(), [])
+
+    def test_placeholder_substitution_and_kept_placeholder(self):
+        self.write("r.md", "# @PUBLIC_" + "NAME@\nsite @SITE" + "_URL@\n")
+        self.write("v.json", '{"d": "http://@DEPLOY' + '_HOST@:8091"}\n')
+        self.commit_markets("r.md README.md\nv.json frontend/vercel.json\n")
+        subs = {"@SITE" + "_URL@": "https://site.example"}
+        env = {"SECURITY_CONTACT": "https://sec.example/report"}  # not a draft: placeholders gated
+        rc, out = self.export_markets(env=env, subs=subs)
+        self.assertEqual(rc, 1, out)  # @DEPLOY_HOST@ is not kept
+        self.assertIn("unreplaced placeholder", out)
+        rc, out = self.export_markets(env=env, subs=subs, keep=["DEPLOY_HOST"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.read("README.md"), "# drip-markets\nsite https://site.example\n")
+        self.assertIn("@DEPLOY" + "_HOST@", self.read("frontend/vercel.json"))
+
+    def test_denylist_hit_fails_and_allow_phrase(self):
+        self.write("h.tsx", "one line in Claude Code\n")
+        self.commit_markets("h.tsx frontend/h.tsx\n", deny="claude\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("denylisted", out)
+        self.assertEqual(self.leftovers(), [])
+        self.commit_markets("allow-phrase: Claude Code\nh.tsx frontend/h.tsx\n", deny="claude\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 0, out)
+        shutil.rmtree(self.dest)
+        self.commit_markets("allow-phrase: bad.phrase\nh.tsx frontend/h.tsx\n", deny="claude\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("bad allow-phrase", out)
+
+    def test_markets_export_checks_ipv4(self):
+        self.write("v.json", '{"d": "http://198.' + '18.7.9:8091"}\n')
+        self.commit_markets("v.json frontend/vercel.json\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("ipv4 literal", out)
         self.assertEqual(self.leftovers(), [])
 
 

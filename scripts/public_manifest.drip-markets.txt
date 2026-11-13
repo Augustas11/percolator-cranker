@@ -1,0 +1,209 @@
+# drip-markets export manifest (scripts/export_public.py --profile drip-markets).
+# <private path> <public path>, `dir:`, `skip:` and `allow-phrase:` lines; see
+# the exporter's docstring. Exported from the COMMITTED tree (HEAD) only. Every
+# file committed under the profile's checked directories (MARKETS_SCANNED:
+# agents client cranker deploy docs/flop-compute faucet flop-index frontend
+# indexer launch matcher mcp public-markets staging) must appear here as a
+# file, under a dir: entry, or as a skip:. Layout: the private one, with the
+# pinned wrapper fetched into upstream/percolator-prog (scripts/fetch_upstream.sh).
+
+# The site names MCP clients by product name; "Claude" alone stays denylisted.
+allow-phrase: Claude Code
+allow-phrase: claude mcp add
+
+# --- public skeleton (public-markets/) ---
+public-markets/.dockerignore .dockerignore
+public-markets/.github/ISSUE_TEMPLATE/propose-price-rule.md .github/ISSUE_TEMPLATE/propose-price-rule.md
+public-markets/.github/ISSUE_TEMPLATE/report-bad-price.md .github/ISSUE_TEMPLATE/report-bad-price.md
+public-markets/.github/workflows/ci.yml .github/workflows/ci.yml
+public-markets/.gitignore .gitignore
+public-markets/CONTRIBUTING.md CONTRIBUTING.md
+public-markets/LICENSE LICENSE
+public-markets/NOTICE NOTICE
+public-markets/README.md README.md
+public-markets/SECURITY.md SECURITY.md
+public-markets/client/README.md client/README.md
+public-markets/cranker/README.md cranker/README.md
+public-markets/docs/RUNBOOK.md docs/RUNBOOK.md
+public-markets/scripts/env.sh scripts/env.sh
+
+# --- price rule, scorer, feed ---
+docs/flop-compute/FEED.md docs/flop-compute/FEED.md
+docs/flop-compute/INDEX.md docs/flop-compute/INDEX.md
+docs/flop-compute/SCORER.md docs/flop-compute/SCORER.md
+docs/flop-compute/SPEC.md docs/flop-compute/SPEC.md
+flop-index/Cargo.lock flop-index/Cargo.lock
+flop-index/Cargo.toml flop-index/Cargo.toml
+flop-index/pins/2026-11-11/MANIFEST flop-index/pins/2026-11-11/MANIFEST
+flop-index/pins/2026-11-11/SOURCES flop-index/pins/2026-11-11/SOURCES
+flop-index/pins/fetch.sh flop-index/pins/fetch.sh
+flop-index/src/bin/flop-feed.rs flop-index/src/bin/flop-feed.rs
+flop-index/src/bin/flop-score.rs flop-index/src/bin/flop-score.rs
+flop-index/src/feed.rs flop-index/src/feed.rs
+flop-index/src/lib.rs flop-index/src/lib.rs
+flop-index/src/score/candidates.rs flop-index/src/score/candidates.rs
+flop-index/src/score/data.rs flop-index/src/score/data.rs
+flop-index/src/score/mod.rs flop-index/src/score/mod.rs
+flop-index/src/score/rules.rs flop-index/src/score/rules.rs
+flop-index/src/score/tests.rs flop-index/src/score/tests.rs
+flop-index/src/wide.rs flop-index/src/wide.rs
+flop-index/tests/fixtures/wide/mistralai__mistral-small-2603/2026-11-13.jsonl flop-index/tests/fixtures/wide/mistralai__mistral-small-2603/2026-11-13.jsonl
+flop-index/tests/fixtures/wide/qwen__qwen3-14b/2026-11-13.jsonl flop-index/tests/fixtures/wide/qwen__qwen3-14b/2026-11-13.jsonl
+flop-index/tests/fixtures/wide/qwen__qwen3.8-27b/2026-11-13.jsonl flop-index/tests/fixtures/wide/qwen__qwen3.8-27b/2026-11-13.jsonl
+skip: docs/flop-compute/PREMISE.md   # owner premise: private
+
+# --- bots: mark pusher, OpenRouter recorder, launch steps, verify-push-log ---
+launch/flop-compute.toml launch/flop-compute.toml
+launch/sol-perp.toml launch/sol-perp.toml
+staging/Cargo.lock staging/Cargo.lock
+staging/Cargo.toml staging/Cargo.toml
+staging/src/launch.rs staging/src/launch.rs
+staging/src/main.rs staging/src/main.rs
+staging/src/pusher.rs staging/src/pusher.rs
+staging/src/pusher/exchanges.rs staging/src/pusher/exchanges.rs
+staging/src/pusher/fixtures/binance.json staging/src/pusher/fixtures/binance.json
+staging/src/pusher/fixtures/binance_ticker.json staging/src/pusher/fixtures/binance_ticker.json
+staging/src/pusher/fixtures/coinbase_l2_snapshot.json staging/src/pusher/fixtures/coinbase_l2_snapshot.json
+staging/src/pusher/fixtures/coinbase_l2update.json staging/src/pusher/fixtures/coinbase_l2update.json
+staging/src/pusher/fixtures/kraken_ticker.json staging/src/pusher/fixtures/kraken_ticker.json
+staging/src/pusher/flop.rs staging/src/pusher/flop.rs
+staging/src/pusher/or_record.rs staging/src/pusher/or_record.rs
+
+# --- keeper + bring-up client (READMEs from public-markets/) ---
+client/Cargo.lock client/Cargo.lock
+client/Cargo.toml client/Cargo.toml
+client/build.rs client/build.rs
+client/src/bin/ts_fixtures.rs client/src/bin/ts_fixtures.rs
+client/src/main.rs client/src/main.rs
+client/src/plan_gate.rs client/src/plan_gate.rs
+cranker/Cargo.lock cranker/Cargo.lock
+cranker/Cargo.toml cranker/Cargo.toml
+cranker/build.rs cranker/build.rs
+cranker/src/binding.rs cranker/src/binding.rs
+cranker/src/cycle.rs cranker/src/cycle.rs
+cranker/src/discovery.rs cranker/src/discovery.rs
+cranker/src/lib.rs cranker/src/lib.rs
+cranker/src/main.rs cranker/src/main.rs
+cranker/src/observation.rs cranker/src/observation.rs
+cranker/src/plan_gate.rs cranker/src/plan_gate.rs
+cranker/src/quarantine.rs cranker/src/quarantine.rs
+cranker/src/resolved.rs cranker/src/resolved.rs
+cranker/src/scheduler.rs cranker/src/scheduler.rs
+cranker/src/setup.rs cranker/src/setup.rs
+cranker/src/submit.rs cranker/src/submit.rs
+cranker/src/work.rs cranker/src/work.rs
+cranker/tests/common/mod.rs cranker/tests/common/mod.rs
+cranker/tests/cycle_resolved.rs cranker/tests/cycle_resolved.rs
+cranker/tests/hard_reject.rs cranker/tests/hard_reject.rs
+cranker/tests/invariants.rs cranker/tests/invariants.rs
+cranker/tests/lifecycle.rs cranker/tests/lifecycle.rs
+cranker/tests/money_path.rs cranker/tests/money_path.rs
+skip: cranker/README.md              # private milestones and notes; public one below
+skip: cranker/scenario-findings.md   # private findings log
+
+# --- indexer, matcher (program + host tools), faucet, MCP, agents ---
+agents/.gitignore agents/.gitignore
+agents/Dockerfile agents/Dockerfile
+agents/README.md agents/README.md
+agents/package-lock.json agents/package-lock.json
+agents/package.json agents/package.json
+agents/src/agent.test.ts agents/src/agent.test.ts
+agents/src/agent.ts agents/src/agent.ts
+agents/src/house.test.ts agents/src/house.test.ts
+agents/src/mcp.test.ts agents/src/mcp.test.ts
+agents/src/mcp.ts agents/src/mcp.ts
+agents/src/run.test.ts agents/src/run.test.ts
+agents/src/run.ts agents/src/run.ts
+agents/src/strategies.test.ts agents/src/strategies.test.ts
+agents/src/strategies/basis.ts agents/src/strategies/basis.ts
+agents/src/strategies/breakout.ts agents/src/strategies/breakout.ts
+agents/src/strategies/hedger.ts agents/src/strategies/hedger.ts
+agents/src/strategies/index.ts agents/src/strategies/index.ts
+agents/src/strategies/meanrev.ts agents/src/strategies/meanrev.ts
+agents/src/strategies/trend.ts agents/src/strategies/trend.ts
+agents/src/strategies/types.ts agents/src/strategies/types.ts
+agents/tsconfig.json agents/tsconfig.json
+faucet/.gitignore faucet/.gitignore
+faucet/README.md faucet/README.md
+faucet/package-lock.json faucet/package-lock.json
+faucet/package.json faucet/package.json
+faucet/src/faucet.test.ts faucet/src/faucet.test.ts
+faucet/src/faucet.ts faucet/src/faucet.ts
+faucet/src/main.test.ts faucet/src/main.test.ts
+faucet/src/main.ts faucet/src/main.ts
+faucet/tsconfig.json faucet/tsconfig.json
+faucet/vitest.config.ts faucet/vitest.config.ts
+indexer/Cargo.lock indexer/Cargo.lock
+indexer/Cargo.toml indexer/Cargo.toml
+indexer/README.md indexer/README.md
+indexer/src/api.rs indexer/src/api.rs
+indexer/src/db.rs indexer/src/db.rs
+indexer/src/decode.rs indexer/src/decode.rs
+indexer/src/ingest.rs indexer/src/ingest.rs
+indexer/src/main.rs indexer/src/main.rs
+indexer/src/stats.rs indexer/src/stats.rs
+indexer/tests/fixtures/crank.json indexer/tests/fixtures/crank.json
+indexer/tests/fixtures/crank_trade.json indexer/tests/fixtures/crank_trade.json
+indexer/tests/fixtures/deposit.json indexer/tests/fixtures/deposit.json
+indexer/tests/fixtures/init_portfolio.json indexer/tests/fixtures/init_portfolio.json
+indexer/tests/fixtures/push_mark.json indexer/tests/fixtures/push_mark.json
+indexer/tests/fixtures/trade_cpi_close.json indexer/tests/fixtures/trade_cpi_close.json
+indexer/tests/fixtures/trade_cpi_open.json indexer/tests/fixtures/trade_cpi_open.json
+matcher/.gitignore matcher/.gitignore
+matcher/LICENSE matcher/LICENSE
+matcher/README.md matcher/README.md
+matcher/host/Cargo.lock matcher/host/Cargo.lock
+matcher/host/Cargo.toml matcher/host/Cargo.toml
+matcher/host/src/bin/matcher_ops.rs matcher/host/src/bin/matcher_ops.rs
+matcher/host/src/lib.rs matcher/host/src/lib.rs
+matcher/host/tests/litesvm.rs matcher/host/tests/litesvm.rs
+matcher/program/Cargo.lock matcher/program/Cargo.lock
+matcher/program/Cargo.toml matcher/program/Cargo.toml
+matcher/program/src/lib.rs matcher/program/src/lib.rs
+mcp/.gitignore mcp/.gitignore
+mcp/README.md mcp/README.md
+mcp/package-lock.json mcp/package-lock.json
+mcp/package.json mcp/package.json
+mcp/src/drip.test.ts mcp/src/drip.test.ts
+mcp/src/drip.ts mcp/src/drip.ts
+mcp/src/env.d.ts mcp/src/env.d.ts
+mcp/src/index.ts mcp/src/index.ts
+mcp/src/tools/claim_test_funds.ts mcp/src/tools/claim_test_funds.ts
+mcp/src/tools/close_position.ts mcp/src/tools/close_position.ts
+mcp/src/tools/deposit.ts mcp/src/tools/deposit.ts
+mcp/src/tools/get_position.ts mcp/src/tools/get_position.ts
+mcp/src/tools/index.ts mcp/src/tools/index.ts
+mcp/src/tools/leaderboard.ts mcp/src/tools/leaderboard.ts
+mcp/src/tools/market_stats.ts mcp/src/tools/market_stats.ts
+mcp/src/tools/open_position.ts mcp/src/tools/open_position.ts
+mcp/src/tools/perps_markets.ts mcp/src/tools/perps_markets.ts
+mcp/src/tools/tool.ts mcp/src/tools/tool.ts
+mcp/src/tools/trade_history.ts mcp/src/tools/trade_history.ts
+mcp/src/tools/withdraw.ts mcp/src/tools/withdraw.ts
+mcp/tsconfig.json mcp/tsconfig.json
+
+# --- site: every committed file, minus the skips; env files renamed ---
+frontend/.env.example frontend/env.example
+frontend/.env.production frontend/env.production.example
+skip: frontend/PRIOR_ART.md   # private research notes
+skip: frontend/.npmrc         # dot file; save-exact only
+skip: frontend/.vercelignore  # hosting detail
+dir: frontend frontend
+
+# --- hosting: Dockerfiles, compose, nginx (the monitor stack stays private) ---
+deploy/Dockerfile deploy/Dockerfile
+deploy/Dockerfile.faucet deploy/Dockerfile.faucet
+deploy/Dockerfile.flop-feed deploy/Dockerfile.flop-feed
+deploy/Dockerfile.indexer deploy/Dockerfile.indexer
+deploy/docker-compose.yml deploy/docker-compose.yml
+deploy/indexer-nginx.conf deploy/indexer-nginx.conf
+deploy/launch.env.example deploy/launch.env.example
+skip: deploy/alertmanager.yml                    # monitor stack (Telegram alerts)
+skip: deploy/prometheus.yml                      # monitor stack
+skip: deploy/systemd/percolator-bots.service     # operator host units
+skip: deploy/systemd/percolator-monitor.service  # operator host units
+skip: deploy/systemd/percolator-staging@.service # operator host units
+
+# --- top-level build files ---
+scripts/fetch_upstream.sh scripts/fetch_upstream.sh
+scripts/pins.env scripts/pins.env

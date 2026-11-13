@@ -1,0 +1,16 @@
+# Build contexts for deploy/: never ship keys, run dirs or build output.
+launch-runs/
+**/target/
+*.log
+frontend/*
+!frontend/src/
+frontend/src/*
+!frontend/src/chain/
+**/node_modules/
+**/dist/
+**/faucet-state.json*
+**/.env
+**/.env.*
+!**/*.env.example
+**/keys/
+*.pem
