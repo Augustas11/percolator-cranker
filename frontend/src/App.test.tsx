@@ -28,8 +28,18 @@ test("connects, deposits, opens a long, and keeps rendering after a tick", async
 
   try {
     await act(async () => { root.render(<App client={client} />); });
-    expect(container.textContent).toContain("PoC demo on devnet. Test tokens only, no real funds.");
-    expect(container.textContent).toContain("SOL-PERP");
+    expect(container.querySelector("h1")!.textContent).toBe("COMPUTE-PERP");
+    expect(container.querySelector(".trade-sub")!.textContent).toBe("USD per 1M tokens · Qwen3.8-27B · What moves this price");
+    expect(container.querySelector(".trade-sub a")!.getAttribute("href")).toBe("/compute");
+    expect(container.querySelector('[aria-labelledby="market-heading"] dd')!.textContent).toBe("$0.3036");
+    expect(container.querySelector<HTMLInputElement>("#size")!.value).toBe("100");
+    expect(container.querySelector(".trade-notional")!.textContent).toBe("$30.36 notional");
+    expect(container.querySelector("#size-help")!.textContent).toContain("up to 100 units per fill");
+    expect(Array.from(container.querySelectorAll(".trade-cases li"), li => li.textContent)).toEqual([
+      "Long hedges an inference bill: it gains when prices rise.", "Short hedges a seller's or miner's revenue: it gains when prices fall.",
+    ]);
+    expect(container.textContent!.match(/Test tokens/gi)).toHaveLength(1);
+    expect(container.textContent).not.toMatch(/SOL-PERP|\bSOL\b/);
     expect(container.textContent).toContain("No open position");
 
     await click("Connect wallet");
@@ -37,21 +47,28 @@ test("connects, deposits, opens a long, and keeps rendering after a tick", async
     await click("Deposit");
     expect(client.getSnapshot().portfolio.collateral).toBe(1000);
     await click("Long");
-    await input("size", "1");
-    await input("leverage", "5");
+    await input("size", "150");
+    expect(container.querySelector("#size-help")!.className).toContain("is-over");
+    await click("Open");
+    expect(container.querySelector(".error")!.textContent).toBe("The matcher fills up to 100 units (100 × 1M tokens) per trade. Split a larger order into several trades.");
+    expect(client.getSnapshot().portfolio.legs).toHaveLength(0);
+    await input("size", "50");
+    expect(container.querySelector(".trade-notional")!.textContent).toBe("$15.18 notional");
+    await input("leverage", "2");
     await click("Open");
 
     const position = container.querySelector('[aria-labelledby="position-heading"]')!;
     expect(position.textContent).toContain("long");
-    expect(position.textContent).toContain("1 SOL");
+    expect(position.textContent).toContain("50 × 1M tokens");
+    expect(position.textContent).toContain("Entry price$0.3036");
     expect(container.querySelector("tbody")!.textContent).toContain("you");
-    expect(client.getSnapshot().portfolio.health.initialMarginUsed).toBe(30);
+    expect(container.querySelector("tbody")!.textContent).toContain("$0.3036");
+    expect(client.getSnapshot().portfolio.health.initialMarginUsed).toBeCloseTo(7.59, 6);
     const markBefore = container.querySelector('[aria-labelledby="market-heading"] dd')!.textContent;
     await act(async () => { client.tick(); });
     expect(container.querySelector('[aria-labelledby="market-heading"] dd')!.textContent).not.toBe(markBefore);
     expect(position.textContent).toContain("long");
-    expect(position.textContent).toContain("1 SOL");
-    expect(container.querySelector(".error")!.textContent).toBe("");
+    expect(position.textContent).toContain("50 × 1M tokens");
   } finally {
     await act(async () => { root.unmount(); });
     client.dispose();
@@ -63,7 +80,7 @@ test("shows unknown prices honestly and disables trading while the matcher is pe
   const client = Object.assign(new MockMarketClient({ autoTick: false }), { tradingReady: false });
   await client.connect();
   await client.deposit(1000);
-  await client.openPosition("long", 1, 5);
+  await client.openPosition("long", 50, 2);
   const snapshot = client.getSnapshot();
   const unknown = { ...snapshot, portfolio: { ...snapshot.portfolio,
     legs: snapshot.portfolio.legs.map(leg => ({ ...leg, entryPrice: NaN, unrealizedPnl: NaN })),
@@ -74,7 +91,7 @@ test("shows unknown prices honestly and disables trading while the matcher is pe
   const root = createRoot(container);
   try {
     await act(async () => { root.render(<App client={client} />); });
-    expect(container.textContent).toContain("Trading: matcher pending");
+    expect(container.textContent).toContain("Trading is off in this build: no matcher is set for COMPUTE-PERP.");
     const health = container.querySelector('[aria-labelledby="health-heading"]')!;
     expect(Array.from(health.querySelectorAll("dd")).map(dd => dd.textContent)).toEqual(["$1,000.00", "—", "—", "—", "—", "—", "unknown"]);
     expect(health.querySelector(".badge.unknown")).not.toBeNull();

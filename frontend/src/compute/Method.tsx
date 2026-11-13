@@ -1,11 +1,11 @@
 import type { ReactNode } from "react";
 import type { ComputeLatest, ComputeMarket } from "./client";
-import { count, day } from "./format";
+import { count, day, txUrl } from "./format";
 import { site } from "../site/config";
 
 /** How the compute index and the settlement price are made. Live values where the feed is loaded, the plain rule otherwise. */
 export default function Method({ market, latest }: { market: ComputeMarket | null; latest: ComputeLatest | null }) {
-  const standin = latest !== null && latest.source !== "openrouter";
+  const fixedRate = latest !== null && latest.source !== "openrouter";
   const rows: [string, ReactNode][] = [
     ["Quote", "One seller, one model, one precision, from OpenRouter's public endpoint list."],
     ["Price", <>(15 × input + output) ÷ 16, in USD per 1M tokens.</>],
@@ -14,10 +14,10 @@ export default function Method({ market, latest }: { market: ComputeMarket | nul
     ["Reads", "The collector reads every model every 5 minutes. The feed rewrites its files every minute and carries the time of the newest read."],
     ["Index", market ? <>Geometric mean of the {count(market.index.n_models)} model medians, each against its own starting price. {market.index.base_ms === null ? "The base is set at the first read where every model has a price." : <>100 = {day(market.index.base_ms)}.</>}{market.models.length > market.index.n_models && " Models marked thin are listed but left out."}</> : "Geometric mean of the model medians, each against its own starting price. 100 = the first read."],
     ["Stale", "No new read for 30 minutes. The page shows a stale badge next to the time, and a model not read for 30 minutes shows its sellers grey."],
-    ["Settlement price", standin
-      ? <>FLOP's on-chain price ({latest?.source ?? "unknown"}), converted to USD at a fixed stand-in rate.</>
+    ["Settlement price", fixedRate
+      ? <>FLOP's on-chain price ({latest?.source ?? "unknown"}), converted to USD at a fixed rate.</>
       : <>bf16 sellers first; fewer than 2 up, fp16, then both. Weighted 1 ÷ price². With 3 or more, a quote under half the median counts as half.{latest && <> Clamp now: {latest.clamp ?? "unknown"}.</>}</>],
-    ["Check it", <>Each settlement price is a signed log line; <code>staging verify-push-log</code> recomputes it from the logged sellers.</>],
+    ["Check it", <>Each settlement price is written to Solana{latest?.sig ? <> (<a href={txUrl(latest.sig)} target="_blank" rel="noreferrer">latest transaction</a>)</> : null} and logged as a signed line with the sellers behind it.</>],
   ];
   return <section id="compute-index" className="cx-section" aria-labelledby="compute-how-heading">
     <h2 id="compute-how-heading">How the compute index is made</h2>

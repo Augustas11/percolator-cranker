@@ -25,6 +25,8 @@ export interface ComputeLatest {
     miners: number | null;
     gateway_share: number | null;
     stale: string | null;
+    /** The window the counts cover, in seconds; absent from feeds that predate the field. */
+    window_s?: number | null;
   };
 }
 
@@ -68,7 +70,7 @@ export interface MarketModel {
   /** Quotes counted in the median at their last price while the seller is offline. */
   quotes_held?: number;
   /** FLOP's compute count for the model: G_n per token, from FLOP's registry or 2 × parameters. */
-  compute?: { params: number | null; gn_per_token: number | null; source: string | null } | null;
+  compute?: { params: number | null; gn_per_token: number | null; source: string | null; basis?: string | null } | null;
   /** USD per billion G_n: the median price per 1M tokens over compute per token; min and max over its sellers. */
   usd_per_bn_gn?: number | null;
   usd_per_bn_gn_min?: number | null;

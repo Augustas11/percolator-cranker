@@ -49,7 +49,7 @@ export async function withFreshCrank(
   if (!kept.length) {
     const accounts = await conn.getMultipleAccountsInfo(readAccounts);
     return { ixs, accounts: accounts.map(account => {
-      if (!account) throw new Error("Crank account not found");
+      if (!account) throw new Error("Market refresh: account not found");
       return account.data;
     }) };
   }
@@ -60,11 +60,11 @@ export async function withFreshCrank(
     sigVerify: false, replaceRecentBlockhash: true,
     accounts: { encoding: "base64", addresses: readAccounts.map(key => key.toBase58()) },
   });
-  if (result.value.err) throw new Error(`Crank simulation failed: ${JSON.stringify(result.value.err)}`);
+  if (result.value.err) throw new Error(`Market refresh simulation failed: ${JSON.stringify(result.value.err)}`);
   const accounts = result.value.accounts;
-  if (!accounts || accounts.length !== readAccounts.length) throw new Error("Crank accounts missing");
+  if (!accounts || accounts.length !== readAccounts.length) throw new Error("Market refresh: accounts missing");
   return { ixs, accounts: accounts.map(account => {
-    if (!account) throw new Error("Crank account not found");
+    if (!account) throw new Error("Market refresh: account not found");
     return Buffer.from(account.data[0], "base64");
   }) };
 }
@@ -80,7 +80,7 @@ async function crankSet(conn: Connection, cfg: DevnetConfig, first: PublicKey[])
   if (!marketAccount) throw new Error("Market account not found");
   const positioned = await positionedPortfolios(conn, cfg.programId, parseMarket(marketAccount.data));
   const portfolios = [...new Set([...first, ...positioned].map(key => key.toBase58()))].map(key => new PublicKey(key));
-  if (portfolios.length > MAX_CRANKS) throw new Error(`${portfolios.length} portfolios need a crank; more than ${MAX_CRANKS} fit in one transaction`);
+  if (portfolios.length > MAX_CRANKS) throw new Error(`${portfolios.length} portfolios need a market refresh; more than ${MAX_CRANKS} fit in one transaction`);
   return portfolios;
 }
 
@@ -134,12 +134,15 @@ async function buildTradeIxs(
   const a = parsePortfolio(accounts[0]), b = parsePortfolio(accounts[1]);
   const market = parseMarket(accounts[2]);
   const { sizeQ, limitPrice } = order(a, market);
+  // The wrapper refuses a TradeCpi fee under the market's trade_fee_base_bps (docs/LAUNCH.md), and markets
+  // differ (12 bps on the first SOL-PERP market, 15 on COMPUTE-PERP), so never send less than the market's own.
+  const fee = feeBps < market.config.tradeFeeBaseBps ? market.config.tradeFeeBaseBps : feeBps;
   const delegate = matcherDelegate(cfg.programId, cfg.market, cfg.lpPortfolio, b.owner, cfg.matcherProgram, cfg.matcherContext);
   return [...ixs, tradeCpiIx(cfg.programId, owner, cfg.market, portfolio, cfg.lpPortfolio,
     cfg.matcherProgram, cfg.matcherContext, delegate, {
       accountAPortfolioId: a.portfolioId, accountAPositionEpoch: a.positionEpoch,
       accountBPortfolioId: b.portfolioId, accountBPositionEpoch: b.positionEpoch, accountBMatcherSequence: b.sequence,
-      assetIndex: 0, marketId: market.asset0.marketId, sizeQ, feeBps, limitPrice, backingFeeCapBps: 0,
+      assetIndex: 0, marketId: market.asset0.marketId, sizeQ, feeBps: fee, limitPrice, backingFeeCapBps: 0,
     })];
 }
 

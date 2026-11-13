@@ -8,82 +8,65 @@ import { MockIndexerClient } from "./indexer/mock";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-test("connects and renders indexed mock stats, positions and trade history", async () => {
+test("connects and renders open interest, volume and the wallet's own fills, with no operator lines", async () => {
   const client = new MockMarketClient({ autoTick: false });
   const indexer = new MockIndexerClient();
   const container = document.createElement("div");
   const root = createRoot(container);
   try {
     await act(async () => { root.render(<App client={client} indexer={indexer} />); });
-    expect(container.textContent).toContain("Connect wallet to see positions");
+    expect(container.textContent).toContain("Connect a wallet to see your fills.");
     const connect = Array.from(container.querySelectorAll("button")).find(b => b.textContent === "Connect wallet")!;
     await act(async () => { connect.click(); });
+    expect(Array.from(container.querySelectorAll('h2[id^="indexer-"]')).map(h => h.textContent)).toEqual(["COMPUTE-PERP stats", "Your fills"]);
     const stats = container.querySelector('[aria-labelledby="indexer-stats-heading"]')!;
-    expect(Array.from(container.querySelectorAll('h2[id^="indexer-"]')).map(h => h.textContent)).toEqual([
-      "Market stats (mock data, not devnet)", "Your positions (mock data, not devnet)", "Your trade history (mock data, not devnet)",
-    ]);
-    expect(stats.textContent).toContain("Cranks landed (all signers)");
-    expect(stats.textContent).toContain("Crank uptime");
-    expect(stats.textContent).toContain("Possible liquidations (heuristic)");
-    expect(stats.textContent).toContain("98%");
-    expect(stats.textContent).toContain("99.5%");
-    expect(stats.textContent).toContain("since slot 800");
-    expect(stats.textContent).toContain("long 2.5 SOL / short 2.5 SOL");
-    const positions = container.querySelector('[aria-labelledby="indexer-positions-heading"]')!;
-    expect(positions.textContent).toContain("long 1.5 SOL");
-    expect(positions.textContent).toContain("$1,000.00 USD");
-    expect(positions.textContent).toContain("stored basis, not effective. Mock data.");
+    expect(Array.from(stats.querySelectorAll("dt")).map(d => d.textContent)).toEqual(["Open interest", "Volume", "Fills", "As of"]);
+    expect(stats.textContent).toContain("long 250 / short 250 × 1M tokens");
+    expect(stats.textContent).toContain("$18,640.00");
     const history = container.querySelector('[aria-labelledby="indexer-history-heading"]')!;
-    expect(history.textContent).toContain("Latest 50 trades per current portfolio.");
-    expect(history.textContent).toContain("Mock data.");
     const rows = history.querySelectorAll("tbody tr");
     expect(rows).toHaveLength(2);
-    expect(rows[0].textContent).toContain("executed");
-    expect(rows[0].querySelectorAll("td")[2].textContent).toBe("1.5");
-    expect(rows[0].textContent).toContain("$150.00");
+    expect(Array.from(rows[0].querySelectorAll("td")).slice(1, 5).map(td => td.textContent)).toEqual(["short", "150", "$0.3036", "executed"]);
     expect(rows[1].textContent).toContain("requested");
     expect(rows[0].querySelector("a")!.href).toBe("https://explorer.solana.com/tx/mock-signature-0?cluster=devnet");
-    expect(container.textContent!.toLowerCase()).not.toContain("volume");
+    const text = container.textContent!.toLowerCase();
+    for (const word of ["crank", "uptime", "liquidation", "heuristic", "stored basis", "mock data", "portfolio:"]) expect(text).not.toContain(word);
   } finally {
     await act(async () => { root.unmount(); });
     client.dispose();
   }
 });
 
-test("polls, keeps last good data on errors, and handles unavailable and disabled stats", async () => {
+test("polls, keeps last good data on errors, and shows the unreachable state", async () => {
   vi.useFakeTimers();
   const indexer = new MockIndexerClient();
   const stats = await indexer.stats();
-  const statsCall = vi.spyOn(indexer, "stats").mockResolvedValue({
-    ...stats, as_of: null, cranks: { ...stats.cranks, success_rate: null }, uptime: { uptime_pct: null },
-  });
+  const statsCall = vi.spyOn(indexer, "stats").mockResolvedValue({ ...stats, as_of: null });
   const positionsCall = vi.spyOn(indexer, "positions");
   const fillsCall = vi.spyOn(indexer, "fills");
   const container = document.createElement("div");
   const root = createRoot(container);
   try {
     await act(async () => { root.render(<IndexerPanels indexer={indexer} owner="tester" />); });
-    expect(container.textContent).toContain("Indexer is still backfilling");
-    expect(container.textContent).toContain("not indexed yet");
-    expect(Array.from(container.querySelectorAll("dd")).map(dd => dd.textContent).slice(1, 3)).toEqual(["—", "—"]);
+    expect(container.textContent).toContain("Indexing");
     statsCall.mockRejectedValue(new Error("stats unavailable"));
     positionsCall.mockRejectedValue(new Error("positions unavailable"));
     await act(async () => { vi.advanceTimersByTime(15000); });
     expect(statsCall).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain("long 1.5 SOL");
+    expect(container.textContent).toContain("long 250 / short 250");
     expect(container.textContent).toContain("executed");
-    expect(Array.from(container.querySelectorAll('[role="status"]')).map(p => p.textContent)).toEqual([
-      "stats unavailable", "positions unavailable", "positions unavailable",
-    ]);
+    expect(Array.from(container.querySelectorAll('[role="status"]')).map(p => p.textContent)).toEqual(["stats unavailable", "positions unavailable"]);
     positionsCall.mockRestore();
     fillsCall.mockRejectedValue(new Error("fills unavailable"));
     await act(async () => { vi.advanceTimersByTime(15000); });
     expect(container.textContent).toContain("fills unavailable");
     expect(container.textContent).toContain("executed");
     await act(async () => { root.render(<IndexerPanels indexer={null} owner={null} />); });
-    expect(container.querySelectorAll("section p")).toHaveLength(3);
     expect(container.textContent).not.toContain("executed");
-    expect(container.textContent).toContain("Indexer not configured");
+    expect(Array.from(container.querySelectorAll('[role="status"]')).map(p => p.textContent)).toEqual([
+      "The indexer is unreachable right now. Try again in a minute.", "The indexer is unreachable right now. Try again in a minute.",
+    ]);
+    expect(container.textContent).not.toContain("not configured");
     expect(vi.getTimerCount()).toBe(0);
   } finally {
     await act(async () => { root.unmount(); });
@@ -106,8 +89,8 @@ test("keeps both sides of a trade between owned portfolios", async () => {
     await act(async () => { root.render(<IndexerPanels indexer={indexer} owner="tester" />); });
     const rows = container.querySelectorAll("tbody tr");
     expect(rows).toHaveLength(2);
-    expect(Array.from(rows).map(row => row.querySelectorAll("td")[1].textContent)).toEqual(["buy", "sell"]);
-    expect(container.textContent).toContain("More history exists; not shown.");
+    expect(Array.from(rows).map(row => row.querySelectorAll("td")[1].textContent)).toEqual(["long", "short"]);
+    expect(container.textContent).toContain("Older fills are on the explorer.");
   } finally {
     await act(async () => { root.unmount(); });
     vi.restoreAllMocks();
@@ -116,18 +99,14 @@ test("keeps both sides of a trade between owned portfolios", async () => {
 
 test("waits for fills before showing empty history and tolerates malformed values", async () => {
   const indexer = new MockIndexerClient();
-  const positions = await indexer.positions("tester");
   const fill = (await indexer.fills("buyer")).fills[0];
-  vi.spyOn(indexer, "positions").mockResolvedValue({ ...positions, portfolios: [{ ...positions.portfolios[0], capital: "invalid", positions: [{ ...positions.portfolios[0].positions[0], basis_pos_q: "invalid" }] }] });
   let resolveFills!: (value: Awaited<ReturnType<typeof indexer.fills>>) => void;
   vi.spyOn(indexer, "fills").mockReturnValue(new Promise(resolve => { resolveFills = resolve; }));
   const container = document.createElement("div");
   const root = createRoot(container);
   try {
     await act(async () => { root.render(<IndexerPanels indexer={indexer} owner="tester" />); });
-    expect(container.textContent).not.toContain("No indexed trades");
-    expect(container.textContent).toContain("Capital: — USD");
-    expect(container.textContent).toContain("long — SOL");
+    expect(container.textContent).not.toContain("No fills yet.");
     await act(async () => { resolveFills({ fills: [null, Number.MAX_SAFE_INTEGER + 1, 1.5].map((mark_price, ix_index) => ({ ...fill, ix_index, mark_price, size_q: "invalid" })), next_before: null }); });
     const rows = container.querySelectorAll("tbody tr");
     expect(rows).toHaveLength(3);

@@ -87,7 +87,7 @@ it("rejects a trade needing nine cranks before simulation", async () => {
   const portfolios = [portfolio, cfg.lpPortfolio, ...Array.from({ length: 7 }, (_, i) => new PublicKey(new Uint8Array(32).fill(i + 5)))];
   vi.mocked(conn.getProgramAccounts).mockResolvedValue(portfolios.map(pubkey => ({ pubkey, account: account(data) })));
   await expect(buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n))
-    .rejects.toThrow("9 portfolios need a crank; more than 8 fit in one transaction");
+    .rejects.toThrow("9 portfolios need a market refresh; more than 8 fit in one transaction");
   expect(simulate).not.toHaveBeenCalled();
 });
 
@@ -179,4 +179,16 @@ it.each(["long", "short"] as const)("closes the post-crank %s size and binds its
   expect(u64(trade.data, 67)).toBe(12n);
   expect(u64(trade.data, 75)).toBe(side === "long" ? 119_400_000n : 120_600_000n);
   expect(read).not.toHaveBeenCalled();
+});
+
+it("never sends a fee under the market's base fee", async () => {
+  const dearer = Buffer.from(market);
+  dearer.writeBigUInt64LE(15n, layout.HEADER_LEN + layout["cfg.trade_fee_base_bps"]);
+  expect(parseMarket(dearer).config.tradeFeeBaseBps).toBe(15n);
+  mockCranks([data, lp, dearer]);
+  const trade = (await buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n)).at(-1)!;
+  expect(u64(trade.data, 67)).toBe(15n);
+  mockCranks([data, lp, market]);
+  const kept = (await buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 20n)).at(-1)!;
+  expect(u64(kept.data, 67)).toBe(20n);
 });

@@ -1,6 +1,9 @@
+import { PERP } from "./types";
 import type { Fill, Leg, MarketClient, MarketSnapshot, Side } from "./types";
 
 const EPS = 1e-9;
+// Wallets that trade against the local market client.
+const TRADERS = ["7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy", "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", "3Kq7m1dYpJ9cZr8bW4XfTnS2vHgE6uLkQaN5oPzR1tMs"];
 
 interface MockOptions { tickMs?: number; seed?: number; startPrice?: number; autoTick?: boolean }
 
@@ -33,14 +36,14 @@ export class MockMarketClient implements MarketClient {
   private random: () => number;
   private fillId = 0;
 
-  constructor({ tickMs = 1000, seed = 1, startPrice = 150, autoTick = true }: MockOptions = {}) {
+  constructor({ tickMs = 1000, seed = 1, startPrice = 0.3036, autoTick = true }: MockOptions = {}) {
     positive(tickMs, "tickMs");
     positive(startPrice, "startPrice");
     if (!Number.isFinite(seed)) throw new Error("seed must be finite");
     this.random = mulberry32(seed);
     const now = Date.now();
     this.snapshot = freeze({
-      market: { symbol: "SOL-PERP", collateral: "USDC", maxLeverage: 10, maintenanceMarginRatio: 0.05 },
+      market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 2, maintenanceMarginRatio: 0.25 },
       mark: { price: startPrice, ts: now },
       funding: { rate: 0.0001, nextFundingTs: now + 3_600_000 },
       portfolio: {
@@ -88,7 +91,8 @@ export class MockMarketClient implements MarketClient {
   }
 
   private fill(side: Side, size: number, mine: boolean): Fill {
-    return { id: String(++this.fillId), side, size, mine, price: this.snapshot.mark.price, ts: Date.now() };
+    const wallet = mine ? this.snapshot.portfolio.owner ?? undefined : TRADERS[Math.floor(this.random() * TRADERS.length)];
+    return { id: String(++this.fillId), side, size, mine, wallet, price: this.snapshot.mark.price, ts: Date.now() };
   }
 
   tick() {
@@ -96,7 +100,7 @@ export class MockMarketClient implements MarketClient {
     const now = Date.now();
     const mark = { price: s.mark.price * (1 + (this.random() - 0.5) * 0.004), ts: now };
     const bot = this.random() < 0.35
-      ? { ...this.fill(this.random() < 0.5 ? "long" : "short", 0.1 + this.random() * 2, false), price: mark.price }
+      ? { ...this.fill(this.random() < 0.5 ? "long" : "short", Math.round(10 + this.random() * 90), false), price: mark.price }
       : null;
     this.publish({
       ...s, mark,
@@ -106,7 +110,7 @@ export class MockMarketClient implements MarketClient {
   }
 
   async connect() {
-    const owner = "DemoSoL1111111111111111111111111111111111111";
+    const owner = "Trader1111111111111111111111111111111111111";
     this.publish({ ...this.snapshot, portfolio: { ...this.snapshot.portfolio, owner } });
     return owner;
   }

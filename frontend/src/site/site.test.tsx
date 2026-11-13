@@ -38,17 +38,22 @@ async function render(path: string, indexer: IndexerClient | null = new MockInde
 }
 
 test.each([
-  [site.paths.home, "Price andhedge AIcompute.", "From agent to leaderboard.", "drip"],
-  [site.paths.agents, "Agents", "Install the MCP", "Agents · drip"],
-  [site.paths.arena, "Arena", "Rules", "Arena · drip"],
-  [site.paths.compute, "Compute index", "Price feed not configured.", "Compute index · drip"],
-  [site.paths.trade, "SOL-PERP", "Connect wallet", "Trade · drip"],
-  [site.paths.docs, "Docs", "How the compute index is made", "Docs · drip"],
+  [site.paths.home, "Price andhedge AIcompute.", "From agent to a COMPUTE-PERP position.", "Drip · the price of AI compute"],
+  [site.paths.agents, "Your agent reads what inference costs across every seller, hedges its compute bill with COMPUTE-PERP, and is ranked on the Arena by PnL.", "Install the MCP", "Agents · Drip"],
+  [site.paths.arena, "Arena", "How ranking works", "Arena · Drip"],
+  [site.paths.compute, "Compute index", "The compute index is unreachable right now.", "Compute index · Drip"],
+  [site.paths.trade, "COMPUTE-PERP", "Connect wallet", "Trade COMPUTE-PERP · Drip"],
+  [site.paths.docs, "Docs", "How the compute index is made", "Docs · Drip"],
 ])("renders %s", async (path, heading, text, title) => {
   const container = await render(path);
   expect(container.querySelector("h1")?.textContent).toBe(heading);
   expect(container.textContent).toContain(text);
   expect(document.title).toBe(title);
+  const meta = (key: string) => document.head.querySelector<HTMLMetaElement>(`meta[name="${key}"], meta[property="${key}"]`)?.content;
+  expect(meta("og:title")).toBe(title);
+  expect(meta("twitter:title")).toBe(title);
+  expect(meta("description")?.length).toBeGreaterThan(40);
+  expect(meta("og:description")).toBe(meta("description"));
   expect(container.querySelector("nav")).not.toBeNull();
   expect(container.querySelector("footer")?.textContent).toContain("Drip is the market for AI compute. Live prices from every seller, and a perp to trade them. Built for perp traders and for agents on FLOP Network.");
 });
@@ -58,30 +63,37 @@ test("home shows its live mark, recent trades and honest unpublished tools", asy
   site.mcp.final = false;
   try {
   const container = await render(site.paths.home);
-  expect(container.textContent).toContain("$150.00");
-  expect(container.textContent).toContain("From agent to leaderboard.");
+  expect(container.textContent).toContain("$0.3036");
+  expect(container.textContent).toContain("From agent to a COMPUTE-PERP position.");
   expect(container.textContent).not.toMatch(/PERCOLATOR PERPS · SOLANA|LIVE|Illustrative/);
-  expect(container.textContent).toContain("Give agents a wallet, leverage and a live SOL-PERP market.");
-  expect(container.textContent).toContain("Mark price");
-  expect(container.querySelector('.hero-actions a[href="/trade"]')?.textContent?.trim()).toBe("Trade the perps");
+  expect(container.textContent).toContain("COMPUTE-PERP settles on what full-precision sellers charge for Qwen3.8-27B");
+  expect(container.textContent).toContain("Mark price on chain");
+  expect(container.querySelector('.hero-actions a[href="/trade"]')?.textContent?.trim()).toBe("Trade COMPUTE-PERP");
   expect(container.querySelector('.hero-actions a[href="/agents#install"]')?.textContent).toBe("Connect an agent");
   expect(container.querySelector(".hero-trade .trade-note")?.textContent).toBe("Test tokens");
   expect(container.textContent).not.toMatch(/Percolator/);
-  expect(container.querySelector('.hero-actions a[href="/arena"]')?.textContent).toBe("Watch agents trade");
-  expect(container.textContent).not.toContain("Prizes TBD.");
-  expect(container.textContent).toContain("Indexer not configured");
+  expect(container.querySelector('.sol-actions a[href="/arena"]')?.textContent).toBe("See the leaderboard");
+  expect(container.querySelector('.sol-actions a[href="/trade"]')?.textContent).toBe("Trade COMPUTE-PERP");
+  expect(container.querySelectorAll(".board-card tbody tr")).toHaveLength(5);
+  expect(container.textContent).not.toMatch(/TBD|not configured/);
   expect(container.textContent).not.toMatch(/\[TBD\]|\[NPM-PACKAGE\]|npx/);
   expect(container.querySelector(".terminal button")).toBeNull();
   } finally { site.mcp.final = final; }
 });
 
-test("footer community destinations stay plain text until configured", async () => {
+test("footer hides unset community links, and the column when none is set", async () => {
   const container = await render(site.paths.home);
   const footer = container.querySelector("footer")!;
-  for (const label of ["X", "Telegram", "Status"]) {
-    expect(Array.from(footer.querySelectorAll("span")).some(el => el.textContent === label)).toBe(true);
-    expect(Array.from(footer.querySelectorAll("a")).some(el => el.textContent === label)).toBe(false);
-  }
+  expect(Array.from(footer.querySelectorAll(".footer-label"), l => l.textContent)).toEqual(["PRODUCT", "BUILD"]);
+  expect(footer.textContent).not.toMatch(/Telegram|Status/);
+  await cleanup?.(); cleanup = undefined;
+  site.x = "https://x.com/example";
+  try {
+    const c2 = await render(site.paths.home);
+    const f2 = c2.querySelector("footer")!;
+    expect(Array.from(f2.querySelectorAll(".footer-label"), l => l.textContent)).toEqual(["PRODUCT", "BUILD", "COMMUNITY"]);
+    expect(Array.from(f2.querySelectorAll("div:last-child > ul a"), a => a.textContent)).toEqual(["X"]);
+  } finally { site.x = null; }
 });
 
 test("published home terminal copies the package command", async () => {
@@ -107,7 +119,7 @@ test("nav links update history and render without reloading", async () => {
   await act(async () => { agents.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 })); });
   expect(window.location.pathname).toBe(site.paths.agents);
   expect(push).toHaveBeenLastCalledWith({}, "", site.paths.agents);
-  expect(container.querySelector("h1")?.textContent).toBe("Agents");
+  expect(container.querySelector(".cx-title")?.textContent).toBe("Agents");
   expect(scroll).toHaveBeenCalledWith(0, 0);
   await act(async () => {
     window.history.replaceState({}, "", site.paths.docs);
@@ -168,14 +180,14 @@ test.each(["long", "short", "invalid"])("validates an initial trade side of %s",
 test.each(["/tools", "/build", "/tools/", "/build/"])("old link %s redirects to /agents", async path => {
   const container = await render(path);
   expect(window.location.pathname).toBe(site.paths.agents);
-  expect(container.querySelector("h1")?.textContent).toBe("Agents");
-  expect(document.title).toBe("Agents · drip");
+  expect(container.querySelector(".cx-title")?.textContent).toBe("Agents");
+  expect(document.title).toBe("Agents · Drip");
 });
 
 test("trailing slash renders Agents and its nav link only scrolls to top", async () => {
   const scroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
   const container = await render("/agents/");
-  expect(container.querySelector("h1")?.textContent).toBe("Agents");
+  expect(container.querySelector(".cx-title")?.textContent).toBe("Agents");
   const push = vi.spyOn(window.history, "pushState");
   const tools = container.querySelector<HTMLAnchorElement>('nav a[href="/agents"]')!;
   await act(async () => { tools.click(); });
@@ -204,7 +216,7 @@ test("keeps collateral disabled across navigation while a deposit is pending", a
   await act(async () => { button.click(); });
   expect(deposit).toHaveBeenCalledWith(100);
   await navigate(site.paths.agents);
-  expect(container.querySelector(".site-page h1")?.textContent).toBe("Agents");
+  expect(container.querySelector(".site-page .cx-title")?.textContent).toBe("Agents");
   expect(container.querySelector("#amount")?.closest("[hidden]")).not.toBeNull();
   await navigate(site.paths.trade);
   expect(container.querySelector("#amount")?.closest("[hidden]")).toBeNull();
@@ -247,10 +259,12 @@ test("unpublished MCP does not expose install commands", async () => {
   } finally { site.mcp.final = final; }
 });
 
-test("unknown paths offer a link home", async () => {
+test("unknown paths say the page does not exist and link to the index and trade", async () => {
   const container = await render("/missing");
   expect(container.querySelector("h1")?.textContent).toBe("Page not found");
-  expect(container.querySelector("main a")?.getAttribute("href")).toBe(site.paths.home);
+  expect(container.querySelector("main")?.textContent).toContain("This page does not exist.");
+  expect(Array.from(container.querySelectorAll("main a"), a => a.getAttribute("href"))).toEqual(["/compute", "/trade"]);
+  expect(document.title).toBe("Page not found · Drip");
 });
 
 
@@ -258,16 +272,16 @@ test("home renders recent fills and live season totals", async () => {
   const container = await render(site.paths.home);
   const ticker = container.querySelector(".recent-trades")!;
   expect(ticker.querySelectorAll("li")).toHaveLength(3);
-  for (const text of ["Long", "Short", "0.5 SOL", "1.5 SOL", "$97.75", "Ab12…yZ9q", "mock…olio"]) expect(ticker.textContent).toContain(text);
+  for (const text of ["Long", "Short", "50 Mtok", "150 Mtok", "$0.3036", "7cVf…kxXy", "4fYN…Ab8m"]) expect(ticker.textContent).toContain(text);
   expect(ticker.textContent).toMatch(/\d+[smhd] ago/);
   const link = ticker.querySelector("li a")!;
   expect(link.getAttribute("href")).toBe("https://explorer.solana.com/tx/mock-signature-0?cluster=devnet");
   expect(link.getAttribute("target")).toBe("_blank");
   expect(link.getAttribute("rel")).toBe("noreferrer");
-  const season = container.querySelector('[aria-label="Season 0"]')!;
-  expect(Array.from(season.querySelectorAll(".fact-label"), el => el.textContent)).toEqual(["Agents", "Trades", "Volume (USD)", "Open interest (USD)"]);
-  expect(Array.from(season.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["12", "345", "$12,345", "$987.50"]);
-  expect(season.textContent).toContain("Season 0 · devnet · since " + new Date(1793232000 * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }));
+  const season = container.querySelector('[aria-label="Arena stats"]')!;
+  expect(Array.from(season.querySelectorAll(".fact-label"), el => el.textContent)).toEqual(["Traders", "Fills", "Volume (USD)", "Open interest (USD)"]);
+  expect(Array.from(season.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["7", "214", "$18,640", "$157.90"]);
+  expect(season.textContent).toContain("devnet · since " + new Date(1793232000 * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }));
 });
 
 test("home shows at most five recent fills while fetching twenty", async () => {
@@ -288,10 +302,10 @@ test.each(["rejects", "missing", "none", "empty"])("home handles unavailable dat
   indexer.recentFills = mode === "missing" ? undefined : mode === "empty" ? vi.fn().mockResolvedValue({ fills: [] }) : vi.fn().mockRejectedValue(new Error("indexer 404"));
   indexer.season = mode === "missing" ? undefined : vi.fn().mockRejectedValue(new Error("indexer 404"));
   const container = await render(site.paths.home, mode === "none" ? null : indexer);
-  expect(container.querySelector(".recent-trades")?.textContent).toContain("No agent trades yet.");
-  expect(container.querySelector('.recent-trades a[href="/agents"]')?.textContent).toBe("Be the first.");
+  expect(container.querySelector(".recent-trades")?.textContent).toBe("Recent fillsNo fills yet. Trade by hand or connect an agent.");
+  expect(container.querySelector('.recent-trades a[href="/agents"]')?.textContent).toBe("connect an agent");
   expect(Array.from(container.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["—", "—", "—", "—"]);
-  expect(container.querySelector(".home-facts")?.textContent).toContain("Season 0 · devnet · since —");
+  expect(container.querySelector(".fact-note")?.textContent).toBe("devnet");
 });
 
 test.each([
@@ -303,7 +317,7 @@ test.each([
   vi.spyOn(indexer, "season").mockResolvedValue({ season: 0, since: null, agents: 0, trades: 0, volume_usd: volume, open_interest_usd: interest });
   const container = await render(site.paths.home, indexer);
   expect(Array.from(container.querySelectorAll(".fact-value"), el => el.textContent)).toEqual(["0", "0", expectedVolume, expectedInterest]);
-  expect(container.querySelector(".home-facts")?.textContent).toContain("since —");
+  expect(container.querySelector(".fact-note")?.textContent).toBe("devnet");
 });
 
 test("home polls and retains last good data on errors, then stops on unmount", async () => {
@@ -318,7 +332,7 @@ test("home polls and retains last good data on errors, then stops on unmount", a
   expect(fills).toHaveBeenCalledTimes(4);
   expect(season).toHaveBeenCalledTimes(2);
   expect(container.querySelectorAll(".recent-trades li")).toHaveLength(3);
-  expect(container.querySelector(".facts-grid")?.textContent).toContain("$12,345");
+  expect(container.querySelector(".facts-grid")?.textContent).toContain("$18,640");
   await cleanup?.();
   cleanup = undefined;
   await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
@@ -331,10 +345,15 @@ test("home explains why Drip with the feed's numbers", async () => {
   const container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient(now));
   const why = container.querySelector('[aria-labelledby="why-title"]')!;
   expect(why.querySelector("h2")?.textContent).toBe("Why Drip");
-  expect(Array.from(why.querySelectorAll("h3"), el => el.textContent)).toEqual(["Every seller, not one", "Quoted in what you pay", "Every number checkable", "Your key, your agent"]);
+  expect(Array.from(why.querySelectorAll("h3"), el => el.textContent)).toEqual(["Every seller, not one", "Quoted in what you pay", "Settlement on chain", "An agent can hedge its own bill"]);
   const market = marketFixture(now);
   expect(why.querySelector("p")?.textContent).toBe(`${typicalPrice(market)!.quotes} quotes from ${typicalPrice(market)!.providers} providers, read every 5 minutes. You see the cheapest and the dearest, not a list price.`);
-  expect(why.textContent).toContain("staging verify-push-log");
+  expect(why.textContent).toContain("Each settlement price is written to Solana (latest transaction) and logged as a signed line.");
+  expect(why.querySelector('a[href^="https://explorer.solana.com/tx/"]')).not.toBeNull();
+  expect(why.textContent).not.toMatch(/verify-push-log|staging/);
+  expect(container.querySelector(".build-cards")?.textContent).not.toMatch(/keeper/i);
+  expect(container.querySelector(".home-arena dl")).toBeNull();
+  expect(container.textContent).not.toMatch(/Season 0|Your key, your agent|Connect once|PnL decides|From agent to leaderboard/);
 });
 
 test("home card survives a feed with no index base and no cheapest seller", async () => {
@@ -348,7 +367,7 @@ test("home card survives a feed with no index base and no cheapest seller", asyn
   expect(container.textContent).not.toMatch(/ChatGPT/);
 });
 
-test("home leads with the compute index and the compute perp, SOL-PERP second", async () => {
+test("home leads with the compute index, then the perp", async () => {
   const now = Date.now();
   const container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient(now));
   const market = marketFixture(now);
@@ -365,21 +384,79 @@ test("home leads with the compute index and the compute perp, SOL-PERP second", 
   const sections = Array.from(container.querySelectorAll("main > section")).map(s => s.className);
   expect(sections.indexOf("home-sol home-container")).toBe(1);
   expect(Array.from(container.querySelectorAll(".nav-links a")).map(a => [a.textContent, a.getAttribute("href")])).toEqual([["Index", "/compute"], ["Trade", "/trade"], ["Arena", "/arena"], ["Agents", "/agents"], ["Docs", "/docs"]]);
+  expect(Array.from(container.querySelectorAll(".nav-actions a"), a => [a.textContent, a.getAttribute("href")])).toEqual([["Trade", "/trade"]]);
   expect(container.querySelector(".nav-links")?.textContent).not.toContain("SOL-PERP");
   expect(card.querySelector(".cc-perp .market-name")?.textContent).toBe("COMPUTE-PERP");
   expect(card.querySelector(".cc-perp .market-subtitle")?.textContent).toBe("USD per 1M tokens · Qwen3.8-27B");
-  expect(container.querySelector("#sol-title")?.textContent).toBe("Agents trade SOL-PERP.");
+  expect(container.querySelector("#sol-title")?.textContent).toBe("Trade the price of compute.");
+  expect(container.querySelector(".home-sol .market-name")?.textContent).toBe("COMPUTE-PERP");
   expect(Array.from(container.querySelectorAll("footer a")).filter(a => ["Index", "Docs"].includes(a.textContent!)).map(a => a.getAttribute("href"))).toEqual(["/compute", "/docs"]);
   expect(container.querySelector(".home-hero")?.textContent).not.toMatch(/mock|sample/i);
 });
 
-test("the arena strip shows on SOL-PERP and arena pages, not on home or compute", async () => {
-  for (const [path, shown] of [[site.paths.home, false], [site.paths.compute, false], [site.paths.arena, true], [site.paths.agents, true]] as const) {
+test("the arena strip announces only a set season or prize, and never on home or compute", async () => {
+  const pages = [site.paths.home, site.paths.compute, site.paths.arena, site.paths.agents];
+  for (const path of pages) {
     const container = await render(path);
-    expect(!!container.querySelector(".announcement")).toBe(shown);
-    await cleanup?.();
-    cleanup = undefined;
+    expect(container.querySelector(".announcement")).toBeNull();
+    await cleanup?.(); cleanup = undefined;
   }
+  const arena = { ...site.arena };
+  site.arena.season = 1; site.arena.prizes = "500 USDC to the top three";
+  try {
+    for (const [path, shown] of [[site.paths.home, false], [site.paths.compute, false], [site.paths.arena, true], [site.paths.agents, true]] as const) {
+      const container = await render(path);
+      expect(container.querySelector(".announcement")?.textContent?.trim() ?? null).toBe(shown ? "Arena season 1, prizes: 500 USDC to the top three.Agents and traders on COMPUTE-PERP, ranked by PnL.See the leaderboard" : null);
+      await cleanup?.(); cleanup = undefined;
+    }
+  } finally { Object.assign(site.arena, arena); }
+});
+
+test("no page says TBD or SOL-PERP, and SOL only means fee SOL", async () => {
+  for (const path of Object.values(site.paths)) {
+    const container = await render(path, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient());
+    const text = container.textContent!;
+    expect(text, path).not.toMatch(/TBD|SOL-PERP|not configured|coming soon|challenge/i);
+    for (const m of text.matchAll(/\bSOL\b/g)) expect(text.slice(m.index! - 20, m.index! + 12), path).toMatch(/devnet SOL for fees/);
+    await cleanup?.(); cleanup = undefined;
+  }
+});
+
+test("arena: live stats, a populated board sorted by PnL with house tags, fills and ranking rules", async () => {
+  const container = await render(site.paths.arena);
+  expect(container.querySelector(".arena-season")).toBeNull();
+  expect(Array.from(container.querySelectorAll(".arena-stats dt"), d => d.textContent)).toEqual(["Traders", "Fills", "Volume", "Open interest"]);
+  expect(Array.from(container.querySelectorAll(".arena-stats dd"), d => d.textContent)).toEqual(["7", "214", "$18,640.00", "$157.90"]);
+  const rows = Array.from(container.querySelectorAll(".arena-board tbody tr"));
+  expect(rows).toHaveLength(7);
+  expect(Array.from(rows[0].querySelectorAll("td"), td => td.textContent)).toEqual(["1", "7cVf…kxXy", "$41.87", "+4.2%", "38", "long 180 Mtok"]);
+  expect(rows[1].querySelector(".house-tag")?.textContent).toBe("house · trend");
+  expect(Array.from(rows[2].querySelectorAll("td"), td => td.textContent)[5]).toBe("short 60 Mtok");
+  expect(rows.map(r => r.querySelector("td:nth-child(3)")!.textContent)).toEqual(["$41.87", "$18.42", "$12.05", "$4.31", "-$2.64", "-$6.98", "-$15.20"]);
+  expect(container.querySelectorAll(".arena-fills tbody tr")).toHaveLength(3);
+  expect(Array.from(container.querySelectorAll(".arena-rules b"), b => b.textContent)).toEqual(["Market", "Score", "Joining", "House agents"]);
+  expect(Array.from(container.querySelectorAll(".arena-cta a"), a => [a.textContent, a.getAttribute("href")]).map(([t, h]) => [t!.trim(), h])).toEqual([["Trade by hand", "/trade"], ["Connect an agent", "/agents"]]);
+  await cleanup?.(); cleanup = undefined;
+  const arena = { ...site.arena };
+  site.arena.season = 1; site.arena.startsAt = "1 Dec 2026";
+  try {
+    const c2 = await render(site.paths.arena);
+    expect(c2.querySelector(".arena-season")?.textContent).toBe("Season 1 · From 1 Dec 2026");
+  } finally { Object.assign(site.arena, arena); }
+});
+
+test("arena: empty board and an unreachable indexer", async () => {
+  const empty = new MockIndexerClient();
+  vi.spyOn(empty, "leaderboard").mockResolvedValue({ as_of_slot: 1, note: "", entries: [] });
+  vi.spyOn(empty, "recentFills").mockResolvedValue({ fills: [] });
+  let container = await render(site.paths.arena, empty);
+  expect(container.textContent).toContain("No fills yet. The first trade puts a wallet on the board.");
+  expect(container.querySelector(".arena-fills")).toBeNull();
+  await cleanup?.(); cleanup = undefined;
+  container = await render(site.paths.arena, null);
+  expect(container.textContent).toContain("The leaderboard is unreachable right now");
+  expect(container.querySelector(".arena-stats")).toBeNull();
+  expect(container.querySelector(".arena-rules")).not.toBeNull();
 });
 
 test("footer blurb positions Drip and every GitHub link goes to drip-markets", async () => {
@@ -402,32 +479,44 @@ test("agents page: one flow from install to the Arena, compute examples only onc
   expect(Array.from(container.querySelectorAll(".ag-files dt"), d => d.textContent)).toEqual(["market.json", "latest.json"]);
   expect(Array.from(container.querySelectorAll(".ag-files a"), a => a.getAttribute("href"))).toEqual([`${site.officialSite}/compute-feed/market.json`, `${site.officialSite}/compute-feed/latest.json`]);
   expect(container.textContent).toContain("rewrites both every minute");
-  // Until the MCP takes a compute market, nothing claims compute hedging works.
-  expect(container.querySelector(".ag-lead")?.textContent).not.toMatch(/hedges/);
-  expect(container.textContent).not.toMatch(/Long COMPUTE-PERP|Short COMPUTE-PERP|ChatGPT|5-sample/);
+  // The MCP trades the configured market, COMPUTE-PERP.
+  const quotes = (await new MockComputeFeedClient().market()).index.n_quotes;
+  expect(container.querySelector("h1.ag-lead")?.textContent).toBe(`Your agent reads what inference costs across ${quotes} seller quotes, hedges its compute bill with COMPUTE-PERP, and is ranked on the Arena by PnL.`);
+  expect(container.querySelector("#install pre")?.textContent).toBe("claude mcp add drip -- npx -y @driptech/mcp");
+  expect(Array.from(container.querySelectorAll("#install pre"), p => p.textContent)).toContain("Claim test funds, deposit 500 USDC and open a 100-unit long on COMPUTE-PERP. Then show my position.");
+  expect(container.textContent).toContain("Long COMPUTE-PERP");
+  expect(container.textContent).toContain("Short COMPUTE-PERP");
+  expect(container.textContent).not.toMatch(/size_sol|keeper|prize|30 seconds/i);
+  expect(container.textContent).toContain('size counts units of 1M tokens, up to 100 per fill: { side: "long", size: 100 }.');
+  expect(container.textContent).toContain("Mark price, fills and open interest.");
+  expect(container.textContent).toContain("They are tagged as house agents on the board.");
+  const prompts = Array.from(container.querySelectorAll("#install pre"), p => p.textContent);
+  expect(prompts).toContain("Open a 50-unit long on COMPUTE-PERP to hedge my inference bill, then show my position.");
+  expect(prompts.join(" ")).not.toContain("Read the compute index");
+  expect(container.textContent).not.toMatch(/ChatGPT|5-sample|SOL-PERP/);
   expect(container.textContent).toContain("any MCP client that runs local servers");
   expect(container.textContent).toContain("exponential average");
-  // Addresses come from retired chain defaults: hidden until the flag is set.
-  expect(container.querySelector(".addresses")).toBeNull();
+  expect(container.querySelector(".addresses")?.textContent).toContain("COMPUTE-PERP market");
+  expect(container.querySelector(".addresses")?.textContent).toContain("uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J");
   expect(container.textContent).toContain("Built for agents on FLOP Network");
-  expect(container.querySelectorAll("#install pre")).toHaveLength(3);
+  expect(container.querySelectorAll("#install pre")).toHaveLength(4);
   expect(container.textContent).not.toMatch(/Percolator|market: "/);
   await cleanup?.(); cleanup = undefined;
   const compute = site.mcp.computeMarket;
-  site.mcp.computeMarket = "COMPUTE-PERP";
+  site.mcp.computeMarket = null;
+  site.showAddresses = false;
   try {
     const c2 = await render(site.paths.agents);
-    expect(c2.querySelectorAll("#install pre")).toHaveLength(4);
-    expect(c2.textContent).toContain('Pass market: "COMPUTE-PERP" for COMPUTE-PERP.');
-    expect(c2.textContent).toContain("on both markets");
-    expect(c2.querySelector(".ag-lead")?.textContent).toContain("hedges its compute bill with COMPUTE-PERP");
-    expect(c2.textContent).toContain("Long COMPUTE-PERP");
-    expect(c2.textContent).toContain("Short COMPUTE-PERP");
-  } finally { site.mcp.computeMarket = compute; }
+    expect(c2.querySelectorAll("#install pre")).toHaveLength(3);
+    expect(c2.querySelector(".ag-lead")?.textContent).not.toMatch(/hedges/);
+    expect(c2.textContent).not.toMatch(/Long COMPUTE-PERP/);
+    expect(c2.querySelector(".addresses")).toBeNull();
+  } finally { site.mcp.computeMarket = compute; site.showAddresses = true; }
   await (cleanup as (() => Promise<void>) | undefined)?.(); cleanup = undefined;
-  site.showAddresses = true;
+  site.mcp.hasComputeIndexTool = true; site.mcp.sizeArg = "units";
   try {
     const c3 = await render(site.paths.agents);
-    expect(c3.querySelector(".addresses")?.textContent).toContain(site.programId);
-  } finally { site.showAddresses = false; }
+    expect(Array.from(c3.querySelectorAll("#install pre"), p => p.textContent)).toContain("Read the compute index, then size a long on COMPUTE-PERP to hedge my inference bill. Show my position.");
+    expect(c3.textContent).toContain('{ side: "long", units: 100 }');
+  } finally { site.mcp.hasComputeIndexTool = false; site.mcp.sizeArg = "size"; }
 });

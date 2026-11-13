@@ -1,5 +1,6 @@
 import { Connection, SendTransactionError, Transaction } from "@solana/web3.js";
 import type { Keypair, PublicKey, TransactionInstruction } from "@solana/web3.js";
+import { PERP } from "./types";
 import type { Fill, MarketClient, MarketSnapshot, Side } from "./types";
 import type { DevnetConfig } from "../chain/config";
 import { effectiveAbsQ, parseMarket, parsePortfolio } from "../chain/accounts";
@@ -25,7 +26,7 @@ export class DevnetMarketClient implements MarketClient {
   private timer?: ReturnType<typeof setTimeout>;
   private disposed = false;
   private snapshot: MarketSnapshot = {
-    market: { symbol: "SOL-PERP", collateral: "USDC", maxLeverage: 1, maintenanceMarginRatio: 0 },
+    market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 1, maintenanceMarginRatio: 0 },
     mark: { price: NaN, ts: Date.now() },
     funding: { rate: 0, nextFundingTs: Date.now() },
     portfolio: {
@@ -74,7 +75,7 @@ export class DevnetMarketClient implements MarketClient {
     if (this.disposed) return;
     const now = Date.now();
     this.snapshot = {
-      market: { symbol: "SOL-PERP", collateral: "USDC", maxLeverage: 10000 / Number(market.initialMarginBps), maintenanceMarginRatio: mmRatio },
+      market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 10000 / Number(market.initialMarginBps), maintenanceMarginRatio: mmRatio },
       mark: { price, ts: now }, funding: { rate: 0, nextFundingTs: now },
       portfolio: {
         owner: this.wallet?.publicKey.toBase58() ?? null, collateral, realizedPnl: NaN,
@@ -132,7 +133,7 @@ export class DevnetMarketClient implements MarketClient {
     }
     onConfirmed?.();
     if (fill) this.snapshot = { ...this.snapshot, fills: [
-      { ...fill, id: signature, price, ts: Date.now(), mine: true }, ...this.snapshot.fills,
+      { ...fill, id: signature, price, ts: Date.now(), mine: true, wallet: this.snapshot.portfolio.owner ?? undefined }, ...this.snapshot.fills,
     ].slice(0, 20) };
     await this.refresh().catch(() => {});
     return signature;

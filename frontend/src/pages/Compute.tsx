@@ -7,6 +7,7 @@ import FeedBoundary from "../compute/FeedBoundary";
 import { site } from "../site/config";
 import { Link } from "../site/router";
 import { Arrow } from "../site/Nav";
+import { PERP, perpSubtitle } from "../market/types";
 import "../site/compute.css";
 
 export { STALE_MS } from "../compute/useFeed";
@@ -18,7 +19,7 @@ const sorts: [SortKey, string][] = [["sellers", "Most sellers"], ["spread", "Wid
 /** Input:output token mixes, as the switch shows them. */
 export const MIXES: [MixKey, string, string][] = [["chat_3_1", "Chat", "3:1"], ["avg_15_1", "Average", "15:1"], ["agent_150_1", "Agent", "150:1"]];
 const ratioOf = (mix: MixKey) => MIXES.find(([k]) => k === mix)![2];
-const GN_FORMULA = "Price per 1M tokens ÷ compute per token. Compute per token is FLOP's count for the model: from FLOP's registry where listed, otherwise 2 × parameters.";
+const GN_FORMULA = "Price per 1M tokens ÷ compute per token. Compute per token is FLOP's registry value where it lists the model, otherwise 2 × active parameters, taken from the model id or estimated from its expert counts (marked est.); — when unknown.";
 const fmtTimes = (n: number) => (n >= 10 ? n.toFixed(0) : n.toFixed(1)) + "×";
 
 function MixSwitch({ mix, onMix, ratio }: { mix: MixKey; onMix: (m: MixKey) => void; ratio: number | null | undefined }) {
@@ -91,9 +92,9 @@ function Audience({ market, latest }: { market: ComputeMarket; latest: ComputeLa
   </nav>;
 }
 
-function GnCell({ value, spread }: { value: number | null | undefined; spread: ReturnType<typeof computeSpread> }) {
+function GnCell({ value, spread, est }: { value: number | null | undefined; spread: ReturnType<typeof computeSpread>; est?: boolean }) {
   const ok = typeof value === "number" && Number.isFinite(value) && value > 0;
-  return <span className="c-gn"><span className="u-mobile">per bn G_n </span><b>{ok ? usdSmall(value) : "—"}</b>
+  return <span className="c-gn"><span className="u-mobile">per bn G_n </span><b>{ok ? usdSmall(value) : "—"}</b>{ok && est && <small className="gn-est" title="Active parameters estimated from the model's expert counts"> est.</small>}
     {ok && spread && <span className="gn-track" aria-hidden="true">
       {spread.p25 !== null && spread.p75 !== null && <i className="gn-band" style={{ left: `${spread.at(spread.p25)}%`, width: `${Math.max(2, spread.at(spread.p75) - spread.at(spread.p25))}%` }} />}
       <i className="gn-dot" style={{ left: `${spread.at(value)}%` }} />
@@ -114,7 +115,7 @@ function ModelRow({ model, scale, open, onToggle, now, mix, spread }: { model: M
       <span className="c-strip"><RangeStrip model={model} scale={scale} stale={stale} /></span>
       <span className="c-median"><span className="u-mobile">median </span>{usd(median)}</span>
       <span className="c-spread" title="Dearest seller over cheapest">{times(model.min, model.max)}<span className="u-mobile"> spread</span></span>
-      {spread !== false && <GnCell value={model.usd_per_bn_gn} spread={spread} />}
+      {spread !== false && <GnCell value={model.usd_per_bn_gn} spread={spread} est={model.compute?.basis === "2x_active_params_est"} />}
       <span className="c-cheap"><span className="u-mobile">cheapest </span>{model.cheapest ? <><b>{usd(model.cheapest.price)}</b> {model.cheapest.provider}<span className="q"> {model.cheapest.quantization}</span></> : <b>—</b>}</span>
       <span className="c-chg"><span className="u-mobile">24 h </span><Change value={model.change_24h_pct} /></span>
       <span className="c-chev" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg></span>
@@ -269,7 +270,7 @@ function Perp({ latest, history, now }: { latest: ComputeLatest; history: Comput
   const stale = latestStale(latest, now);
   const trade = site.computeTrade;
   return <article id="perp" className="cx-panel" aria-labelledby="compute-perp-heading">
-    <p className="cx-k">COMPUTE-PERP · USD per 1M tokens · Qwen3.8-27B</p>
+    <p className="cx-k">{PERP.name} · {perpSubtitle}</p>
     <h2 id="compute-perp-heading">The price the perp settles on</h2>
     <div className="perp-price"><strong>{usd4(latest.mark_usd)}</strong><span>per 1M tokens</span></div>
     {history && history.points.length >= 2 && history.to_ms - history.from_ms >= 86_400_000 && <figure className="perp-hist">
@@ -282,12 +283,15 @@ function Perp({ latest, history, now }: { latest: ComputeLatest; history: Comput
     </li>)}</ul>
     <p className="cx-updated">Pushed {ago(latest.landed_ms, now)} ({when(latest.landed_ms)}){latest.sig && <> · <a href={txUrl(latest.sig)} target="_blank" rel="noreferrer">tx {short(latest.sig)}</a></>}{stale && <> · <Stale why={stale} /></>}</p>
     <div className="panel-actions">
-      {trade ? <a className="button-link" href={trade}>Trade the perp <Arrow /></a>
+      {trade ? trade.startsWith("/") ? <Link className="button-link" to={trade}>Trade {PERP.name} <Arrow /></Link> : <a className="button-link" href={trade}>Trade {PERP.name} <Arrow /></a>
         : latest.market && <a className="button-link outline" href={addressUrl(latest.market)} target="_blank" rel="noreferrer">Market account <Arrow /></a>}
       <span className="trade-note">Test tokens</span>
     </div>
   </article>;
 }
+
+/** "Last 6 hours" from a window in seconds. */
+export const windowLabel = (s: number) => s % 3600 === 0 ? `Last ${s / 3600} ${s === 3600 ? "hour" : "hours"}` : `Last ${Math.round(s / 60)} minutes`;
 
 function Flop({ latest, market }: { latest: ComputeLatest; market: ComputeMarket | null }) {
   const flop = latest.flop_side;
@@ -304,21 +308,23 @@ function Flop({ latest, market }: { latest: ComputeLatest; market: ComputeMarket
       <div className="perp-price"><strong>{usdSmall(implied)}</strong><span>per FLOP</span></div>
       <p className="perp-why">The FLOP price at which FLOP's rate equals what the open market pays for the same compute{basis ? <> on {basis}</> : null}.</p>
     </div>}
+    <p className="cx-k flop-window">{windowLabel(flop.window_s ?? site.flopWindowS)}</p>
     <dl className="flop-facts">{([
-      ["Buyers", flop.buyers ?? "—"],
+      ["Buyer accounts", flop.buyers ?? "—"],
       ["Miners", flop.miners ?? "—"],
-      ["Settled jobs", flop.prints ?? "—"],
-      ["From FLOP's gateway", flop.gateway_share == null ? "—" : `${Math.round(flop.gateway_share * 100)}%`],
+      ["Jobs settled", flop.prints ?? "—"],
+      ["Gateway share of compute", flop.gateway_share == null ? "—" : `${Math.round(flop.gateway_share * 100)}%`],
     ] as const).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+    <p className="note">FLOP's gateway buys on behalf of all its customers, so it counts as one buyer.</p>
     {flop.stale && <p className="note">Not computed right now: {flop.stale}.</p>}
-    <p className="perp-why">{openrouter ? "FLOP's listed rate for compute today, paid by its buyers to its miners. The perp settles on seller prices, not on this rate." : "This sets the settlement price right now, converted to USD at a fixed stand-in rate."}</p>
+    <p className="perp-why">{openrouter ? "FLOP's listed rate for compute today, paid by its buyers to its miners. The perp settles on seller prices, not on this rate." : "This sets the settlement price right now, converted to USD at a fixed rate."}</p>
   </article>;
 }
 
 export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
   const { latest, history, market, error, failed, loaded, now } = useComputeFeed(feed);
   const [mix, setMix] = useState<MixKey>(DEFAULT_MIX);
-  if (!feed) return <div className="cx"><h1>Compute index</h1><p className="note">Price feed not configured.</p></div>;
+  if (!feed) return <div className="cx"><h1>Compute index</h1><p className="note" role="status">The compute index is unreachable right now. Try again in a minute.</p></div>;
   const nothing = !latest && !market;
   return <div className="cx">
     {!loaded && nothing ? <><h1 className="sr-only">Compute index</h1><Skeleton /></>
@@ -327,7 +333,7 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
     {market && <FeedBoundary data={market}><Audience market={market} latest={latest} /></FeedBoundary>}
     {market && <FeedBoundary data={market} name="Price by model"><Board market={market} now={now} mix={mix} /></FeedBoundary>}
     {(latest || failed.latest) && <div className="cx-panels">
-      {latest ? <><FeedBoundary data={latest} name="COMPUTE-PERP"><Perp latest={latest} history={history} now={now} /></FeedBoundary><FeedBoundary data={latest} name="FLOP price"><Flop latest={latest} market={market} /></FeedBoundary></>
+      {latest ? <><FeedBoundary data={latest} name={PERP.name}><Perp latest={latest} history={history} now={now} /></FeedBoundary><FeedBoundary data={latest} name="FLOP price"><Flop latest={latest} market={market} /></FeedBoundary></>
         : <article id="perp" className="cx-panel"><h2>Perp settlement price</h2><p role="status" className="error">Price feed unreachable ({error}). Try again in a minute.</p></article>}
     </div>}
     {market && <div className="cx-pair"><FeedBoundary data={market} name="Providers"><Providers market={market} /></FeedBoundary><FeedBoundary data={market} name="Price moves"><Moves market={market} /></FeedBoundary></div>}

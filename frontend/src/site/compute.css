@@ -301,3 +301,4 @@
 .site .cx-how { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 4px 0 0; }
 .site .trade-note { align-self: center; font: 11px var(--site-mono); letter-spacing: 1px; text-transform: uppercase; color: var(--site-muted); }
 .site .panel-actions { display: flex; align-items: center; gap: 14px; }
+.site .gn-est { font: 10px var(--site-mono); color: var(--site-muted); }

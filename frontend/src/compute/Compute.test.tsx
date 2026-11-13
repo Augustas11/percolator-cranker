@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, test, vi } from "vitest";
-import Compute from "../pages/Compute";
+import Compute, { windowLabel } from "../pages/Compute";
 import Docs from "../pages/Docs";
 import type { ComputeFeedClient, ComputeMarket } from "./client";
 import { MockComputeFeedClient } from "./mock";
@@ -167,11 +167,14 @@ test("the perp and FLOP panels show the settlement price, its sellers and FLOP's
   expect(perp.querySelector(".trade-note")?.textContent).toBe("Test tokens");
   expect(perp.textContent).toContain("full-precision (bf16/fp16) sellers of one benchmark model, so every contract settles on the same product");
   expect(perp.querySelector('a[href^="https://explorer.solana.com/tx/4w4fnV"]')).not.toBeNull();
-  expect(perp.querySelector('a[href="https://explorer.solana.com/address/uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J?cluster=devnet"]')?.textContent).toContain("Market account");
+  expect(perp.querySelector('.panel-actions a[href="/trade"]')?.textContent?.trim()).toBe("Trade COMPUTE-PERP");
   expect(perp.querySelector(".perp-hist figcaption")?.textContent).toBe("7 d · low $0.3036 · high $0.3112");
   const flop = container.querySelector('[aria-labelledby="compute-flop-heading"]')!;
   expect(flop.querySelector(".perp-price strong")?.textContent).toBe("0.00291");
+  expect(flop.querySelector(".flop-window")?.textContent).toBe("Last 6 hours");
+  expect(Array.from(flop.querySelectorAll(".flop-facts dt")).map(v => v.textContent)).toEqual(["Buyer accounts", "Miners", "Jobs settled", "Gateway share of compute"]);
   expect(Array.from(flop.querySelectorAll(".flop-facts dd")).map(v => v.textContent)).toEqual(["3", "34", "185", "50%"]);
+  expect(flop.textContent).toContain("FLOP's gateway buys on behalf of all its customers, so it counts as one buyer.");
   expect(flop.textContent).toContain("The perp settles on seller prices, not on this rate.");
 });
 
@@ -180,7 +183,7 @@ test("trade link appears when configured", async () => {
   site.computeTrade = "https://example.invalid/trade";
   try {
     const container = await render(liveFeed());
-    expect(container.querySelector('a[href="https://example.invalid/trade"]')?.textContent).toContain("Trade the perp");
+    expect(container.querySelector('a[href="https://example.invalid/trade"]')?.textContent).toContain("Trade COMPUTE-PERP");
   } finally { site.computeTrade = trade; }
 });
 
@@ -311,7 +314,7 @@ test("a flop_standin price explains its own source", async () => {
 
 test("without a feed the page says so", async () => {
   const container = await render(null);
-  expect(container.textContent).toContain("Price feed not configured.");
+  expect(container.textContent).toContain("The compute index is unreachable right now.");
 });
 
 test("log scale ticks stay on 1-2-5 steps and inside the range", () => {
@@ -340,7 +343,8 @@ test("docs explain how the index is made, with live values from the feed", async
   expect(how.textContent).toContain("listed and up");
   expect(how.textContent).toContain(`Geometric mean of the ${marketFixture().index.n_models} model medians`);
   expect(how.textContent).toContain("Clamp now: off (n<3).");
-  expect(how.textContent).toContain("staging verify-push-log");
+  expect(how.textContent).toContain("Each settlement price is written to Solana (latest transaction) and logged as a signed line");
+  expect(how.textContent).not.toMatch(/verify-push-log|stand-in/);
   expect(how.textContent).toContain("Independent of Flop Labs and OpenRouter.");
 });
 
@@ -396,18 +400,20 @@ test("$ per bn G_n column: formula, nulls as dashes, cheapest first when sorted"
   await cleanup?.();
   container = await render(liveFeed(Date.now(), m => ({
     ...m, compute_price: { median_usd_per_bn_gn: 0.0021, p25: 0.0012, p75: 0.0045, n_models: 19 },
-    models: m.models.map((x, i) => ({ ...x, usd_per_bn_gn: i === 0 ? null : 0.001 * (i + 1), compute: i === 1 ? { params: 27e9, gn_per_token: 54, source: "2 × parameters" } : null })),
+    models: m.models.map((x, i) => ({ ...x, usd_per_bn_gn: i === 0 ? null : 0.001 * (i + 1), compute: i === 1 ? { params: 27e9, gn_per_token: 54, source: "2 × parameters" } : i === 2 ? { params: 30e9, gn_per_token: 6.6, source: "2x_active_params_est", basis: "2x_active_params_est" } : null })),
   })));
   const head = container.querySelector(".board-cols .c-gn")!;
   expect(head.textContent).toBe("$ / bn G_n");
   expect(head.getAttribute("title")).toContain("Price per 1M tokens ÷ compute per token");
-  expect(head.getAttribute("title")).toContain("otherwise 2 × parameters");
+  expect(head.getAttribute("title")).toContain("FLOP's registry value where it lists the model, otherwise 2 × active parameters, taken from the model id or estimated from its expert counts (marked est.); — when unknown.");
   expect(container.querySelector(".cx-gn-note")?.textContent).toContain("Across 19 models the median is $0.0021, middle half $0.0012 to $0.0045");
   const rows = container.querySelectorAll(".board-row");
   expect(rows[0].querySelector(".c-gn b")?.textContent).toBe("—");
   expect(rows[0].querySelector(".gn-track")).toBeNull();
   expect(rows[1].querySelector(".c-gn b")?.textContent).toBe("$0.002");
   expect(rows[1].querySelector(".gn-dot")).not.toBeNull();
+  expect(rows[1].querySelector(".gn-est")).toBeNull();
+  expect(rows[2].querySelector(".c-gn b + .gn-est")?.textContent).toBe(" est.");
   await click(rows[1].querySelector(".board-head")!);
   expect(rows[1].querySelector(".panel-meta")?.textContent).toContain("54 G_n per token (2 × parameters)");
   await click(Array.from(container.querySelectorAll("#board .cx-sort button")).find(b => b.textContent === "$ per bn G_n")!);
@@ -429,4 +435,10 @@ test("FLOP panel: implied FLOP price, labelled derived, only when the feed has i
   await cleanup?.();
   container = await render(liveFeed(Date.now(), m => ({ ...m, flop: { gn_price_flop: null, implied_flop_usd: null, basis_model: null } })));
   expect(container.querySelector(".flop-implied")).toBeNull();
+});
+
+test("the FLOP window label reads the feed's window, else six hours", () => {
+  expect(windowLabel(site.flopWindowS)).toBe("Last 6 hours");
+  expect(windowLabel(3600)).toBe("Last 1 hour");
+  expect(windowLabel(1800)).toBe("Last 30 minutes");
 });

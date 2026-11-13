@@ -46,7 +46,7 @@
 .site .section-description { margin: 22px 0 0; max-width: 460px; font-size: 18px; line-height: 1.55; color: var(--site-secondary); }
 .site .client-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 28px; }
 .site .client-chips span { padding: 8px 14px; border-radius: 999px; background: var(--site-white-4); border: 1px solid var(--site-line-9); font-size: 14px; color: var(--brand-mist); }
-.site .tools-demo { flex: 999 1 560px; display: grid; gap: 16px; }
+.site .tools-terminal { flex: 999 1 560px; display: grid; gap: 16px; }
 .site .terminal { background: var(--site-surface-terminal); border: 1px solid var(--site-accent-25); border-radius: 22px; overflow: hidden; }
 .site .terminal-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--site-line-6); }
 .site .terminal-dots { display: flex; gap: 6px; }
