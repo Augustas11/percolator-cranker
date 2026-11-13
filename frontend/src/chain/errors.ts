@@ -26,9 +26,11 @@ function failedWith(logs: string[], program: string) {
 /** A plain sentence for a failed send, or null when the failure is not one of the common cases. */
 export function plainChainError(raw: string, logs: string[], programs: { engine?: string; matcher?: string } = {}): string | null {
   const text = `${raw}\n${logs.join("\n")}`;
-  if (/user rejected|rejected the request|request rejected|declined|cancell?ed by (the )?user/i.test(text)) return "You declined the transaction in your wallet.";
-  if (/insufficient (funds|lamports)|InsufficientFundsForFee|no record of a prior credit/i.test(text)) return "Your wallet does not have enough devnet SOL to pay the network fee.";
-  if (/blockhash not found|BlockhashNotFound|block height exceeded|TransactionExpired|has expired/i.test(text)) return "The transaction expired before it landed. Try again.";
+  if (/user rejected the request|\b4001\b|transaction cancell?ed/i.test(text)) return "You declined the transaction in your wallet.";
+  // SOL for fees only. The token program's "Error: insufficient funds" is about the token balance, below.
+  if (/InsufficientFundsForFee|no record of a prior credit|insufficient lamports/i.test(text)) return "Your wallet does not have enough devnet SOL to pay the network fee.";
+  if (/Program log: Error: insufficient funds/i.test(text)) return "You do not have that much test USDC in your wallet.";
+  if (/blockhash not found|BlockhashNotFound|block height exceeded|TransactionExpiredBlockheightExceeded/i.test(text)) return "The transaction expired before it landed. Try again.";
   const matcher = programs.matcher ? failedWith(logs, programs.matcher) : null;
   if (matcher !== null && MATCHER[matcher]) return MATCHER[matcher];
   const engine = programs.engine ? failedWith(logs, programs.engine) : null;

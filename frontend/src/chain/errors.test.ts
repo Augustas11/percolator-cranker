@@ -14,6 +14,9 @@ test.each([
   ["Transaction simulation failed: Error processing Instruction 1: custom program error: 0x1b", ["Program Engine1111 failed: custom program error: 0x1b"], "The market price is stale right now, so the trade was refused. Try again in a minute."],
   ["Transaction simulation failed: Error processing Instruction 1: custom program error: 0x5", ["Program log: margin check failed: undercollateralized", "Program Engine1111 failed: custom program error: 0x5"], "Not enough free collateral for this size. Deposit more test USDC or trade smaller."],
   ["Transaction simulation failed: Error processing Instruction 1: custom program error: 0x5", ["Program Engine1111 failed: custom program error: 0x5"], "The network rejected the transaction before sending it."],
+  ["Transaction simulation failed: Error processing Instruction 0: custom program error: 0x1", ["Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [1]", "Program log: Error: insufficient funds", "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA failed: custom program error: 0x1"], "You do not have that much test USDC in your wallet."],
+  ["WalletSignTransactionError: Transaction cancelled", [], "You declined the transaction in your wallet."],
+  ["{\"code\":4001,\"message\":\"User denied\"}", [], "You declined the transaction in your wallet."],
 ] as [string, string[], string][])("plain sentence for %s", (raw, logs, expected) => {
   expect(plainChainError(raw, logs, programs)).toBe(expected);
 });
@@ -27,4 +30,9 @@ test("toChainError keeps the raw text and logs as details, with a fallback sente
   expect(err).toBeInstanceOf(ChainError);
   expect(err.message).toBe("The transaction failed.");
   expect(err.details).toBe("something odd\nProgram log: one\nProgram log: two");
+});
+
+test("wording that is not a wallet rejection or a blockhash expiry is not read as one", () => {
+  expect(plainChainError("Program log: order declined by risk check", [], programs)).toBeNull();
+  expect(plainChainError("Program log: the season has expired", [], programs)).toBeNull();
 });

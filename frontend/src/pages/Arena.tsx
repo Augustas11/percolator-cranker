@@ -66,13 +66,14 @@ export default function Arena({ indexer }: { indexer: IndexerClient | null }) {
   const fills = useIndexer<FillRow[]>(live, loadFills, 10_000);
   const [traders, setTraders] = useState<number | null>(null);
   const line = seasonLine();
+  const oi = season ? openInterestText(season.open_interest_usd, wrongMarket ? null : openUnits(info)) : null;
   const stats: [string, string][] = [
     ...(traders !== null ? [["Traders", traders.toLocaleString("en-US")] as [string, string]] : []),
     ...(season ? [["Fills", season.trades.toLocaleString("en-US")] as [string, string]] : []),
     ...(info?.volume_24h !== undefined && !wrongMarket ? [["24 h volume", usdAtoms(info.volume_24h)] as [string, string]] : []),
     ...(info?.fills_24h !== undefined && !wrongMarket ? [["24 h fills", info.fills_24h.toLocaleString("en-US")] as [string, string]] : []),
     ...(season ? [["Volume", usdAtoms(season.volume_usd)] as [string, string]] : []),
-    ...(season && openInterestText(season.open_interest_usd, wrongMarket ? null : openUnits(info)) ? [["Open interest", openInterestText(season.open_interest_usd, wrongMarket ? null : openUnits(info))!] as [string, string]] : []),
+    ...(oi ? [["Open interest", oi] as [string, string]] : []),
   ];
   return <div className="arena">
     <header className="arena-hero">

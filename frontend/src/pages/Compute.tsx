@@ -360,8 +360,8 @@ function Flop({ latest, market, now }: { latest: ComputeLatest; market: ComputeM
       {ok(routed) && ok(list) && <p className="flop-list"><b>{perMFlop(list)}</b> per 1M FLOP, from list prices</p>}
       <p className="perp-why">The FLOP price at which FLOP's rate equals what the open market pays for the same compute.</p>
       <dl className="flop-facts">
-        {ok(gnPrice) && <div><dt>Market price of compute</dt><dd>{usdSmall(gnPrice)}</dd><small>$ per bn G_n{basis ? `, ${basis}` : ""}, from what requests pay</small></div>}
-        {ok(gnPrice) && ok(gnList) && <div><dt>At list prices</dt><dd>{usdSmall(gnList)}</dd><small>$ per bn G_n, median list price, as on the board</small></div>}
+        {ok(gnPrice) && <div><dt>Market price of compute</dt><dd>{usdSmall(gnPrice)}</dd><small>$ per bn G_n{basis ? `, ${basis}` : ""}, {ok(routed) ? "from what requests pay" : "from list prices"}</small></div>}
+        {ok(gnPrice) && ok(gnList) && ok(routed) && <div><dt>At list prices</dt><dd>{usdSmall(gnList)}</dd><small>$ per bn G_n, median list price, as on the board</small></div>}
         {ok(rate) && <div><dt>FLOP's rate</dt><dd>{rate.toPrecision(3)}</dd><small>FLOP per G_n</small></div>}
       </dl>
       {parity?.as_of_ms != null && <p className="cx-updated">Parity read {ago(parity.as_of_ms, now)}</p>}

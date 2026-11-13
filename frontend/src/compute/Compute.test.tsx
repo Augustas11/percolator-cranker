@@ -562,3 +562,15 @@ test("the FLOP window label reads the feed's window, else six hours", () => {
   expect(windowLabel(3600)).toBe("Last 1 hour");
   expect(windowLabel(1800)).toBe("Last 30 minutes");
 });
+
+test("FLOP parity without the routed figure labels everything as list-based", async () => {
+  const now = Date.now();
+  const container = await render(liveFeed(now, m => ({ ...m,
+    models: m.models.map(x => x.id === "qwen/qwen3.8-27b" ? { ...x, usd_per_bn_gn: 5.71 } : x),
+    flop: m.flop ? { ...m.flop, implied_flop_usd_routed: undefined, parity: m.flop.parity ? { ...m.flop.parity, implied_flop_usd_routed: null } : m.flop.parity } : m.flop })));
+  const flop = panel(container, "compute-flop-heading");
+  expect(flop.querySelector(".flop-parity .perp-price span")?.textContent).toBe("per 1M FLOP, from list prices");
+  expect(flop.textContent).not.toContain("from what requests pay");
+  expect(Array.from(flop.querySelectorAll(".flop-parity .flop-facts dt"), d => d.textContent)).not.toContain("At list prices");
+  expect(flop.querySelector(".flop-parity .flop-facts small")?.textContent).toMatch(/, from list prices$/);
+});
