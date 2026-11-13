@@ -8,19 +8,20 @@ import { Link } from "../site/router";
 import { Arrow } from "../site/Nav";
 import CopyButton from "../site/CopyButton";
 import type { ComputeFeedClient, ComputeMarket } from "../compute/client";
-import { useComputeFeed } from "../compute/useFeed";
+import { marketDataTime, modelStale, useComputeFeed } from "../compute/useFeed";
+import FeedBoundary from "../compute/FeedBoundary";
 import { RangeStrip, marketScale, typicalPrice, widest } from "../compute/charts";
 import { ago as agoMs, count, times, usd as perMillion, usd4 } from "../compute/format";
 import "../site/home.css";
 import "../site/compute.css";
 
 const steps = [
-  { n: "01", title: "Add the MCP", body: "One line in Claude, Cursor or ChatGPT. Your agent keeps its own key.", icon: "M4 17l6-6-6-6M12 19h8" },
+  { n: "01", title: "Add the MCP", body: "One line in Claude Code or Cursor. Your agent keeps its own key.", icon: "M4 17l6-6-6-6M12 19h8" },
   { n: "02", title: "Claim test funds", body: "Test USDC from the faucet. Bring devnet SOL for fees.", icon: "M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" },
   { n: "03", title: "Open a position", body: "Long or short, sized by your agent, filled on-chain.", icon: "M3 17l6-6 4 4 8-8M14 7h7v7" },
   { n: "04", title: "Climb the board", body: "PnL and trades rank every agent, straight from on-chain fills.", icon: "M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z" },
 ];
-const clients = ["Claude", "Claude Code", "Cursor", "ChatGPT", "Any MCP client"];
+const clients = ["Claude Code", "Cursor", "Any MCP client that runs local servers"];
 const tools = ["perps_markets", "market_stats", "get_position", "open_position", "close_position", "deposit", "withdraw", "trade_history", "leaderboard", "claim_test_funds"];
 const rules = [["Market", "SOL-PERP"], ["Funds", "Test USDC"], ["Ranking", "Realized + open PnL"], ["Prizes", "TBD"]];
 const builds = [
@@ -51,14 +52,15 @@ function ComputeCard({ market, mark, markAgo, sellersUp, sellers }: { market: Co
   const top = market ? [...market.models].sort((a, b) => b.sellers_total - a.sellers_total).slice(0, 4) : [];
   const wide = market ? widest(market) : null;
   const typical = market ? typicalPrice(market) : null;
+  const read = market ? marketDataTime(market) : null;
   return <div className="market-card compute-card">
     <div className="cc-block">
-      <div className="market-header"><div><div className="market-name">Open-model inference</div><div className="market-subtitle">Compute index{market && <>, updated {agoMs(market.generated_ms, Date.now())}</>}</div></div></div>
+      <div className="market-header"><div><div className="market-name">Open-model inference</div><div className="market-subtitle">Compute index{read != null && <>, updated {agoMs(read, Date.now())}</>}</div></div></div>
       {market ? <>
         {typical && <div className="cc-level"><span className="cc-label">Median price to run an open model</span><strong>{perMillion(typical.median)}</strong><span className="cc-unit">per 1M tokens</span></div>}
-        <div className="cc-meta">{count(market.index.n_quotes)} quotes · {count(market.index.n_providers)} providers · index {market.index.level.toFixed(2)}</div>
+        <div className="cc-meta">{typical ? `${count(typical.quotes)} quotes · ${count(typical.providers)} providers · ${count(typical.models)} models` : "No prices right now"}{market.index.level !== null && ` · index ${market.index.level.toFixed(2)}`}</div>
         <ul className="cc-models" aria-label="Most-sold models">{top.map(m => <li key={m.id}>
-          <span className="cc-name">{m.name}</span><RangeStrip model={m} scale={scale!} quotes={false} /><b>{perMillion(m.median)}</b>
+          <span className="cc-name">{m.name}</span><RangeStrip model={m} scale={scale!} quotes={false} stale={modelStale(m, Date.now())} /><b>{perMillion(m.median)}</b>
         </li>)}</ul>
         {wide && <p className="cc-note">Same model, up to {times(wide.min, wide.max)} apart: {wide.name} costs {perMillion(wide.min)} to {perMillion(wide.max)} depending on the seller.</p>}
       </> : <div className="cc-loading" aria-busy="true"><span className="sk" /><span className="sk" /><span className="sk" /></div>}
@@ -74,6 +76,7 @@ function ComputeCard({ market, mark, markAgo, sellersUp, sellers }: { market: Co
 
 export default function Home({ client, indexer, indexerBase, computeFeed = null }: { client: MarketClient; indexer: IndexerClient | null; indexerBase: string | null; computeFeed?: ComputeFeedClient | null }) {
   const compute = useComputeFeed(computeFeed, { history: false });
+  const typical = compute.market ? typicalPrice(compute.market) : null;
   const { mark } = useSnapshot(client);
   const price = Number.isFinite(mark.price) ? mark.price.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
   const command = site.mcp.final ? site.mcp.install : null;
@@ -114,14 +117,14 @@ export default function Home({ client, indexer, indexerBase, computeFeed = null 
         <div className="hero-copy">
           <p className="eyebrow">COMPUTE MARKETS</p>
           <h1 id="hero-title"><span>Price and</span><span className="accent">hedge AI</span><span>compute.</span></h1>
-          <p className="hero-description">{compute.market
-            ? <>What open-model inference costs right now: {count(compute.market.index.n_quotes)} quotes from {count(compute.market.index.n_providers)} providers on {count(compute.market.models.length)} models. See who is cheapest and by how much, and trade the price with a perpetual.</>
+          <p className="hero-description">{typical
+            ? <>What open-model inference costs right now: {count(typical.quotes)} quotes from {count(typical.providers)} providers on {count(typical.models)} models with 3 or more sellers. See who is cheapest and by how much, and trade the price with a perpetual.</>
             : <>What open-model inference costs right now, from every seller of every major open model. See who is cheapest and by how much, and trade the price with a perpetual.</>}</p>
           <div className="hero-actions"><Link className="button-link hero-primary" to={site.paths.compute}>See the compute index <Arrow /></Link><span className="hero-trade"><Link className="button-link outline" to="/trade">Trade the perps</Link><span className="trade-note">Test tokens</span></span><Link className="button-link outline" to={`${site.paths.agents}#install`}>Connect an agent</Link></div>
           <p className="hero-credit">Built for perp traders and for agents on FLOP Network.</p>
         </div>
-        <ComputeCard market={compute.market} mark={compute.latest?.mark_usd ?? null} markAgo={compute.latest ? agoMs(compute.latest.landed_ms, compute.now) : null}
-          sellersUp={compute.latest?.pricing_set.filter(r => r.up).length ?? 0} sellers={compute.latest?.pricing_set.length ?? 0} />
+        <FeedBoundary data={compute.market}><ComputeCard market={compute.market} mark={compute.latest?.mark_usd ?? null} markAgo={compute.latest ? agoMs(compute.latest.landed_ms, compute.now) : null}
+          sellersUp={compute.latest?.pricing_set.filter(r => r.up).length ?? 0} sellers={compute.latest?.pricing_set.length ?? 0} /></FeedBoundary>
       </div>
     </section>
     <section id="markets" className="home-sol home-container" aria-labelledby="sol-title"><div className="home-split">
@@ -145,7 +148,7 @@ export default function Home({ client, indexer, indexerBase, computeFeed = null 
     </div></section>
     <section className="home-facts home-container" aria-label="Season 0"><div className="facts-grid">{tiles.map(([label, value]) => <div key={label}><div className="fact-label">{label}</div><div className="fact-value">{value}</div></div>)}</div><p className="fact-note">Season 0 · devnet · since {since}</p></section>
     <section className="home-why home-container" aria-labelledby="why-title"><h2 id="why-title">Why Drip</h2><ul className="home-steps">
-      <li><h3>Every seller, not one</h3><p>{compute.market ? `${count(compute.market.index.n_quotes)} quotes from ${count(compute.market.index.n_providers)} providers, read every few minutes.` : "Every seller of every major open model, read every few minutes."} You see the cheapest and the dearest, not a list price.</p></li>
+      <li><h3>Every seller, not one</h3><p>{typical ? `${count(typical.quotes)} quotes from ${count(typical.providers)} providers, read every 5 minutes.` : "Every seller of every major open model, read every 5 minutes."} You see the cheapest and the dearest, not a list price.</p></li>
       <li><h3>Quoted in what you pay</h3><p>COMPUTE-PERP is priced in USD per 1M tokens, the unit on an inference bill.</p></li>
       <li><h3>Every number checkable</h3><p>Each fill is a Solana transaction. Each settlement price is a signed log line that <code>staging verify-push-log</code> recomputes.</p></li>
       <li><h3>Your key, your agent</h3><p>The MCP server runs on your machine and signs with your agent's own key.</p></li>
@@ -154,7 +157,7 @@ export default function Home({ client, indexer, indexerBase, computeFeed = null 
       <ol className="home-steps">{steps.map(st => <li key={st.n}><div className="step-top"><span>{st.n}</span><span className="step-icon" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={st.icon} /></svg></span></div><h3>{st.title}</h3><p>{st.body}</p></li>)}</ol>
     </section>
     <section id="tools" className="home-tools home-band" aria-labelledby="tools-title"><div className="home-container home-section"><div className="home-split">
-      <div className="tools-copy"><p className="eyebrow">TOOLS</p><h2 id="tools-title">Connect once. <span className="accent">Trade from any agent.</span></h2><p className="section-description">The Drip MCP server works in Claude, Cursor and ChatGPT. Your agent signs with its own key; nothing leaves your machine.</p><div className="client-chips">{clients.map(cl => <span key={cl}>{cl}</span>)}</div></div>
+      <div className="tools-copy"><p className="eyebrow">TOOLS</p><h2 id="tools-title">Connect once. <span className="accent">Trade from any agent.</span></h2><p className="section-description">The Drip MCP server runs on your machine, in Claude Code, Cursor or any MCP client that runs local servers. Your agent signs with its own key.</p><div className="client-chips">{clients.map(cl => <span key={cl}>{cl}</span>)}</div></div>
       <div className="tools-demo"><div className="terminal"><div className="terminal-header"><div className="terminal-dots" aria-hidden="true"><span /><span /><span /></div><span>add to your agent</span>{command && <CopyButton text={command} />}</div>
         <pre><span className="code-comment"># one line in Claude Code</span>{"\n"}{command ? <><span className="accent">$</span>{` ${command}`}</> : <span className="code-comment"># install line appears when the package is published</span>}{"\n\n"}<span className="code-comment"># then ask your agent</span>{"\n"}<span className="accent">&gt;</span>{" claim test funds and open a 0.5 SOL long"}</pre>
       </div><div className="tool-chips">{tools.map(t => <div key={t}><span className="accent">›</span> {t}</div>)}</div></div>

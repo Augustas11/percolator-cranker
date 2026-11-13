@@ -333,8 +333,19 @@ test("home explains why Drip with the feed's numbers", async () => {
   expect(why.querySelector("h2")?.textContent).toBe("Why Drip");
   expect(Array.from(why.querySelectorAll("h3"), el => el.textContent)).toEqual(["Every seller, not one", "Quoted in what you pay", "Every number checkable", "Your key, your agent"]);
   const market = marketFixture(now);
-  expect(why.querySelector("p")?.textContent).toBe(`${market.index.n_quotes} quotes from ${market.index.n_providers} providers, read every few minutes. You see the cheapest and the dearest, not a list price.`);
+  expect(why.querySelector("p")?.textContent).toBe(`${typicalPrice(market)!.quotes} quotes from ${typicalPrice(market)!.providers} providers, read every 5 minutes. You see the cheapest and the dearest, not a list price.`);
   expect(why.textContent).toContain("staging verify-push-log");
+});
+
+test("home card survives a feed with no index base and no cheapest seller", async () => {
+  const feed = new MockComputeFeedClient();
+  const base = await feed.market();
+  vi.spyOn(feed, "market").mockResolvedValue({ ...base, index: { ...base.index, level: null, base_ms: null }, models: base.models.map(m => ({ ...m, cheapest: null })) });
+  const container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), feed);
+  const meta = container.querySelector(".compute-card .cc-meta")?.textContent ?? "";
+  expect(meta).toMatch(/quotes · \d+ providers · \d+ models$/);
+  expect(container.querySelector(".compute-card .cc-level")).not.toBeNull();
+  expect(container.textContent).not.toMatch(/ChatGPT/);
 });
 
 test("home leads with the compute index and the compute perp, SOL-PERP second", async () => {
@@ -343,12 +354,12 @@ test("home leads with the compute index and the compute perp, SOL-PERP second", 
   const market = marketFixture(now);
   const card = container.querySelector(".compute-card")!;
   expect(card.querySelector(".cc-level")?.textContent).toBe(`Median price to run an open model${usd(typicalPrice(market)!.median)}per 1M tokens`);
-  expect(card.querySelector(".cc-meta")?.textContent).toBe(`${market.index.n_quotes} quotes · ${market.index.n_providers} providers · index ${market.index.level.toFixed(2)}`);
+  expect(card.querySelector(".cc-meta")?.textContent).toBe(`${typicalPrice(market)!.quotes} quotes · ${typicalPrice(market)!.providers} providers · ${typicalPrice(market)!.models} models · index ${market.index.level!.toFixed(2)}`);
   expect(container.querySelector(".announcement")).toBeNull();
   expect(card.querySelectorAll(".cc-models .strip")).toHaveLength(4);
   expect(card.querySelector(".cc-perp .market-price")?.textContent).toBe("$0.3036 / 1M tokens");
   expect(card.textContent).toContain("Settlement price, pushed 3 min ago. 2 of 2 full-precision sellers up.");
-  expect(container.querySelector(".hero-description")?.textContent).toContain(`What open-model inference costs right now: ${market.index.n_quotes} quotes from ${market.index.n_providers} providers on ${market.models.length} models.`);
+  expect(container.querySelector(".hero-description")?.textContent).toContain(`What open-model inference costs right now: ${typicalPrice(market)!.quotes} quotes from ${typicalPrice(market)!.providers} providers on ${typicalPrice(market)!.models} models with 3 or more sellers.`);
   expect(container.querySelector('.home-hero .hero-primary')?.getAttribute("href")).toBe("/compute");
   expect(container.querySelector(".hero-credit")?.textContent).toBe("Built for perp traders and for agents on FLOP Network.");
   const sections = Array.from(container.querySelectorAll("main > section")).map(s => s.className);
@@ -382,12 +393,22 @@ test("footer blurb positions Drip and every GitHub link goes to drip-markets", a
 
 test("agents page: one flow from install to the Arena, compute examples only once the market is configured", async () => {
   const container = await render(site.paths.agents, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient());
-  expect(Array.from(container.querySelectorAll("main h2"), h => h.textContent)).toEqual(["Install the MCP", "What your agent can call", "Strategies", "The Arena", "Code"]);
+  expect(Array.from(container.querySelectorAll("main h2"), h => h.textContent)).toEqual(["Install the MCP", "What your agent can call", "Price data over HTTP", "Strategies", "The Arena", "Code"]);
   expect(Array.from(container.querySelectorAll(".ag-groups h3"), h => h.textContent)).toEqual(["Prices", "Trading", "Account"]);
   const names = Array.from(container.querySelectorAll(".ag-groups dt"), d => d.textContent);
   for (const tool of ["perps_markets", "market_stats", "get_position", "deposit", "open_position", "close_position", "withdraw", "trade_history", "leaderboard", "claim_test_funds"]) expect(names).toContain(tool);
-  expect(container.textContent).toContain("Long COMPUTE-PERP");
-  expect(container.textContent).toContain("Short COMPUTE-PERP");
+  // The feed files are HTTP, not MCP tools: their own group, with their URLs.
+  expect(names).not.toContain("market.json");
+  expect(Array.from(container.querySelectorAll(".ag-files dt"), d => d.textContent)).toEqual(["market.json", "latest.json"]);
+  expect(Array.from(container.querySelectorAll(".ag-files a"), a => a.getAttribute("href"))).toEqual([`${site.officialSite}/compute-feed/market.json`, `${site.officialSite}/compute-feed/latest.json`]);
+  expect(container.textContent).toContain("rewrites both every minute");
+  // Until the MCP takes a compute market, nothing claims compute hedging works.
+  expect(container.querySelector(".ag-lead")?.textContent).not.toMatch(/hedges/);
+  expect(container.textContent).not.toMatch(/Long COMPUTE-PERP|Short COMPUTE-PERP|ChatGPT|5-sample/);
+  expect(container.textContent).toContain("any MCP client that runs local servers");
+  expect(container.textContent).toContain("exponential average");
+  // Addresses come from retired chain defaults: hidden until the flag is set.
+  expect(container.querySelector(".addresses")).toBeNull();
   expect(container.textContent).toContain("Built for agents on FLOP Network");
   expect(container.querySelectorAll("#install pre")).toHaveLength(3);
   expect(container.textContent).not.toMatch(/Percolator|market: "/);
@@ -399,5 +420,14 @@ test("agents page: one flow from install to the Arena, compute examples only onc
     expect(c2.querySelectorAll("#install pre")).toHaveLength(4);
     expect(c2.textContent).toContain('Pass market: "COMPUTE-PERP" for COMPUTE-PERP.');
     expect(c2.textContent).toContain("on both markets");
+    expect(c2.querySelector(".ag-lead")?.textContent).toContain("hedges its compute bill with COMPUTE-PERP");
+    expect(c2.textContent).toContain("Long COMPUTE-PERP");
+    expect(c2.textContent).toContain("Short COMPUTE-PERP");
   } finally { site.mcp.computeMarket = compute; }
+  await (cleanup as (() => Promise<void>) | undefined)?.(); cleanup = undefined;
+  site.showAddresses = true;
+  try {
+    const c3 = await render(site.paths.agents);
+    expect(c3.querySelector(".addresses")?.textContent).toContain(site.programId);
+  } finally { site.showAddresses = false; }
 });

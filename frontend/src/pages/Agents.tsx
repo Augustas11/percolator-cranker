@@ -20,8 +20,6 @@ export default function Agents({ feed }: { feed: ComputeFeedClient | null }) {
   const compute = site.mcp.computeMarket;
   const groups: { job: string; tools: [string, string][] }[] = [
     { job: "Prices", tools: [
-      ["market.json", market ? `Every seller's quote for ${count(market.models.length)} open models: cheapest seller, median and spread per model.` : "Every seller's quote for every major open model: cheapest seller, median and spread per model."],
-      ["latest.json", latest ? `The COMPUTE-PERP settlement price, now ${usd4(latest.mark_usd)} per 1M tokens, and the sellers behind it.` : "The COMPUTE-PERP settlement price per 1M tokens and the sellers behind it."],
       ["perps_markets", "Markets, leverage and matcher limits."],
       ["market_stats", "Mark price, fills, open interest and keeper uptime."],
     ] },
@@ -38,11 +36,18 @@ export default function Agents({ feed }: { feed: ComputeFeedClient | null }) {
       ["leaderboard", "The Arena board and the agent's own rank."],
     ] },
   ];
+  const files: [string, string][] = [
+    ["market.json", market ? `Every seller's quote for ${count(market.models.length)} open models: cheapest seller, median and spread per model.` : "Every seller's quote for every major open model: cheapest seller, median and spread per model."],
+    ["latest.json", latest ? `The COMPUTE-PERP settlement price, now ${usd4(latest.mark_usd)} per 1M tokens, and the sellers behind it.` : "The COMPUTE-PERP settlement price per 1M tokens and the sellers behind it."],
+  ];
+  const reach = market ? `${count(market.index.n_quotes)} seller quotes` : "every seller";
   return <div className="cx agents">
     <div className="ag-hero">
       <h1 className="cx-title">Agents</h1>
-      <p className="ag-lead">Your agent reads what inference costs across {market ? `${count(market.index.n_quotes)} seller quotes` : "every seller"}, hedges its compute bill with COMPUTE-PERP, trades SOL-PERP, and is ranked on the Arena by PnL.</p>
-      <p className="ag-sub">Built for agents on FLOP Network, where compute is the daily running cost. Works with Claude Code, Cursor, ChatGPT and any MCP client; the agent signs with its own key.</p>
+      <p className="ag-lead">{compute
+        ? <>Your agent reads what inference costs across {reach}, hedges its compute bill with COMPUTE-PERP, trades SOL-PERP, and is ranked on the Arena by PnL.</>
+        : <>Your agent reads what inference costs across {reach}, trades SOL-PERP, and is ranked on the Arena by PnL.</>}</p>
+      <p className="ag-sub">Built for agents on FLOP Network, where compute is the daily running cost. The MCP server runs on your machine, in Claude Code, Cursor or any MCP client that runs local servers; the agent signs with its own key.</p>
     </div>
 
     <section id="install" className="cx-section" aria-labelledby="install-heading">
@@ -50,7 +55,7 @@ export default function Agents({ feed }: { feed: ComputeFeedClient | null }) {
       <h2 id="install-heading">Install the MCP</h2>
       {site.mcp.final ? <>
         <Code>{site.mcp.install}</Code>
-        <details className="ag-more"><summary>Cursor, ChatGPT and other MCP clients</summary><Code>{site.mcp.json}</Code></details>
+        <details className="ag-more"><summary>Cursor and other MCP clients that run local servers</summary><Code>{site.mcp.json}</Code></details>
         <p className="cx-k ag-step">Step 2 · first trade</p>
         <h3 className="ag-h3">Ask your agent</h3>
         <Code>{"Claim test funds, deposit 500 USDC and open a 0.5 SOL long on SOL-PERP. Then show my position."}</Code>
@@ -63,17 +68,22 @@ export default function Agents({ feed }: { feed: ComputeFeedClient | null }) {
       <h2 id="tools-heading">What your agent can call</h2>
       <div className="ag-groups">{groups.map(g => <div key={g.job}>
         <h3>{g.job}</h3>
-        <dl>{g.tools.map(([name, what]) => <div key={name}><dt><code>{name.endsWith(".json") ? <a href={feedUrl(name)}>{name}</a> : name}</code></dt><dd>{what}</dd></div>)}</dl>
+        <dl>{g.tools.map(([name, what]) => <div key={name}><dt><code>{name}</code></dt><dd>{what}</dd></div>)}</dl>
       </div>)}</div>
-      <p className="ag-note">The two JSON files are plain HTTP, no key needed; they refresh every minute.</p>
+    </section>
+
+    <section className="cx-section" aria-labelledby="files-heading">
+      <h2 id="files-heading">Price data over HTTP</h2>
+      <dl className="ag-files">{files.map(([name, what]) => <div key={name}><dt><code>{name}</code></dt><dd>{what}<a href={feedUrl(name)}>{feedUrl(name).replace("https://", "")}</a></dd></div>)}</dl>
+      <p className="ag-note">Plain HTTP files, not MCP tools; no key needed. The feed rewrites both every minute, and each carries the time of its newest data.</p>
     </section>
 
     <section className="cx-section" aria-labelledby="strategies-heading">
       <h2 id="strategies-heading">Strategies</h2>
-      <div className="ag-compute">
+      {compute && <div className="ag-compute">
         <div><p className="cx-k">Your agent buys inference</p><h3>Long COMPUTE-PERP</h3><p>If the price per 1M tokens rises, the long gains what the inference bill loses.</p></div>
         <div><p className="cx-k">You sell inference or mine on FLOP</p><h3>Short COMPUTE-PERP</h3><p>If the price falls, the short gains what your revenue per token loses.</p></div>
-      </div>
+      </div>}
       <h3 className="ag-h3">Starter agents</h3>
       <ul className="ag-starters">{houseAgents.map(a => <li key={a.name}><code>{a.name}</code><span>{a.note}</span></li>)}</ul>
       <Code>{site.agents.run}</Code>
@@ -99,10 +109,10 @@ export default function Agents({ feed }: { feed: ComputeFeedClient | null }) {
         {site.agents.source && <li><a href={site.agents.source}>agents/</a><span>The three starter agents</span></li>}
         <li><a href={site.issues}>Issues</a><span>Questions, new tools, agents to list</span></li>
       </ul>
-      <dl className="addresses">
+      {site.showAddresses && <dl className="addresses">
         <dt>Program</dt><dd><a href={site.explorerAddress(site.programId)}>{site.programId}</a></dd>
         <dt>SOL-PERP market</dt><dd><a href={site.explorerAddress(site.market)}>{site.market}</a></dd>
-      </dl>
+      </dl>}
     </section>
   </div>;
 }

@@ -20,6 +20,9 @@ export const site = {
   runbook: `${repo}/blob/main/docs/RUNBOOK.md`,
   officialSite: "https://drip-devnet.vercel.app",
   explorerAddress: (id: string) => `https://explorer.solana.com/address/${id}?cluster=devnet`,
+  // Program id and SOL-PERP market from chain/config.ts defaults, which still point at a retired market.
+  // TODO-OWNER: set true once chain/config.ts is repointed; until then /agents does not list them.
+  showAddresses: false as boolean,
   programId: devnetConfig.programId.toBase58(),
   market,
   mcp: {

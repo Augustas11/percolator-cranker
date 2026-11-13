@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket } from "./client";
+import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket, MarketModel } from "./client";
 
 export const STALE_MS = 30 * 60_000;
 const REFRESH_MS = 60_000;
@@ -54,9 +54,21 @@ export function latestStale(latest: ComputeLatest | null, now: number) {
     : latest.generated_ms - latest.landed_ms > STALE_MS ? "No new price for over 30 minutes." : null;
 }
 
-/** Why market.json is stale, or null. */
+/** When the market's newest data was read: `data_ms`, or `generated_ms` from feeds that predate the field. Null when the feed says it has none. */
+export function marketDataTime(market: ComputeMarket) {
+  return market.data_ms === undefined ? market.generated_ms : market.data_ms;
+}
+
+/** Why market.json is stale, or null. Judged on the newest data read, not on when the file was written. */
 export function marketStale(market: ComputeMarket | null, now: number) {
-  return !market ? null
-    : now - market.generated_ms > STALE_MS ? "The market feed has not updated for over 30 minutes."
-    : market.generated_ms > now + 5 * 60_000 ? "The market feed has a time in the future." : null;
+  if (!market) return null;
+  const t = marketDataTime(market);
+  return t === null || !Number.isFinite(t) ? "The market feed has no recent read."
+    : now - t > STALE_MS ? "No new prices read for over 30 minutes."
+    : t > now + 5 * 60_000 ? "The market feed has a time in the future." : null;
+}
+
+/** A model whose quotes are not fresh: flagged by the feed, or its newest read is over 30 minutes old. */
+export function modelStale(model: MarketModel, now: number) {
+  return model.stale === true || (typeof model.data_ms === "number" && now - model.data_ms > STALE_MS) || model.data_ms === null;
 }

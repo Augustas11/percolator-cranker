@@ -57,7 +57,14 @@ export interface MarketModel {
   min: number;
   max: number;
   thin?: boolean;
-  cheapest: { provider: string; quantization: string; price: number };
+  /** Newest data read for this model; absent from feeds written before the field existed. */
+  data_ms?: number | null;
+  /** True when the feed has no fresh read of this model. */
+  stale?: boolean;
+  /** Quotes counted in the median at their last price while the seller is offline. */
+  quotes_held?: number;
+  /** Null when no seller has a usable quote. */
+  cheapest: { provider: string; quantization: string; price: number } | null;
   change_24h_pct: number | null;
   series: Point[];
   quotes: MarketQuote[];
@@ -69,10 +76,13 @@ export interface MarketDynamic { model: string; provider: string; quantization: 
 /** The broad market: every open model's seller quotes (market.json). USD per 1M tokens, 15:1 input:output. */
 export interface ComputeMarket {
   generated_ms: number;
+  /** Newest data actually read; absent from feeds written before the field existed. */
+  data_ms?: number | null;
   window: { from_ms: number; to_ms: number };
   index: {
-    level: number;
-    base_ms: number;
+    /** Null until a base exists. */
+    level: number | null;
+    base_ms: number | null;
     change_24h_pct: number | null;
     change_7d_pct: number | null;
     n_models: number;

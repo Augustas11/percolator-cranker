@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket, MarketModel } from "../compute/client";
-import { Axis, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadSwarm, marketScale, sinceLabel, typicalPrice, widest, type LogScale } from "../compute/charts";
+import { Axis, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadSwarm, marketScale, sinceLabel, typicalPrice, upPriced, widest, type LogScale } from "../compute/charts";
 import { addressUrl, ago, clock, count, day, direction, pct, short, times, txUrl, usd, usd4, when } from "../compute/format";
-import { latestStale, marketStale, useComputeFeed } from "../compute/useFeed";
+import { latestStale, marketDataTime, marketStale, modelStale, useComputeFeed } from "../compute/useFeed";
+import FeedBoundary from "../compute/FeedBoundary";
 import { site } from "../site/config";
 import { Link } from "../site/router";
 import { Arrow } from "../site/Nav";
@@ -14,7 +15,10 @@ const PROVIDERS_SHOWN = 8;
 type SortKey = "sellers" | "spread" | "median";
 const sorts: [SortKey, string][] = [["sellers", "Most sellers"], ["spread", "Widest spread"], ["median", "Highest median"]];
 
-const Up = ({ up }: { up: boolean }) => <span className={`state ${up ? "is-up" : "is-down"}`}><i aria-hidden="true" /><span className="state-t">{up ? "up" : "down"}</span></span>;
+const Up = ({ up, stale = false }: { up: boolean; stale?: boolean }) => {
+  const state = stale ? "stale" : up ? "up" : "down";
+  return <span className={`state is-${state}`}><i aria-hidden="true" /><span className="state-t">{state}</span></span>;
+};
 const Change = ({ value }: { value: number | null }) => <span className={`chg is-${direction(value)}`}>{pct(value)}</span>;
 const Stale = ({ why }: { why: string }) => <span className="stale"><span className="badge compute-stale">stale</span> {why}</span>;
 
@@ -31,7 +35,9 @@ function Hero({ market, now, error }: { market: ComputeMarket; now: number; erro
   const stale = marketStale(market, now);
   const wide = widest(market);
   const typical = typicalPrice(market);
-  const hasSeries = index.series.length >= MIN_SERIES_POINTS;
+  const level = index.level;
+  const hasSeries = level !== null && index.series.length >= MIN_SERIES_POINTS;
+  const read = marketDataTime(market);
   return <header className="cx-hero" aria-labelledby="compute-title">
     <div className="cx-hero-main">
       <h1 id="compute-title" className="cx-title">Compute index</h1>
@@ -39,20 +45,20 @@ function Hero({ market, now, error }: { market: ComputeMarket; now: number; erro
         <p className="cx-label">Median price to run an open model</p>
         <div className="cx-price"><strong>{usd(typical.median)}</strong><span>per 1M tokens</span></div>
         <p className="cx-range">Cheapest model <b>{typical.cheapest.name} {usd(typical.cheapest.median)}</b> · dearest <b>{typical.dearest.name} {usd(typical.dearest.median)}</b></p>
-      </> : <p className="cx-label">No model has enough sellers for a price right now.</p>}
-      <p className="cx-proof">Medians of <b>{count(index.n_quotes)}</b> seller quotes from <b>{count(index.n_providers)}</b> providers on <b>{count(typical?.models ?? index.n_models)}</b> models. Input and output tokens mixed 15:1.</p>
+      </> : <p className="cx-label">{market.models.length ? "No model has enough sellers for a price right now." : "No prices right now."}</p>}
+      {typical && <p className="cx-proof">Across <b>{count(typical.models)}</b> models with 3 or more sellers: <b>{count(typical.quotes)}</b> quotes from <b>{count(typical.providers)}</b> providers{typical.held > 0 && <>, {count(typical.held)} of them held at their last price while the seller is offline</>}. Input and output tokens mixed 15:1.</p>}
       <p className="cx-updated">
-        <span className="cx-indexstat">Index {index.level.toFixed(2)} · 100 = {day(index.base_ms)}{index.change_24h_pct !== null && <> · 24 h <Change value={index.change_24h_pct} /></>}{index.change_7d_pct !== null && <> · 7 d <Change value={index.change_7d_pct} /></>}</span>
-        <span>Updated {ago(market.generated_ms, now)} · {clock(market.generated_ms)} UTC</span>
+        <span className="cx-indexstat">Index {level === null ? "—" : level.toFixed(2)}{index.base_ms !== null && <> · 100 = {day(index.base_ms)}</>}{index.change_24h_pct !== null && <> · 24 h <Change value={index.change_24h_pct} /></>}{index.change_7d_pct !== null && <> · 7 d <Change value={index.change_7d_pct} /></>}</span>
+        {read !== null && <span>Updated {ago(read, now)} · {clock(read)} UTC</span>}
         {stale && <Stale why={stale} />}
       </p>
-      {hasSeries && <figure className="cx-index-line"><Sparkline series={index.series} label={`Index level ${sinceLabel(index.series)}: from ${index.series[0][1].toFixed(2)} to ${index.level.toFixed(2)}.`} className="spark" /><figcaption>Index {sinceLabel(index.series)}</figcaption></figure>}
+      {hasSeries && <figure className="cx-index-line"><Sparkline series={index.series} label={`Index level ${sinceLabel(index.series)}: from ${index.series[0][1].toFixed(2)} to ${level?.toFixed(2)}.`} className="spark" /><figcaption>Index {sinceLabel(index.series)}</figcaption></figure>}
       {error && <p className="note" role="status">Could not refresh ({error}). Showing the last data received.</p>}
     </div>
     <div className="cx-hero-side">
       {wide && <div className="cx-widest">
         <p className="cx-spread-line">The same model costs up to <strong>{times(wide.min, wide.max)}</strong> more depending on the seller.</p>
-        <p className="cx-spread-eg">{wide.name}: {usd(wide.min)} to {usd(wide.max)} per 1M tokens across {wide.sellers_total} sellers.</p>
+        <p className="cx-spread-eg">{wide.name}: {usd(wide.min)} to {usd(wide.max)} per 1M tokens across {upPriced(wide).length} sellers up.</p>
       </div>}
       <p className="cx-k">Every live quote against its model's median</p>
       <SpreadSwarm market={market} />
@@ -71,17 +77,18 @@ function Audience({ market, latest }: { market: ComputeMarket; latest: ComputeLa
   </nav>;
 }
 
-function ModelRow({ model, scale, open, onToggle }: { model: MarketModel; scale: LogScale; open: boolean; onToggle: () => void }) {
+function ModelRow({ model, scale, open, onToggle, now }: { model: MarketModel; scale: LogScale; open: boolean; onToggle: () => void; now: number }) {
+  const stale = modelStale(model, now);
   const panel = `seller-list-${model.id.replace(/[^a-z0-9]/gi, "-")}`;
   const down = model.quotes.filter(q => !q.up).length;
   return <li className={`board-row${open ? " is-open" : ""}${model.thin ? " is-thin" : ""}`}>
     <button type="button" className="board-head" aria-expanded={open} aria-controls={panel} onClick={onToggle}>
-      <span className="c-model"><span className="m-name">{model.name}</span><span className="m-family"><span>{model.id}</span>{model.thin && <em className="tag">thin</em>}</span></span>
+      <span className="c-model"><span className="m-name">{model.name}</span><span className="m-family"><span>{model.id}</span>{model.thin && <em className="tag">thin</em>}{stale && <em className="tag">stale</em>}</span></span>
       <span className="c-sellers"><b>{model.sellers_up}</b>/{model.sellers_total}<span className="u-mobile"> sellers up</span></span>
-      <span className="c-strip"><RangeStrip model={model} scale={scale} /></span>
+      <span className="c-strip"><RangeStrip model={model} scale={scale} stale={stale} /></span>
       <span className="c-median"><span className="u-mobile">median </span>{usd(model.median)}</span>
       <span className="c-spread" title="Dearest seller over cheapest">{times(model.min, model.max)}<span className="u-mobile"> spread</span></span>
-      <span className="c-cheap"><span className="u-mobile">cheapest </span><b>{usd(model.cheapest.price)}</b> {model.cheapest.provider}<span className="q"> {model.cheapest.quantization}</span></span>
+      <span className="c-cheap"><span className="u-mobile">cheapest </span>{model.cheapest ? <><b>{usd(model.cheapest.price)}</b> {model.cheapest.provider}<span className="q"> {model.cheapest.quantization}</span></> : <b>—</b>}</span>
       <span className="c-chg"><span className="u-mobile">24 h </span><Change value={model.change_24h_pct} /></span>
       <span className="c-chev" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg></span>
     </button>
@@ -89,6 +96,7 @@ function ModelRow({ model, scale, open, onToggle }: { model: MarketModel; scale:
       <div className="panel-meta">
         <span>Range {usd(model.min)}–{usd(model.max)}</span><span>Middle half {usd(model.p25)}–{usd(model.p75)}</span><span>Median {usd(model.median)}</span>
         {down > 0 && <span>{down} down</span>}
+        {stale && <span>Not read in the last 30 minutes{model.data_ms ? `; last read ${when(model.data_ms)}` : ""}</span>}
         {model.series.length >= MIN_SERIES_POINTS && <Sparkline series={model.series} label={`${model.name} median ${sinceLabel(model.series)}.`} className="spark spark-sm" />}
       </div>
       <div className="table-scroll"><table className="seller-table">
@@ -100,7 +108,7 @@ function ModelRow({ model, scale, open, onToggle }: { model: MarketModel; scale:
           <td>{usd(q.price)}</td>
           <td>{q.price === null || !(model.median > 0) ? "—" : <Change value={(q.price / model.median - 1) * 100} />}</td>
           <td className="col-pos" aria-hidden="true">{q.price !== null && <span className="pos"><i style={{ left: `${scale.at(q.price)}%` }} /><b style={{ left: `${scale.at(model.median)}%` }} /></span>}</td>
-          <td><Up up={q.up} /></td>
+          <td><Up up={q.up} stale={stale} /></td>
           <td>{q.uptime_24h_pct === null ? "—" : `${q.uptime_24h_pct.toFixed(1)}%`}</td>
         </tr>)}</tbody>
       </table></div>
@@ -110,7 +118,7 @@ function ModelRow({ model, scale, open, onToggle }: { model: MarketModel; scale:
 
 const MODELS_SHOWN = 20;
 
-function Board({ market }: { market: ComputeMarket }) {
+function Board({ market, now }: { market: ComputeMarket; now: number }) {
   const [all, setAll] = useState(false);
   const [sort, setSort] = useState<SortKey>("sellers");
   const [open, setOpen] = useState<Set<string>>(() => new Set());
@@ -126,6 +134,7 @@ function Board({ market }: { market: ComputeMarket }) {
       </div>
       <div className="cx-sort" role="group" aria-label="Sort models">{sorts.map(([key, label]) => <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>{label}</button>)}</div>
     </div>
+    {models.length === 0 ? <p className="cx-empty" role="status">No prices right now. The board fills in at the next read.</p> : <>
     <div className="cx-legend" aria-hidden="true">
       <span><i className="lg-whisker" />cheapest to dearest</span><span><i className="lg-box" />middle half</span><span><i className="lg-median" />median</span><span><i className="lg-dot" />one seller</span><span><i className="lg-dot is-down" />seller down</span>
     </div>
@@ -133,9 +142,10 @@ function Board({ market }: { market: ComputeMarket }) {
       <div className="board-cols" aria-hidden="true">
         <span className="c-model">Model</span><span className="c-sellers">Up</span><span className="c-strip"><Axis scale={scale} /></span><span className="c-median">Median</span><span className="c-spread">Spread</span><span className="c-cheap">Cheapest</span><span className="c-chg">24 h</span><span className="c-chev" />
       </div>
-      <ul className="board-list">{(all ? models : models.slice(0, MODELS_SHOWN)).map(m => <ModelRow key={m.id} model={m} scale={scale} open={open.has(m.id)} onToggle={() => toggle(m.id)} />)}</ul>
+      <ul className="board-list">{(all ? models : models.slice(0, MODELS_SHOWN)).map(m => <ModelRow key={m.id} model={m} scale={scale} now={now} open={open.has(m.id)} onToggle={() => toggle(m.id)} />)}</ul>
     </div>
     {models.length > MODELS_SHOWN && <button type="button" className="cx-more" aria-expanded={all} onClick={() => setAll(a => !a)}>{all ? `Show top ${MODELS_SHOWN}` : `Show all ${models.length} models`}</button>}
+    </>}
   </section>;
 }
 
@@ -260,15 +270,15 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
   const nothing = !latest && !market;
   return <div className="cx">
     {!loaded && nothing ? <><h1 className="sr-only">Compute index</h1><Skeleton /></>
-      : market ? <Hero market={market} now={now} error={failed.market ? error : ""} />
+      : market ? <FeedBoundary data={market} name="Compute index"><Hero market={market} now={now} error={failed.market ? error : ""} /></FeedBoundary>
       : <header className="cx-hero is-empty"><div className="cx-hero-main"><h1>Compute index</h1><p role="status" className="error">Market feed unreachable ({failed.market ? error : "no data"}). Try again in a minute.</p></div></header>}
-    {market && <Audience market={market} latest={latest} />}
-    {market && <Board market={market} />}
+    {market && <FeedBoundary data={market}><Audience market={market} latest={latest} /></FeedBoundary>}
+    {market && <FeedBoundary data={market} name="Price by model"><Board market={market} now={now} /></FeedBoundary>}
     {(latest || failed.latest) && <div className="cx-panels">
-      {latest ? <><Perp latest={latest} history={history} now={now} /><Flop latest={latest} /></>
+      {latest ? <><FeedBoundary data={latest} name="COMPUTE-PERP"><Perp latest={latest} history={history} now={now} /></FeedBoundary><FeedBoundary data={latest} name="FLOP price"><Flop latest={latest} /></FeedBoundary></>
         : <article id="perp" className="cx-panel"><h2>Perp settlement price</h2><p role="status" className="error">Price feed unreachable ({error}). Try again in a minute.</p></article>}
     </div>}
-    {market && <div className="cx-pair"><Providers market={market} /><Moves market={market} /></div>}
+    {market && <div className="cx-pair"><FeedBoundary data={market} name="Providers"><Providers market={market} /></FeedBoundary><FeedBoundary data={market} name="Price moves"><Moves market={market} /></FeedBoundary></div>}
     {(market || latest) && <p className="cx-fine cx-how"><Link to={`${site.paths.docs}#compute-index`}>How these prices are made</Link></p>}
   </div>;
 }

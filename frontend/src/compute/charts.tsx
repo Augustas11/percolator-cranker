@@ -21,6 +21,8 @@ export interface LogScale { lo: number; hi: number; ticks: number[]; at: (v: num
 
 /** A shared log axis from the cheapest to the dearest quote, on 1-2-5 ticks. `at` gives 0..100 (%). */
 export function logScale(min: number, max: number): LogScale {
+  // No usable bounds (no models, or a bad price): a fixed $0.01 to $10 axis rather than an endless tick loop.
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= 0) { min = 0.01; max = 10; }
   const lo = niceDown(Math.max(min, 1e-6)), hi = niceUp(Math.max(max, lo * 2));
   const span = Math.log(hi / lo);
   const ticks: number[] = [];
@@ -33,7 +35,8 @@ export function logScale(min: number, max: number): LogScale {
 export const tickLabel = (t: number) => "$" + (t >= 1 ? t.toFixed(0) : String(Number(t.toPrecision(2))).replace(/^0/, "0"));
 
 export function marketScale(market: ComputeMarket) {
-  const priced = market.models.filter(m => Number.isFinite(m.min) && Number.isFinite(m.max));
+  const priced = market.models.filter(m => Number.isFinite(m.min) && Number.isFinite(m.max) && m.max > 0);
+  if (!priced.length) return logScale(NaN, NaN);
   return logScale(Math.min(...priced.map(m => m.min)), Math.max(...priced.map(m => m.max)));
 }
 
@@ -42,14 +45,14 @@ export function stripLabel(m: MarketModel) {
 }
 
 /** min-p25-median-p75-max of one model on the shared scale, with each live quote as a tick. */
-export function RangeStrip({ model, scale, quotes = true }: { model: MarketModel; scale: LogScale; quotes?: boolean }) {
+export function RangeStrip({ model, scale, quotes = true, stale = false }: { model: MarketModel; scale: LogScale; quotes?: boolean; stale?: boolean }) {
   const at = scale.at;
-  return <div className={`strip${model.thin ? " strip-thin" : ""}`} role="img" aria-label={stripLabel(model)}>
+  return <div className={`strip${model.thin ? " strip-thin" : ""}${stale ? " strip-stale" : ""}`} role="img" aria-label={stale ? `${stripLabel(model)} Not read in the last 30 minutes.` : stripLabel(model)}>
     {scale.ticks.map(t => <span key={t} className="strip-grid" style={{ left: `${at(t)}%` }} />)}
     <span className="strip-whisker" style={{ left: `${at(model.min)}%`, width: `${at(model.max) - at(model.min)}%` }} />
     <span className="strip-box" style={{ left: `${at(model.p25)}%`, width: `${Math.max(0.6, at(model.p75) - at(model.p25))}%` }} />
     {quotes && model.quotes.map((q, i) => q.price === null ? null
-      : <span key={i} className={`strip-dot${q.up ? "" : " is-down"}`} style={{ left: `${at(q.price)}%` }} />)}
+      : <span key={i} className={`strip-dot${stale ? " is-stale" : q.up ? "" : " is-down"}`} style={{ left: `${at(q.price)}%` }} />)}
     <span className="strip-median" style={{ left: `${at(model.median)}%` }} />
   </div>;
 }
@@ -63,7 +66,7 @@ export function Axis({ scale }: { scale: LogScale }) {
 /** Each live quote divided by its model's median: how far sellers sit from the going rate. */
 export function spreadRatios(market: ComputeMarket) {
   const ratios: number[] = [];
-  for (const m of market.models) if (m.median > 0) for (const q of m.quotes) if (q.up && q.price !== null && q.price > 0) ratios.push(q.price / m.median);
+  for (const m of market.models) if (m.median > 0 && !m.stale) for (const q of m.quotes) if (q.up && q.price !== null && q.price > 0) ratios.push(q.price / m.median);
   return ratios.sort((a, b) => a - b);
 }
 
@@ -132,11 +135,23 @@ export function Sparkline({ series, label, className = "spark", step = false, mi
 
 export const sinceLabel = (series: Point[]) => series.length ? `since ${day(series[0][0])}` : "";
 
-/** The going rate for an open model: median of the non-thin model medians, with the cheapest and dearest model. */
+/** Quotes a model's min and max come from: up and priced. */
+export const upPriced = (m: MarketModel) => m.quotes.filter(q => q.up && q.price !== null);
+
+/**
+ * The going rate for an open model: median of the medians of models with 3 or more sellers (not thin),
+ * with the cheapest and dearest model and the counts behind those medians: quotes up plus quotes held
+ * at their last price, and the providers selling them.
+ */
 export function typicalPrice(market: ComputeMarket) {
   const pool = market.models.filter(m => !m.thin && m.median > 0);
   if (!pool.length) return null;
   const sorted = pool.map(m => m.median).sort((a, b) => a - b);
   const byMedian = [...pool].sort((a, b) => a.median - b.median);
-  return { median: quantile(sorted, 0.5), cheapest: byMedian[0], dearest: byMedian[byMedian.length - 1], models: pool.length };
+  const live = pool.flatMap(upPriced);
+  const held = pool.reduce((n, m) => n + (m.quotes_held ?? 0), 0);
+  return {
+    median: quantile(sorted, 0.5), cheapest: byMedian[0], dearest: byMedian[byMedian.length - 1], models: pool.length,
+    quotes: live.length + held, held, providers: new Set(live.map(q => q.provider)).size,
+  };
 }

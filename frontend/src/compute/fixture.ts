@@ -92,7 +92,7 @@ export function marketFixture(now = Date.now()): ComputeMarket {
     const p = byProvider.get(q.provider) ?? { models: new Set(), quotes: 0, uptime: [], cheapest: 0 };
     p.models.add(model.id); p.quotes++;
     if (q.uptime_24h_pct !== null) p.uptime.push(q.uptime_24h_pct);
-    if (model.cheapest.provider === q.provider && model.cheapest.quantization === q.quantization) p.cheapest++;
+    if (model.cheapest?.provider === q.provider && model.cheapest?.quantization === q.quantization) p.cheapest++;
     byProvider.set(q.provider, p);
   }
   const providers: MarketProvider[] = [...byProvider].map(([name, p]) => ({

@@ -36,3 +36,9 @@
   .site .agents .code-block pre { padding-right: 22px; padding-top: 52px; }
 }
 .site .ag-more + .ag-step { margin-top: 28px; }
+.site .ag-files { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+.site .ag-files > div { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 14px; padding: 12px 0; border-top: 1px solid var(--site-line-6); }
+.site .ag-files dt code { font-size: 14px; color: var(--site-text); }
+.site .ag-files dd { margin: 0; text-align: left; font: 14px/1.5 var(--site-font); color: var(--site-body-muted); }
+.site .ag-files dd a { display: block; margin-top: 2px; font: 13px var(--site-mono); overflow-wrap: anywhere; }
+@media (max-width: 900px) { .site .ag-files > div { grid-template-columns: 1fr; gap: 4px; } }
