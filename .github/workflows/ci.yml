@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - name: layout
         run: |
           source scripts/env.sh
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: actions/cache@v4
         with:
           path: |
@@ -98,7 +98,7 @@ jobs:
         id: detect
         run: |
           if [ -f scripts/export_public.py ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; echo "no export source here; nothing to do"; fi
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         if: steps.detect.outputs.present == 'true'
       - uses: actions/cache@v4
         if: steps.detect.outputs.present == 'true'
@@ -137,7 +137,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - name: layout
         run: |
           source scripts/env.sh
