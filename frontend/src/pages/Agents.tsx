@@ -21,7 +21,7 @@ export default function Agents({ feed }: { feed: ComputeFeedClient | null }) {
   const compute = site.mcp.computeMarket;
   const groups: { job: string; tools: [string, string][] }[] = [
     { job: "Prices", tools: [
-      ["perps_markets", "Markets, leverage and matcher limits."],
+      ["perps_markets", "The market, its leverage and matcher limits."],
       ["market_stats", "Mark price, fills and open interest."],
     ] },
     { job: "Trading", tools: [

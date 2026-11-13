@@ -3,7 +3,7 @@ import Leaderboard, { usdAtoms } from "../arena/Leaderboard";
 import { IndexerHttpError } from "../indexer/client";
 import type { IndexerClient, Season, Stats } from "../indexer/client";
 import { devnetConfig } from "../chain/config";
-import { fixed, OTHER_MARKET } from "../Indexer";
+import { fixed, OTHER_MARKET, openInterestText, openUnits } from "../Indexer";
 import { PERP, perpPrice } from "../market/types";
 import { site } from "../site/config";
 import { Link } from "../site/router";
@@ -71,7 +71,8 @@ export default function Arena({ indexer }: { indexer: IndexerClient | null }) {
     ...(season ? [["Fills", season.trades.toLocaleString("en-US")] as [string, string]] : []),
     ...(info?.volume_24h !== undefined && !wrongMarket ? [["24 h volume", usdAtoms(info.volume_24h)] as [string, string]] : []),
     ...(info?.fills_24h !== undefined && !wrongMarket ? [["24 h fills", info.fills_24h.toLocaleString("en-US")] as [string, string]] : []),
-    ...(season ? [["Volume", usdAtoms(season.volume_usd)] as [string, string], ["Open interest", usdAtoms(season.open_interest_usd)] as [string, string]] : []),
+    ...(season ? [["Volume", usdAtoms(season.volume_usd)] as [string, string]] : []),
+    ...(season && openInterestText(season.open_interest_usd, wrongMarket ? null : openUnits(info)) ? [["Open interest", openInterestText(season.open_interest_usd, wrongMarket ? null : openUnits(info))!] as [string, string]] : []),
   ];
   return <div className="arena">
     <header className="arena-hero">

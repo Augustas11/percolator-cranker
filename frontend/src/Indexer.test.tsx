@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, test, vi } from "vitest";
-import { OTHER_MARKET, OwnFills, UNREACHABLE, useTradeIndexer } from "./Indexer";
+import { OTHER_MARKET, OwnFills, UNREACHABLE, openInterestText, useTradeIndexer } from "./Indexer";
 import type { TradeIndexer } from "./Indexer";
 import type { IndexerClient } from "./indexer/client";
 import { MockIndexerClient } from "./indexer/mock";
@@ -119,4 +119,13 @@ test("waits for fills before showing empty history and tolerates malformed value
     expect(rows).toHaveLength(3);
     for (const row of rows) expect(Array.from(row.querySelectorAll("td")).slice(2, 4).map(td => td.textContent)).toEqual(["—", "—"]);
   } finally { await ui.unmount(); vi.restoreAllMocks(); }
+});
+
+test("open interest text drops a zero USD figure, keeps units, and is absent when both are empty", () => {
+  expect(openInterestText("157900000", 250)).toBe("$157.90 · 250 Mtok");
+  expect(openInterestText("0", 100)).toBe("100 Mtok");
+  expect(openInterestText("157900000", 0)).toBe("$157.90");
+  expect(openInterestText("0", 0)).toBeNull();
+  expect(openInterestText(null, null)).toBeNull();
+  expect(openInterestText("broken", undefined)).toBeNull();
 });

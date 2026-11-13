@@ -8,6 +8,7 @@ import { ata, createAtaIdempotentIx } from "../chain/pda";
 import { buildClose, buildCreatePortfolio, buildDeposit, buildTrade, buildWithdraw, findPortfolio } from "../chain/tx";
 import { getWallet } from "../chain/wallet";
 import { liquidityFrom, parseMatcher } from "../chain/matcher";
+import { ChainError, toChainError } from "../chain/errors";
 import type { Wallet } from "../chain/wallet";
 
 function atoms(value: number, name: string) {
@@ -29,7 +30,7 @@ export class DevnetMarketClient implements MarketClient {
   private timer?: ReturnType<typeof setTimeout>;
   private disposed = false;
   private snapshot: MarketSnapshot = {
-    market: { symbol: PERP.name, collateral: "USDC", maxLeverage: 1, maintenanceMarginRatio: 0 },
+    market: { symbol: PERP.name, collateral: "USDC", maxLeverage: NaN, maintenanceMarginRatio: NaN },
     mark: { price: NaN, ts: Date.now() },
     funding: { rate: 0, nextFundingTs: Date.now() },
     portfolio: {
@@ -141,14 +142,15 @@ export class DevnetMarketClient implements MarketClient {
       const result = await this.conn.confirmTransaction({ signature, ...latest }, "confirmed");
       if (result.value.err) {
         const landed = await this.conn.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }).catch(() => null);
-        throw new Error(`${JSON.stringify(result.value.err)}: ${landed?.meta?.logMessages?.at(-1) ?? "transaction failed"}`);
+        throw toChainError(new Error(JSON.stringify(result.value.err)), landed?.meta?.logMessages ?? [], this.programs());
       }
     } catch (err) {
+      if (err instanceof ChainError) throw err;
       if (err instanceof SendTransactionError) {
         const logs = err.logs ?? await err.getLogs(this.conn).catch(() => []);
-        throw new Error(`${err.message}${logs?.length ? `: ${logs.at(-1)}` : ""}`);
+        throw toChainError(err, logs ?? [], this.programs());
       }
-      throw err;
+      throw toChainError(err, [], this.programs());
     }
     onConfirmed?.();
     if (fill) this.snapshot = { ...this.snapshot, fills: [
@@ -156,6 +158,10 @@ export class DevnetMarketClient implements MarketClient {
     ].slice(0, 20) };
     await this.refresh().catch(() => {});
     return signature;
+  }
+
+  private programs() {
+    return { engine: this.cfg.programId.toBase58(), matcher: this.cfg.matcherProgram?.toBase58() };
   }
 
   async walletBalances() {
@@ -211,6 +217,7 @@ export class DevnetMarketClient implements MarketClient {
     const q = atoms(size, "a size");
     await this.refresh();
     const max = this.snapshot.market.maxLeverage;
+    if (!Number.isFinite(max) || max < 1) throw new Error("The market account has not been read yet. Try again in a moment.");
     if (!Number.isFinite(leverage) || leverage < 1 || leverage > max) throw new Error(`leverage must be between 1 and ${max}`);
     await this.trade(side === "long" ? q : -q);
   }

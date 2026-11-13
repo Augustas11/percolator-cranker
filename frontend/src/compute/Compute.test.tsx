@@ -498,12 +498,14 @@ test("FLOP parity: headline is the routed implied price, list price beside it, a
   const flop = panel(container, "compute-flop-heading");
   const p = market.flop!.parity!;
   expect(flop.querySelector("h2")?.textContent).toBe("FLOP parity");
-  expect(flop.querySelector(".flop-parity .perp-price strong")?.textContent).toBe(usdSmall(p.implied_flop_usd_routed));
-  expect(flop.querySelector(".flop-parity .perp-price span")?.textContent).toBe("per FLOP, from what requests pay");
-  expect(flop.querySelector(".flop-list")?.textContent).toBe(`${usdSmall(p.implied_flop_usd)} per FLOP, from list prices`);
+  expect(flop.querySelector(".flop-parity .perp-price strong")?.textContent).toBe(usdSmall(p.implied_flop_usd_routed! * 1e6));
+  expect(flop.querySelector(".flop-parity .perp-price strong")?.textContent).toMatch(/^\$\d+\.\d+$/);
+  expect(flop.querySelector(".flop-parity .perp-price span")?.textContent).toBe("per 1M FLOP, from what requests pay");
+  expect(flop.querySelector(".flop-list")?.textContent).toBe(`${usdSmall(p.implied_flop_usd! * 1e6)} per 1M FLOP, from list prices`);
   expect(flop.querySelector(".flop-parity .perp-why")?.textContent).toBe("The FLOP price at which FLOP's rate equals what the open market pays for the same compute.");
   const facts = Array.from(flop.querySelectorAll(".flop-parity .flop-facts > div"), d => [d.querySelector("dt")?.textContent, d.querySelector("dd")?.textContent]);
   expect(facts).toEqual([["Market price of compute", usdSmall(p.market_usd_per_bn_gn)], ["FLOP's rate", "0.00291"]]);
+  expect(flop.querySelector(".flop-parity .flop-facts > div small")?.textContent).toBe("$ per bn G_n, Qwen3.8-27B, from what requests pay");
   // implied FLOP price = USD per bn G_n / 1e9 / FLOP per G_n.
   expect(p.implied_flop_usd_routed!).toBeCloseTo(p.market_usd_per_bn_gn! / 1e9 / p.flop_rate_flop_per_gn!, 6);
   expect(flop.querySelector(".flop-window")?.textContent).toBe("Last 6 hours");
@@ -517,7 +519,8 @@ test("FLOP panel without parity falls back to the implied price; without flop it
   expect(flop.querySelector(".flop-parity")).toBeNull();
   const implied = flop.querySelector(".flop-implied")!;
   expect(implied.querySelector(".cx-k")?.textContent).toBe("Implied FLOP price · derived");
-  expect(implied.querySelector("strong")?.textContent).toBe("$0.0123");
+  expect(implied.querySelector("strong")?.textContent).toBe("$12,300.00");
+  expect(implied.querySelector(".perp-price span")?.textContent).toBe("per 1M FLOP");
   expect(implied.querySelector(".perp-why")?.textContent).toBe("The FLOP price at which FLOP's rate equals what the open market pays for the same compute on Qwen3.8-27B.");
   await cleanup?.();
   container = await render(liveFeed(now, m => ({ ...m, flop: { gn_price_flop: null, implied_flop_usd: null, basis_model: null } })));
@@ -528,7 +531,15 @@ test("FLOP panel without parity falls back to the implied price; without flop it
   container = await render(liveFeed(now, stripRouted));
   flop = panel(container, "compute-flop-heading");
   expect(flop.querySelector(".flop-parity")).toBeNull();
-  expect(flop.querySelector(".flop-implied strong")?.textContent).toBe(usdSmall(marketFixture(now).flop!.implied_flop_usd));
+  expect(flop.querySelector(".flop-implied strong")?.textContent).toBe(usdSmall(marketFixture(now).flop!.implied_flop_usd! * 1e6));
+});
+
+test("FLOP parity: the market price of compute sits beside the list-price figure the board shows", async () => {
+  const now = Date.now();
+  const container = await render(liveFeed(now, m => ({ ...m, models: m.models.map(x => x.id === "qwen/qwen3.8-27b" ? { ...x, usd_per_bn_gn: 5.71 } : x) })));
+  const flop = panel(container, "compute-flop-heading");
+  const facts = Array.from(flop.querySelectorAll(".flop-parity .flop-facts > div"), d => [d.querySelector("dt")?.textContent, d.querySelector("dd")?.textContent, d.querySelector("small")?.textContent]);
+  expect(facts[1]).toEqual(["At list prices", "$5.71", "$ per bn G_n, median list price, as on the board"]);
 });
 
 test("the perp panel names its weighting and counts the sellers it lists", async () => {

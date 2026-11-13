@@ -8,6 +8,7 @@ import { MockComputeFeedClient } from "./compute/mock";
 import type { ComputeFeedClient } from "./compute/client";
 import type { IndexerClient } from "./indexer/client";
 import type { MarketClient } from "./market/types";
+import { ChainError } from "./chain/errors";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -328,4 +329,48 @@ test("the routed price: a market-bar stat and a chart line, both hidden without 
     expect(ui.container.querySelector(".tx-routed-line")).toBeNull();
     expect(Array.from(ui.container.querySelectorAll(".tx-legend button"), b => b.textContent)).toEqual(["Mark"]);
   } finally { await ui.unmount(); c2.dispose(); vi.restoreAllMocks(); }
+});
+
+test("chart empty states: one pushed mark with no live mark, and none at all; no leverage row before the market is read", async () => {
+  const t = Date.UTC(2026, 10, 12, 14, 5);
+  for (const [points, text] of [
+    [[[t, 0.3036]], "One mark pushed so far: $0.3036 at 12 Nov, 14:05 UTC. The chart starts with the second."],
+    [[], "No mark has been pushed yet."],
+  ] as [[number, number][], string][]) {
+    const client = new MockMarketClient({ autoTick: false });
+    const snapshot = client.getSnapshot();
+    const unread = { ...snapshot, mark: { ...snapshot.mark, price: NaN }, market: { ...snapshot.market, maxLeverage: NaN } };
+    client.getSnapshot = () => unread;
+    const feed = new MockComputeFeedClient();
+    const history = await feed.history();
+    vi.spyOn(feed, "history").mockResolvedValue({ ...history, points });
+    const ui = await mount(client, { computeFeed: feed });
+    try {
+      expect(ui.container.querySelector(".tx-chart-empty")!.textContent).toBe(text);
+      expect(ui.container.querySelector(".tx-summary")?.textContent ?? "").not.toContain("Max leverage");
+      expect(ui.container.textContent).not.toContain("NaN");
+    } finally { await ui.unmount(); client.dispose(); vi.restoreAllMocks(); }
+  }
+});
+
+test("a failed send shows a plain sentence, with the raw chain text behind Details", async () => {
+  const client = new MockMarketClient({ autoTick: false });
+  const ui = await mount(client);
+  try {
+    await ui.click("Connect wallet");
+    await ui.input("amount", "1000");
+    await ui.click("Deposit");
+    vi.spyOn(client, "openPosition").mockRejectedValue(new ChainError("You declined the transaction in your wallet.", "WalletSignTransactionError: User rejected the request."));
+    await ui.input("size", "10");
+    await ui.click("Open long");
+    expect(ui.container.querySelector(".error")!.textContent).toBe("You declined the transaction in your wallet.");
+    const details = ui.container.querySelector(".tx-error-details")!;
+    expect(details.querySelector("summary")!.textContent).toBe("Details");
+    expect(details.querySelector("pre")!.textContent).toBe("WalletSignTransactionError: User rejected the request.");
+    // A plain error with no separate raw text gets no disclosure.
+    vi.mocked(client.openPosition).mockRejectedValue(new Error("Something else."));
+    await ui.click("Open long");
+    expect(ui.container.querySelector(".error")!.textContent).toBe("Something else.");
+    expect(ui.container.querySelector(".tx-error-details")).toBeNull();
+  } finally { await ui.unmount(); client.dispose(); vi.restoreAllMocks(); }
 });

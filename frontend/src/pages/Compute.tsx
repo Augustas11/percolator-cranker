@@ -334,6 +334,8 @@ function Perp({ latest, history, now }: { latest: ComputeLatest; history: Comput
 export const windowLabel = (s: number) => s % 3600 === 0 ? `Last ${s / 3600} ${s === 3600 ? "hour" : "hours"}` : `Last ${Math.round(s / 60)} minutes`;
 
 const ok = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+/** The implied FLOP price is about a millionth of a dollar; per 1 million FLOP it reads as dollars and cents. */
+const perMFlop = (v: number | null | undefined) => usdSmall(v == null ? v : v * 1e6);
 
 function Flop({ latest, market, now }: { latest: ComputeLatest; market: ComputeMarket | null; now: number }) {
   const flop = latest.flop_side;
@@ -345,6 +347,8 @@ function Flop({ latest, market, now }: { latest: ComputeLatest; market: ComputeM
   const routed = parity?.implied_flop_usd_routed ?? market?.flop?.implied_flop_usd_routed;
   const list = parity?.implied_flop_usd ?? implied;
   const gnPrice = parity?.market_usd_per_bn_gn;
+  // The same model's list-price figure, the one the board's per-unit column shows, so the two reconcile.
+  const gnList = basisId ? market?.models.find(m => m.id === basisId)?.usd_per_bn_gn : undefined;
   const rate = parity?.flop_rate_flop_per_gn ?? flop.flop_per_gn;
   const live = parity !== null && (ok(routed) || ok(list));
   const headline = ok(routed) ? routed : list;
@@ -352,11 +356,12 @@ function Flop({ latest, market, now }: { latest: ComputeLatest; market: ComputeM
     <p className="cx-k">FLOP Network · on-chain</p>
     <h2 id="compute-flop-heading">{live ? "FLOP parity" : "FLOP price per unit of compute"}</h2>
     {live ? <div className="flop-parity">
-      <div className="perp-price"><strong>{usdSmall(headline)}</strong><span>per FLOP, {ok(routed) ? "from what requests pay" : "from list prices"}</span></div>
-      {ok(routed) && ok(list) && <p className="flop-list"><b>{usdSmall(list)}</b> per FLOP, from list prices</p>}
+      <div className="perp-price"><strong>{perMFlop(headline)}</strong><span>per 1M FLOP, {ok(routed) ? "from what requests pay" : "from list prices"}</span></div>
+      {ok(routed) && ok(list) && <p className="flop-list"><b>{perMFlop(list)}</b> per 1M FLOP, from list prices</p>}
       <p className="perp-why">The FLOP price at which FLOP's rate equals what the open market pays for the same compute.</p>
       <dl className="flop-facts">
-        {ok(gnPrice) && <div><dt>Market price of compute</dt><dd>{usdSmall(gnPrice)}</dd><small>$ per bn G_n{basis ? `, ${basis}` : ""}</small></div>}
+        {ok(gnPrice) && <div><dt>Market price of compute</dt><dd>{usdSmall(gnPrice)}</dd><small>$ per bn G_n{basis ? `, ${basis}` : ""}, from what requests pay</small></div>}
+        {ok(gnPrice) && ok(gnList) && <div><dt>At list prices</dt><dd>{usdSmall(gnList)}</dd><small>$ per bn G_n, median list price, as on the board</small></div>}
         {ok(rate) && <div><dt>FLOP's rate</dt><dd>{rate.toPrecision(3)}</dd><small>FLOP per G_n</small></div>}
       </dl>
       {parity?.as_of_ms != null && <p className="cx-updated">Parity read {ago(parity.as_of_ms, now)}</p>}
@@ -364,7 +369,7 @@ function Flop({ latest, market, now }: { latest: ComputeLatest; market: ComputeM
       <div className="perp-price"><strong>{flop.flop_per_gn == null ? "—" : flop.flop_per_gn.toPrecision(3)}</strong><span>FLOP per G_n</span></div>
       {ok(implied) && <div className="flop-implied">
         <p className="cx-k">Implied FLOP price · derived</p>
-        <div className="perp-price"><strong>{usdSmall(implied)}</strong><span>per FLOP</span></div>
+        <div className="perp-price"><strong>{perMFlop(implied)}</strong><span>per 1M FLOP</span></div>
         <p className="perp-why">The FLOP price at which FLOP's rate equals what the open market pays for the same compute{basis ? <> on {basis}</> : null}.</p>
       </div>}
     </>}
