@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod feed;
 pub mod score;
+pub mod wide;
 
 /// The SPEC rule's parameters. The pusher reads its own from
 /// launch/flop-compute.toml; a staging test checks they equal these.

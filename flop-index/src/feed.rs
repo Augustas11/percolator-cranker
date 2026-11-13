@@ -678,6 +678,8 @@ mod tests {
         assert!(compose.contains(":/srv/compute-feed:ro\""));
         assert!(compose.contains("dockerfile: deploy/Dockerfile.flop-feed"));
         assert!(compose.contains("\"--oracle\", \"${FLOP_ORACLE_PUBKEY:-}\""));
+        assert!(compose.contains("\"--wide\", \"/or-prices-wide\""));
+        assert!(compose.contains(":/or-prices-wide:ro\""));
         assert!(std::fs::read_to_string(format!("{root}Dockerfile.flop-feed")).unwrap().contains("--bin flop-feed"));
     }
 
