@@ -16,8 +16,8 @@ export interface Book {
 export interface Plan {
   target: Direction;
   size?: number; // open size; defaults to SIZE_SOL
-  resize?: boolean; // close and reopen at `size` even though the side already matches
   add?: boolean; // open `size` more on the side already held (build over several fills)
+  reduce?: boolean; // trade `size` against the side held, shrinking it (must be under the open size)
   inputs: Record<string, unknown>; // logged on the tick line so every trade can be explained
 }
 

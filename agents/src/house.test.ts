@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { basis } from "./strategies/basis";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { basis, jsonFetcher } from "./strategies/basis";
 import { hedger } from "./strategies/hedger";
 import { houseStrategies, strategies } from "./strategies";
 import type { Book, Direction, HouseStrategy } from "./strategies/types";
@@ -59,7 +61,7 @@ describe("basis", () => {
     expect(await feed.tick(strategy, -1)).toMatchObject({ target: 0, inputs: { reason: "gap_back_to_usual" } });
   });
   it("forgets samples older than the window", async () => {
-    const strategy = basis({ ...env, DRIP_BASIS_WINDOW_H: "0.25" }, series([-0.05, -0.05, -0.05, -0.05, -0.05]).get);
+    const strategy = basis({ ...env, DRIP_BASIS_WINDOW_H: "0.25", DRIP_BASIS_MIN_SAMPLES: "2" }, series([-0.05, -0.05, -0.05, -0.05, -0.05]).get);
     const results = [];
     for (let k = 0; k < 5; k++) results.push(await strategy.observe(book(0, 0, T0 + k * STEP + 60_000)));
     expect(results.map(r => r.inputs.samples)).toEqual([0, 1, 2, 2, 2]);
@@ -85,6 +87,12 @@ describe("basis", () => {
       [{ data_ms: T0, models: [] }, "model_missing"],
       [{ data_ms: T0 }, "model_missing"],
       [snapshot(at(0.5), T0, { thin: true }), "model_thin"],
+      [snapshot(at(0.5), T0, { thin: "true" }), "model_thin"],
+      [snapshot(at(0.5), T0, { thin: 1 }), "model_thin"],
+      [snapshot(at(0.5), T0 + 61_000), "feed_in_future"],
+      [snapshot(3e-7, T0), "price_implausible"],
+      [snapshot(MARK * 5.1, T0), "price_implausible"],
+      [snapshot(MARK / 5.1, T0), "price_implausible"],
       [snapshot(null, T0), "price_missing"],
       [snapshot(0, T0), "price_missing"],
       [snapshot(undefined, T0), "price_missing"],
@@ -99,6 +107,41 @@ describe("basis", () => {
       }
     }
   });
+  it("does not flip on mark noise between feed updates", async () => {
+    // Confirmed long on two snapshots; the same snapshot then looks like a short only because the mark moved.
+    const feed = series(usual(0.1, 0.1));
+    const strategy = basis(env, feed.get);
+    for (let k = 0; k < 4; k++) await feed.tick(strategy);
+    expect((await feed.tick(strategy)).target).toBe(1);
+    for (let k = 0; k < 3; k++) {
+      const plan = await strategy.observe({ mark: MARK * 1.5, current: 1, size: 1, equity: 500, now: T0 + 4 * STEP + 90_000 });
+      expect(plan.inputs.deviation).toBeLessThan(-0.08);
+      expect(plan).toMatchObject({ target: 1, inputs: { reason: "awaiting_confirm" } });
+    }
+  });
+  it("keeps its history through a future or rewound timestamp", async () => {
+    const snaps = [0, 1, 2, 3].map(k => snapshot(at(-0.05), T0 + k * STEP));
+    let i = 0;
+    const strategy = basis(env, async () => snaps[Math.min(i++, snaps.length - 1)]);
+    for (let k = 0; k < 4; k++) await strategy.observe(book(0, 0, T0 + k * STEP));
+    snaps.push(snapshot(at(-0.05), T0 + 100 * 3_600_000));
+    expect(await strategy.observe(book(0, 0, T0 + 3 * STEP))).toMatchObject({ inputs: { reason: "feed_in_future" } });
+    snaps.push(snapshot(at(-0.05), T0 + STEP));
+    expect(await strategy.observe(book(0, 0, T0 + 3 * STEP))).toMatchObject({ inputs: { reason: "feed_went_back" } });
+    snaps.push(snapshot(at(-0.05), T0 + 4 * STEP));
+    expect(await strategy.observe(book(0, 0, T0 + 4 * STEP))).toMatchObject({ inputs: { reason: "hold", samples: 4 } });
+  });
+  it("holds on an implausible deviation and logs the feed error text", async () => {
+    const feed = series(usual(-0.05, 0.7, 0.7));
+    const strategy = basis(env, feed.get);
+    for (let k = 0; k < 4; k++) await feed.tick(strategy);
+    expect(await feed.tick(strategy)).toMatchObject({ target: 0, inputs: { reason: "deviation_implausible", max_deviation: 0.5 } });
+    expect(await feed.tick(strategy, -1)).toMatchObject({ target: -1, inputs: { reason: "deviation_implausible" } });
+    const down = basis(env, async () => { throw new Error("x".repeat(500)); });
+    const plan = await down.observe(book());
+    expect(plan.inputs).toMatchObject({ reason: "feed_unreachable" });
+    expect(plan.inputs.error).toHaveLength(200);
+  });
   it("validates its configuration", () => {
     expect(() => basis({})).toThrow("DRIP_FEED_URL");
     expect(() => basis({ ...env, DRIP_BASIS_SOURCE: "mark" })).toThrow("median or routed");
@@ -107,6 +150,38 @@ describe("basis", () => {
     expect(() => basis({ ...env, DRIP_BASIS_CONFIRM: "1.5" })).toThrow("integers");
     expect(() => basis({ ...env, DRIP_BASIS_MIN_SAMPLES: "0" })).toThrow("DRIP_BASIS_MIN_SAMPLES");
     expect(() => basis({ ...env, SIZE_SOL: "101" })).toThrow("one matcher fill");
+    expect(() => basis({ ...env, DRIP_BASIS_WINDOW_H: "1", DRIP_BASIS_MIN_SAMPLES: "12" })).toThrow("does not fit");
+    expect(() => basis({ ...env, DRIP_BASIS_MAX_DEVIATION: "0.05" })).toThrow("MAX_DEVIATION");
+  });
+});
+
+describe("jsonFetcher", () => {
+  let server: Server, base = "";
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      if (req.url === "/json") res.end(JSON.stringify({ data_ms: 1 }));
+      else if (req.url === "/html") res.end("<html>oops</html>");
+      else if (req.url === "/big") res.end("[" + "1,".repeat(2_000) + "1]");
+      else if (req.url === "/slow") setTimeout(() => res.end("{}"), 2_000);
+      else { res.statusCode = 404; res.end(); }
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(() => { server.closeAllConnections(); server.close(); });
+  const get = jsonFetcher(300, 1_000);
+  it("parses JSON and rejects HTML, oversize, slow and failed responses", async () => {
+    expect(await get(`${base}/json`)).toEqual({ data_ms: 1 });
+    await expect(get(`${base}/html`)).rejects.toThrow();
+    await expect(get(`${base}/big`)).rejects.toThrow("too large");
+    await expect(get(`${base}/slow`)).rejects.toThrow();
+    await expect(get(`${base}/missing`)).rejects.toThrow("HTTP 404");
+  });
+  it("feeds those failures to the basis agent as holds", async () => {
+    for (const path of ["html", "big", "slow"]) {
+      const strategy = basis({ DRIP_FEED_URL: `${base}/${path}#` }, get);
+      expect(await strategy.observe(book(1, 1))).toMatchObject({ target: 1, inputs: { reason: "feed_unreachable" } });
+    }
   });
 });
 
@@ -123,7 +198,7 @@ describe("hedger", () => {
     for (const [strategy, side] of [[long, 1], [short, -1]] as const) {
       for (const size of [100, 91, 110]) expect(await strategy.observe(book(side, size))).toMatchObject({ target: side, inputs: { reason: "within_band" } });
       expect(await strategy.observe(book(side, 89))).toMatchObject({ target: side, size: 11, add: true, inputs: { reason: "build" } });
-      expect(await strategy.observe(book(side, 111))).toMatchObject({ target: side, size: 100, resize: true, inputs: { reason: "over_target" } });
+      expect(await strategy.observe(book(side, 111))).toMatchObject({ target: side, size: 11, reduce: true, inputs: { reason: "over_target" } });
     }
     expect((await long.observe(book(1, 89))).inputs.drift).toBeCloseTo(0.11);
   });
@@ -133,7 +208,8 @@ describe("hedger", () => {
     expect(await big.observe(book(-1, 100))).toMatchObject({ target: -1, size: 100, add: true });
     expect(await big.observe(book(-1, 200))).toMatchObject({ target: -1, size: 50, add: true });
     expect(await big.observe(book(-1, 250))).toMatchObject({ inputs: { reason: "within_band" } });
-    expect(await big.observe(book(-1, 400))).toMatchObject({ target: -1, size: 100, resize: true });
+    expect(await big.observe(book(-1, 400))).toMatchObject({ target: -1, size: 100, reduce: true });
+    expect(await big.observe(book(-1, 300))).toMatchObject({ target: -1, size: 50, reduce: true });
   });
   it("stops growing before initial margin would use 80% of equity", async () => {
     const big = hedger({ DRIP_HEDGE_SIDE: "long", DRIP_HEDGE_MTOK: "1000" });
@@ -142,6 +218,12 @@ describe("hedger", () => {
     expect((await big.observe(book(1, 300, T0, 70))).add).toBeUndefined();
     expect(await big.observe(book(1, 300, T0, 500))).toMatchObject({ add: true, size: 100 });
     expect(await big.observe(book(0, 0, T0, 10))).toMatchObject({ target: 0, inputs: { reason: "margin_limit" } });
+    // On the wrong side with no room for the hedge: close it rather than keep it.
+    expect(await big.observe(book(-1, 50, T0, 10))).toMatchObject({ target: 0, inputs: { reason: "margin_limit" } });
+    // Equity that is not a number never allows growth.
+    for (const equity of [Number.NaN, -Infinity]) {
+      expect(await big.observe(book(1, 300, T0, equity))).toMatchObject({ target: 1, inputs: { reason: "margin_limit" } });
+    }
   });
   it("validates its configuration", () => {
     expect(() => hedger({})).toThrow("DRIP_HEDGE_SIDE");

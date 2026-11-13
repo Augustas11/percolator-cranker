@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { clock, config, runAgent, type Clock, type Config, type Position } from "./agent";
+import { basis } from "./strategies/basis";
 import type { Book, HouseStrategy, Plan, Strategy } from "./strategies/types";
 
 const house = (plan: (book: Book) => Plan): HouseStrategy => ({ name: "house", house: true, observe: async book => plan(book) });
@@ -150,29 +151,52 @@ describe("agent loop", () => {
     const result = await run({ strategy: house(book => { books.push(book); return { target: 0, inputs: { basis: 0.01, reason: "hold" } }; }) });
     expect(result.events[0]).toEqual({ agent: "house", event: "start", house: true });
     expect(result.events.find(event => event.event === "tick")).toEqual({
-      agent: "house", event: "tick", house: true, basis: 0.01, reason: "hold", mark: 100, target: 0, current: 0, size: 0.5, resize: false, add: false,
+      agent: "house", event: "tick", house: true, basis: 0.01, reason: "hold", mark: 100, target: 0, current: 0, size: 0.5, add: false, reduce: false,
     });
     expect(books).toEqual([{ mark: 100, current: 0, size: 0, equity: 500, now: 0 }]);
     expect(result.calls.every(call => call.name === "get_position")).toBe(true);
   });
-  it("opens a house plan at its own size and re-sizes by closing then reopening", async () => {
+  it("opens a house plan at its own size, adds and reduces as one order each", async () => {
     const opened = await run({ strategy: house(() => ({ target: -1, size: 120, inputs: {} })) });
     expect(opened.calls.at(-1)).toEqual({ name: "open_position", args: { side: "short", size: 120 } });
-    const resized = await run({ position: { position: { side: "long", size: 80 } }, strategy: house(book => ({ target: 1, size: 100, resize: book.size !== 100, inputs: {} })) });
-    expect(resized.calls.slice(-2)).toEqual([{ name: "close_position" }, { name: "open_position", args: { side: "long", size: 100 } }]);
     const held = await run({ position: { position: { side: "long", size: 80 } }, strategy: house(() => ({ target: 1, size: 100, inputs: {} })) });
     expect(held.calls.every(call => call.name === "get_position")).toBe(true);
     const added = await run({ position: { position: { side: "short", size: 100 } }, strategy: house(() => ({ target: -1, size: 50, add: true, inputs: {} })) });
     expect(added.calls.slice(1)).toEqual([{ name: "get_position" }, { name: "open_position", args: { side: "short", size: 50 } }]);
+    const reduced = await run({ position: { position: { side: "long", size: 150 } }, strategy: house(() => ({ target: 1, size: 50, reduce: true, inputs: {} })) });
+    expect(reduced.calls.slice(1)).toEqual([{ name: "get_position" }, { name: "open_position", args: { side: "short", size: 50 } }]);
+    expect(reduced.events.find(event => event.event === "trade")).toEqual({ agent: "house", event: "trade", action: "reduce", side: "short", size: 50 });
     const capped = await run({ position: { position: { side: "short", size: 100 } }, cfg: { maxTradesPerHour: 0 }, strategy: house(() => ({ target: -1, size: 50, add: true, inputs: {} })) });
     expect(capped.events.some(event => event.event === "skip_budget")).toBe(true);
-    const flat = await run({ strategy: house(() => ({ target: 0, resize: true, add: true, inputs: {} })) });
+    const flat = await run({ strategy: house(() => ({ target: 0, reduce: true, add: true, inputs: {} })) });
     expect(flat.calls.every(call => call.name === "get_position")).toBe(true);
   });
-  it("refuses an invalid house size without trading", async () => {
-    const result = await run({ strategy: house(() => ({ target: 1, size: Number.NaN, inputs: {} })) });
-    expect(result.calls.every(call => call.name === "get_position")).toBe(true);
-    expect(result.events.some(event => event.event === "error" && event.message === "Invalid plan size")).toBe(true);
+  it("refuses an invalid house size, a reduce that would flip, and bad position fields without trading", async () => {
+    const cases: [Partial<Position>, Plan, string][] = [
+      [{}, { target: 1, size: Number.NaN, inputs: {} }, "Invalid plan size"],
+      [{ position: { side: "long", size: 50 } }, { target: 1, size: 50, reduce: true, inputs: {} }, "Reduce must be smaller than the position"],
+      [{ position: { side: "long", size: Number.NaN } }, { target: 1, size: 50, add: true, inputs: {} }, "Invalid position size"],
+      [{ equity: undefined as unknown as number }, { target: 1, size: 50, inputs: {} }, "Invalid equity"],
+    ];
+    for (const [state, plan, message] of cases) {
+      const result = await run({ position: state, strategy: house(() => plan) });
+      expect(result.calls.every(call => call.name === "get_position")).toBe(true);
+      expect(result.events.some(event => event.event === "error" && event.message === message)).toBe(true);
+    }
+  });
+  it("caps a hostile feed at the hourly trade budget", async () => {
+    // New snapshot every tick, swinging the basis +-30% in pairs: the most flips the rules allow.
+    let now = 0, k = 0;
+    const strategy = basis({ DRIP_FEED_URL: "x" }, async () => {
+      const gap = Math.floor(k++ / 2) % 2 ? -0.3 : 0.3;
+      return { data_ms: now, models: [{ id: "qwen/qwen3.8-27b", median: 100 * Math.exp(gap) }] };
+    });
+    const observe = strategy.observe.bind(strategy);
+    strategy.observe = book => { now = book.now; return observe(book); };
+    const result = await run({ ticks: 180, strategy });
+    const trades = result.events.filter(event => event.event === "trade").length;
+    expect(trades).toBeGreaterThan(6);
+    expect(trades).toBeLessThanOrEqual(6 * 3);
   });
   it("validates configuration", () => {
     const signal = new AbortController().signal;

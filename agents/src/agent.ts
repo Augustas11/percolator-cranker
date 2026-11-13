@@ -93,16 +93,20 @@ export async function runAgent(strategy: Strategy | HouseStrategy, cfg: Config, 
         history.push(position.mark_price);
         if (history.length > 200) history.shift();
         const current: Direction = position.position ? position.position.side === "long" ? 1 : -1 : 0;
-        let target: Direction, size = cfg.sizeSol, resize = false, add = false;
+        const held = position.position ? position.position.size : 0;
+        if (position.position && !(Number.isFinite(held) && held > 0)) throw new Error("Invalid position size");
+        let target: Direction, size = cfg.sizeSol, add = false, reduce = false;
         if ("observe" in strategy) {
-          const plan = await strategy.observe({ mark: position.mark_price, current, size: position.position?.size ?? 0, equity: position.equity, now: time.now() });
+          if (!Number.isFinite(position.equity)) throw new Error("Invalid equity");
+          const plan = await strategy.observe({ mark: position.mark_price, current, size: held, equity: position.equity, now: time.now() });
           if (cfg.signal.aborted) break;
           if (plan.size !== undefined && !(Number.isFinite(plan.size) && plan.size > 0)) throw new Error("Invalid plan size");
           target = plan.target;
           size = plan.size ?? cfg.sizeSol;
-          resize = plan.resize === true && target !== 0 && target === current;
-          add = !resize && plan.add === true && target !== 0 && target === current;
-          log("tick", { house: true, ...plan.inputs, mark: position.mark_price, target, current, size, resize, add });
+          add = plan.add === true && target !== 0 && target === current;
+          reduce = !add && plan.reduce === true && target !== 0 && target === current;
+          if (reduce && !(size < held)) throw new Error("Reduce must be smaller than the position");
+          log("tick", { house: true, ...plan.inputs, mark: position.mark_price, target, current, size, add, reduce });
         } else {
           target = strategy.decide(history, current);
           log("tick", { mark: position.mark_price, target, current });
@@ -113,22 +117,24 @@ export async function runAgent(strategy: Strategy | HouseStrategy, cfg: Config, 
         } else {
           lowSolLogged = false;
           while (trades.length && trades[0] <= time.now() - 3_600_000) trades.shift();
-          const cost = add ? 1 : Number(current !== 0) + Number(target !== 0);
-          if (target !== current || resize || add) {
+          // add / reduce: one order on top of the open position (the engine nets it).
+          const adjust = add || reduce;
+          const cost = adjust ? 1 : Number(current !== 0) + Number(target !== 0);
+          if (target !== current || adjust) {
             if (trades.length + cost > cfg.maxTradesPerHour) {
               log("skip_budget", { target, current });
             } else {
               // Count attempts too: a timed-out request may already have executed.
-              if (current !== 0 && !add) {
+              if (current !== 0 && !adjust) {
                 trades.push(time.now());
                 await mcp.call("close_position");
                 log("trade", { action: "close" });
               }
               if (target !== 0 && !cfg.signal.aborted) {
-                const side = target === 1 ? "long" : "short";
+                const side = (reduce ? -target : target) === 1 ? "long" : "short";
                 trades.push(time.now());
                 await mcp.call("open_position", { side, size });
-                log("trade", { action: "open", side, size });
+                log("trade", { action: reduce ? "reduce" : "open", side, size });
               }
             }
           }
