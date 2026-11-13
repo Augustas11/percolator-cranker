@@ -1,7 +1,14 @@
 {
-  "name": "poc-frontend",
+  "name": "drip-frontend",
   "private": true,
   "version": "0.0.0",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Augustas11/drip-markets.git",
+    "directory": "frontend"
+  },
+  "homepage": "https://github.com/Augustas11/drip-markets/tree/main/frontend#readme",
   "type": "module",
   "scripts": {
     "dev": "vite",

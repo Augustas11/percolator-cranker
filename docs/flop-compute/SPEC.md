@@ -22,7 +22,7 @@ contract (`size_q` = 1e6) is 1M benchmark tokens.
 | Mark (`openrouter`) | OpenRouter endpoints list for qwen/qwen3.8-27b: each up endpoint's 15:1 blend, weighted 1/price² | 5 min | no successful fetch for 30 min |
 | FLOP side (check; mark under `flop_standin`) | FLOP Network spot settlements, all models, 6 h window, GN-weighted median of escrow / aggregateGn | 60 s | < 20 prints, < 3 miners, < 3 buyers, or newest print > 30 min old |
 
-**How endpoints combine** (`or_weighting = inverse_square`, owner decision
+**How endpoints combine** (`or_weighting = inverse_square`, decision
 2026-11-11). Each up endpoint (OpenRouter status 0) has a blended price
 `b = (15 x prompt + completion) / 16` per 1M tokens and weight `w = 1 / b²`;
 the mark is `sum(w x b) / sum(w)`. That mirrors OpenRouter's default routing,
@@ -35,7 +35,7 @@ marginal barrel trades rather than the average of advertised offers. On
 One endpoint alone is its own price; a new expensive endpoint barely moves the
 mark (a $5 one would add ~3%). `or_weighting = median` keeps the old method.
 
-**Cheap-outlier clamp** (owner decision 2026-11-11: clamp, don't drop).
+**Cheap-outlier clamp** (decision 2026-11-11: clamp, don't drop).
 Under 1/price² weights a very cheap listing (a mispricing, a promo, a
 near-zero completion price) would take almost all the weight. So before
 weighting, any endpoint priced under half the set's median
@@ -45,7 +45,7 @@ endpoints that made the mark jump ~3x ($0.24 to $0.73) when DeepInfra's cut
 went from 21% to 22%. With the clamp the mark moves smoothly with every price.
 
 The clamp needs at least 3 up endpoints in the set (`or_clamp_min_endpoints`
-= 3; owner decision 2026-11-12). Two points can't name an outlier: their
+= 3; decision 2026-11-12). Two points can't name an outlier: their
 half-median floor is a quarter of their sum, so it lifted the cheaper real
 price. On 2026-11-12 GMICloud bf16 went down, the feed fell through to
 bf16+fp16 = DeepInfra $0.2578 and Cerebras $1.0212, the floor ($0.3198)
@@ -70,7 +70,7 @@ when one goes down, and a price near the floor can be lifted to it (test
 `with_three_or_more_an_outage_can_still_move_the_floor`: $0.29 to $0.30).
 That lift is bounded by half the median and is the price of any median floor.
 
-Known limit (owner decision 2026-11-11: keep this rule for now). Promos still
+Known limit (decision 2026-11-11: keep this rule for now). Promos still
 move the mark. One $0.01 promo next to today's bf16 pair makes the median
 $0.2578 and the floor $0.1289, which 1/price² gives about 77% of the weight:
 the mark goes $0.311 to about $0.170. Two promos take it to about $0.076 (the
@@ -83,7 +83,7 @@ in which endpoints are clamped logs a `flop alert: clamped ...` line (and
 `flop alert: no endpoint clamped` when it clears), so the first promo is
 noticed.
 
-**Missing endpoints** (owner decision 2026-11-13: rule approved, off until
+**Missing endpoints** (decision 2026-11-13: rule approved, off until
 its length is chosen). An endpoint that goes down, loses its price or leaves
 the listing keeps counting, as up and at the price it last had while up, for
 `or_hold_missing_s`; after that it is dropped as before. One that comes back
@@ -110,8 +110,8 @@ has no "new price, then down" scenario yet, and one must be added and scored
 before the hold is turned on. A change in what is held logs
 `flop alert: held at last up price: ...`. The shipped value is 0 (off): 2 h,
 6 h and 12 h are scored as `hold-2h`, `hold-6h` and `hold-12h`
-([SCORER.md](SCORER.md)) on the recorder's first full week, and the owner
-sets the length then. Code: `flop_index::Holder`.
+([SCORER.md](SCORER.md)) on the recorder's first full week, and the length is
+set then. Code: `flop_index::Holder`.
 
 Inverse-square weighting has one known exception to "a cheaper provider never
 raises the mark": a cut by an endpoint priced over 2x the mark raises it a
@@ -123,7 +123,7 @@ test `the_spec_example_cut_raises_the_mark_a_little` pins these numbers. Cuts
 by endpoints under 2x the mark, which today is both bf16 endpoints, never
 raise it.
 
-**Sets, in order** (owner decision 2026-11-11: fall through, don't hold).
+**Sets, in order** (decision 2026-11-11: fall through, don't hold).
 The bots try bf16 endpoints alone, then fp16 alone, then bf16 and fp16
 together, then every up endpoint, and price from the first set with at least
 2 up endpoints (then clamp, if it has 3 or more, and weight inside it). So the next set is used only
@@ -158,11 +158,11 @@ never used as an FX source.
 ## Changing the mark rule
 
 The rule above is scored by `flop-score` ([SCORER.md](SCORER.md)). A
-candidate rule is recommended to the operator only if, on the held-out days
+candidate rule is recommended only if, on the held-out days
 (`--split heldout`, the last 30% of scored days, never used for tuning), its
-paired gain over the current rule is above twice its standard error, and a
-reviewer on a different model has not vetoed it. A recommendation comes with
-the numbers. It does not change the live rule; the owner decides that.
+paired gain over the current rule is above twice its standard error, and an
+independent review has not vetoed it. A recommendation comes with
+the numbers. It does not change the live rule; that takes a reviewed change to this spec.
 
 ## Manipulation limits (FLOP side)
 

@@ -2,6 +2,12 @@
   "name": "@driptech/mcp",
   "version": "0.2.0",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Augustas11/drip-markets.git",
+    "directory": "mcp"
+  },
+  "homepage": "https://drip-devnet.vercel.app",
   "description": "MCP server for the drip devnet compute perp market (Percolator v16). Devnet, test tokens only.",
   "keywords": [
     "mcp",
@@ -38,6 +44,5 @@
   },
   "publishConfig": {
     "access": "public"
-  },
-  "homepage": "https://drip-devnet.vercel.app"
+  }
 }

@@ -70,7 +70,7 @@ fill is signed by a throwaway tester wallet only. Never sign with another role's
 Devnet (2026-10-29): program `8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE`, context
 `GMXktcTjqh8z3h2oCgUnodcLbh6hH4W6YUfL4hZMaXe7` on market `HyMKxfct…` for the matcher's own LP
 portfolio `6wH2d4CARhEWeGC2deBDb9pVT1a7Tgd48VUiFmkTNAHY` (owner `TVA9xtfv…`, its own key held by the
-re-pin run). Limits: fill 10 SOL, inventory 100 SOL, deviation 10 bps, price authority = the
+operator). Limits: fill 10 SOL, inventory 100 SOL, deviation 10 bps, price authority = the
 pusher's oracle key. Max reference age is 150 slots on devnet, where pushes land every 40-90
 slots; mainnet wants it near the 400 ms lag target. First TradeCpi fill, signed by the taker
 only: `4biJBxUbhkEXpr1Zb43CYmEFU74rqBH12p6qjeGM7JfuWNy4Vf4wLMkLEtPHLiQNoq7xgjjSi9iAvKjHJnhemaZt`.

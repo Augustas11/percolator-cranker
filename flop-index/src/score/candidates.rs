@@ -17,7 +17,7 @@ pub const ALL: &[(&str, fn() -> Box<dyn Rule>)] = &[
 const HOUR_MS: u64 = 3_600_000;
 
 /// SPEC with a missing endpoint held at its last up price (`crate::Holder`,
-/// owner 2026-11-13). On daily pins snapshots are 24 h apart, so no hold here
+/// decision 2026-11-13). On daily pins snapshots are 24 h apart, so no hold here
 /// bridges two of them and these score exactly as `spec`; they differ only on
 /// recorder data.
 #[derive(Clone)]

@@ -668,7 +668,7 @@ mod tests {
         assert_eq!(order, vec![0, 1, 2, 3, 4, 0]);
     }
 
-    /// Audit finding: with 8 txs and 4-tx drains (quotas 4/2/2), a pending
+    /// Regression: with 8 txs and 4-tx drains (quotas 4/2/2), a pending
     /// drain used to take 4 txs and leave quiet accounts nothing. A drain is
     /// now capped at its class's remaining quota while others still need it.
     #[test]
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!(s.unconfirmed, vec![(pk(1), "tail-sig".to_string())]);
     }
 
-    /// Audit finding: position cursors broke when class membership changed.
+    /// Regression: position cursors broke when class membership changed.
     /// With last-visited pubkeys, a deferred account is first next cycle even
     /// when a new account sorting before it joins.
     #[test]
@@ -791,7 +791,7 @@ mod tests {
         assert_eq!(served, vec![10, 11, 12, 5]);
     }
 
-    /// Audit finding: with a 1-tx budget every cycle used to start (and end)
+    /// Regression: with a 1-tx budget every cycle used to start (and end)
     /// with a liquidatable account. The class turn now persists across
     /// cycles, and a deferred class opens the next cycle.
     #[test]

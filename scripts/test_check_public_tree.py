@@ -9,12 +9,16 @@
   refused; a failed export leaves nothing behind.
 * Leak helper (check_public_tree.sh): a plain pattern check. One hit per
   pattern, and a clean tree passes. Bypasses are out of scope by design.
-* Profiles: --profile drip-markets reads its own manifest; dir: entries
+* Profiles: --profile drip-markets reads its own manifest; glob: entries
   expand committed files and refuse excluded or denylisted ones; skip:,
-  allow-phrase:, anchored and cut rewrites, placeholder substitution and
-  kept placeholders.
+  allow-phrase:, anchored and cut rewrites, placeholder substitution, kept
+  placeholders, must-not-contain strings and the strict gate.
+* CLI: argparse, --help, flag-like targets, --release; the gates and the
+  denylist are read from HEAD, not the working copy.
+* Strict gate (check_public_strict.py): one test per pattern.
 """
 
+import base64
 import json
 import os
 import shutil
@@ -196,7 +200,7 @@ class Exporter(unittest.TestCase):
     def setUp(self):
         self.repo = tempfile.mkdtemp(prefix="export-probe-")
         os.makedirs(os.path.join(self.repo, "scripts"))
-        for f in ("export_public.py", "check_public_tree.sh"):
+        for f in ("export_public.py", "check_public_tree.sh", "check_public_strict.py"):
             shutil.copy(os.path.join(HERE, f), os.path.join(self.repo, "scripts", f))
         open(os.path.join(self.repo, "scripts", "public_denylist.txt"), "w").close()
         self.write("a.md", "clean\n")
@@ -343,7 +347,7 @@ DRIVER = (
 
 
 class MarketsProfile(unittest.TestCase):
-    """drip-markets: own manifest, dir:/skip:/allow-phrase: lines, rewrites, subs."""
+    """drip-markets: own manifest, glob:/skip:/allow-phrase: lines, rewrites, subs."""
 
     # The throwaway-repo helpers, without re-running Exporter's tests.
     setUp, tearDown, write, commit = Exporter.setUp, Exporter.tearDown, Exporter.write, Exporter.commit
@@ -383,17 +387,54 @@ class MarketsProfile(unittest.TestCase):
         self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
         self.assertEqual(self.leftovers(), [])
 
-    def test_dir_entry_expands_committed_files_only(self):
+    def test_glob_entry_expands_committed_files_only(self):
         self.write("frontend/index.html", "<p>site</p>\n")
         self.write("frontend/src/app.ts", "export {}\n")
-        self.write("frontend/.gitignore", "dist\n")
-        self.write("frontend/.env.example", "VITE_X=1\n")
-        self.commit_markets("dir: frontend web\nfrontend/.env.example web/env.example\n")
+        self.write("frontend/src/a/b.tsx", "export {}\n")
+        self.write("frontend/src/c/d.css", "p {}\n")
+        self.write("frontend/src/c/e.svg", "<svg/>\n")
+        self.commit_markets("frontend/index.html frontend/index.html\n"
+                            "glob: frontend/src/*.ts\nglob: frontend/src/{a,c}/*.{tsx,css}\n"
+                            "skip: frontend/src/c/e.svg\n")
         self.write("frontend/src/uncommitted.ts", "x\n")
         rc, out = self.export_markets()
         self.assertEqual(rc, 0, out)
-        self.assertEqual(self.exported(), ["web/.gitignore", "web/env.example", "web/index.html",
-                                           "web/src/app.ts"])
+        self.assertEqual(self.exported(), ["frontend/index.html", "frontend/src/a/b.tsx",
+                                           "frontend/src/app.ts", "frontend/src/c/d.css"])
+        # ** spans directories; ? is one character within a segment.
+        shutil.rmtree(self.dest)
+        os.remove(os.path.join(self.repo, "frontend/src/uncommitted.ts"))
+        self.commit_markets("frontend/index.html frontend/index.html\nglob: frontend/**/?.{tsx,css}\n"
+                            "glob: frontend/src/app.ts\nskip: frontend/src/c/e.svg\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.exported()), 4)
+
+    def test_new_file_type_or_top_level_file_fails(self):
+        self.write("frontend/src/app.ts", "x\n")
+        for extra in ("frontend/src/new.wasm", "frontend/NEW.md", "frontend/src/newdir/x.ts"):
+            with self.subTest(extra=extra):
+                self.tearDown()
+                self.setUp()
+                self.write("frontend/src/app.ts", "x\n")
+                self.write(extra, "x\n")
+                self.commit_markets("glob: frontend/src/*.{ts,tsx}\n")
+                rc, out = self.export_markets()
+                self.assertEqual(rc, 1, out)
+                self.assertIn(extra, out)
+                self.assertEqual(self.leftovers(), [])
+
+    def test_glob_matching_nothing_and_dir_entries_refused(self):
+        self.write("frontend/src/app.ts", "x\n")
+        for manifest, why in (("glob: frontend/src/app.ts\nglob: frontend/src/*.vue\n", "matches no"),
+                              ("dir: frontend frontend\n", "dir: entries are gone"),
+                              ("glob: ../x/*.ts\n", "bad manifest line")):
+            with self.subTest(manifest=manifest):
+                self.commit_markets(manifest)
+                rc, out = self.export_markets()
+                self.assertEqual(rc, 1, out)
+                self.assertIn(why, out)
+                self.assertEqual(self.leftovers(), [])
 
     def test_checked_dir_must_be_fully_enumerated(self):
         self.write("agents/a.ts", "x\n")
@@ -408,7 +449,7 @@ class MarketsProfile(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.exported(), ["agents/a.ts"])
 
-    def test_dir_entry_refuses_excluded_files_unless_skipped(self):
+    def test_glob_entry_refuses_excluded_files_unless_skipped(self):
         cases = {
             "frontend/.env.production": "excluded name",
             "frontend/node_modules/x.js": "excluded directory",
@@ -428,12 +469,12 @@ class MarketsProfile(unittest.TestCase):
                 self.setUp()
                 self.write("frontend/ok.ts", "x\n")
                 self.write(path, "0" * (70 * 1024) if path.endswith(".bin") else "x\n")
-                self.commit_markets("dir: frontend frontend\n")
+                self.commit_markets("glob: frontend/**/*\n")
                 rc, out = self.export_markets()
                 self.assertEqual(rc, 1, out)
                 self.assertIn(why, out)
                 self.assertEqual(self.leftovers(), [])
-                self.commit_markets(f"dir: frontend frontend\nskip: {path}\n")
+                self.commit_markets(f"glob: frontend/**/*\nskip: {path}\n")
                 rc, out = self.export_markets()
                 self.assertEqual(rc, 0, out)
                 self.assertEqual(self.exported(), ["frontend/ok.ts"])
@@ -461,9 +502,9 @@ class MarketsProfile(unittest.TestCase):
         with open(os.path.join(self.dest, "W.md"), "rb") as fh:
             self.assertEqual(fh.read(), b"one\r\ntwo upstream/x\r\n")
 
-    def test_dir_entry_refuses_denylisted_name(self):
+    def test_glob_entry_refuses_denylisted_name(self):
         self.write(f"frontend/{OWNER}-notes.md", "x\n")
-        self.commit_markets("dir: frontend frontend\n", deny=OWNER + "\n")
+        self.commit_markets("glob: frontend/*.md\n", deny=OWNER + "\n")
         rc, out = self.export_markets()
         self.assertEqual(rc, 1, out)
         self.assertIn("denylisted name", out)
@@ -536,6 +577,217 @@ class MarketsProfile(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("ipv4 literal", out)
         self.assertEqual(self.leftovers(), [])
+
+
+    def test_must_not_contain_private_docs(self):
+        self.write("x.rs", "// see docs/LAUNCH" + ".md\n")
+        self.commit_markets("x.rs staging/x.rs\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("refers to private", out)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_markets_export_runs_strict_gate(self):
+        self.write("x.ts", 'const u = "https://rpc.unlisted-host.io/v1";\n')
+        self.commit_markets("x.ts mcp/x.ts\n")
+        rc, out = self.export_markets()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("host not on the allow list", out)
+        self.assertEqual(self.leftovers(), [])
+
+
+class Cli(unittest.TestCase):
+    """argparse, --release, and gates read from HEAD."""
+
+    setUp, tearDown, write, commit = Exporter.setUp, Exporter.tearDown, Exporter.write, Exporter.commit
+    leftovers, exported = Exporter.leftovers, Exporter.exported
+
+    def run_export(self, *args, env=None):
+        p = subprocess.run([sys.executable, "-I", os.path.join(self.repo, "scripts", "export_public.py"),
+                            *args], capture_output=True, text=True,
+                           env={**os.environ, **(env or {})}, cwd=self.repo)
+        return p.returncode, p.stdout + p.stderr
+
+    def test_help(self):
+        rc, out = self.run_export("--help")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("--profile", out)
+        self.assertIn("--release", out)
+
+    def test_flag_like_target_and_extra_args_refused(self):
+        self.commit("a.md README.md\n")
+        for args in (["--", "-out"], ["--bogus", "x"], ["a", "b"], []):
+            with self.subTest(args=args):
+                rc, out = self.run_export(*args)
+                self.assertEqual(rc, 2, out)
+                self.assertFalse(os.path.exists(os.path.join(self.repo, "-out")))
+
+    def test_draft_says_not_releasable_and_release_refuses(self):
+        self.commit("a.md README.md\n")
+        env = {"SECURITY_CONTACT": ""}
+        rc, out = self.run_export(self.dest, env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("NOT RELEASABLE", out)
+        shutil.rmtree(self.dest)
+        rc, out = self.run_export("--release", self.dest, env=env)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT RELEASABLE", out)
+        self.assertEqual(self.leftovers(), [])
+        rc, out = self.run_export("--release", self.dest, env={"SECURITY_CONTACT": "https://sec.example/r"})
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("NOT RELEASABLE", out)
+
+    def test_gate_and_denylist_come_from_head(self):
+        self.write("a.md", f"by {OWNER}\n")
+        self.write("scripts/public_denylist.txt", OWNER + "\n")
+        self.commit("a.md README.md\n")
+        # Uncommitted edits that would let the leak through change nothing.
+        self.write("scripts/public_denylist.txt", "")
+        self.write("scripts/check_public_tree.sh", "exit 0\n")
+        rc, out = self.run_export(self.dest)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("leak helper found hits", out)
+        self.assertEqual(self.leftovers(), [])
+        # And an uncommitted denylist entry does not fail a clean committed tree.
+        self.write("a.md", "clean\n")
+        self.write("scripts/public_denylist.txt", "")
+        subprocess.run(["git", "-C", self.repo, "checkout", "--", "scripts/check_public_tree.sh"], check=True)
+        self.commit("a.md README.md\n")
+        self.write("scripts/public_denylist.txt", "clean\n")
+        rc, out = self.run_export(self.dest)
+        self.assertEqual(rc, 0, out)
+
+
+STRICT = os.path.join(HERE, "check_public_strict.py")
+
+
+class StrictGate(unittest.TestCase):
+    """check_public_strict.py: one hit per pattern; a clean tree passes."""
+
+    OPTS = ["--allow-domain", "github.com", "--fixture", "fx/*", "--allow-binary", "ok.png",
+            "--binary-cap", "100"]
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="strict-probe-")
+        self.deny = self.root + "-deny.txt"
+        with open(self.deny, "w") as fh:
+            fh.write(OWNER + "\n198." + "18.7.9\n")
+        self.put("README.md", "see https://github.com/x/y and http://127.0.0.1:8899, "
+                              "http://localhost:3000 and https://api.example.com/?api_key=1\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        os.remove(self.deny)
+
+    def put(self, rel, data):
+        p = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(data.encode() if isinstance(data, str) else data)
+
+    def gate(self, *extra):
+        p = subprocess.run([sys.executable, "-I", STRICT, self.root, self.deny, *self.OPTS, *extra],
+                           capture_output=True, text=True)
+        return p.returncode, p.stdout + p.stderr
+
+    def assertHit(self, rel, data, label):
+        self.put(rel, data)
+        rc, out = self.gate()
+        self.assertEqual(rc, 1, out)
+        self.assertIn(label, out)
+        os.remove(os.path.join(self.root, rel))
+
+    def test_clean_tree_passes(self):
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_base58_run(self):
+        run = "5" + "K" * 87
+        self.assertHit("k.md", f"key {run}\n", "base58 run")
+        self.put("fx/tx.json", f'["{run}"]\n')  # fixtures are exempt
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+        self.put("k.md", f"key {run}\n")
+        rc, out = self.gate("--allow-token", run)
+        self.assertEqual(rc, 0, out)
+
+    def test_hex_run_outside_locks(self):
+        h = "ab" * 32
+        self.assertHit("h.rs", f'const K: &str = "{h}";\n', "hex run")
+        self.put("Cargo.lock", f'checksum = "{h}"\n')
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_key_parameter_in_url(self):
+        for q in ("api-key", "api_key", "apikey", "dkey", "token", "secret"):
+            with self.subTest(q=q):
+                self.assertHit("u.ts", f'fetch("https://github.com/rpc?{q}=abc")\n', "key parameter")
+
+    def test_rpc_vendor_urls(self):
+        for host in ("lb.drpc.org", "devnet.helius-rpc.com", "x.solana-devnet.quiknode.pro",
+                     "solana-devnet.g.alchemy.com"):
+            with self.subTest(host=host):
+                self.assertHit("u.ts", f'"https://{host}/"\n', "RPC vendor URL")
+
+    def test_host_allowlist(self):
+        self.assertHit("u.md", "https://private-dashboard.io/x\n", "host not on the allow list")
+        self.put("package-lock.json", '{"resolved": "https://registry.npmjs.org/x"}\n')
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_ipv4_public_including_after_a_dot(self):
+        self.assertHit("a.conf", "server 8.8." + "4.4;\n", "ipv4 literal")
+        self.assertHit("b.conf", "host=x.8." + "8.4.4\n", "ipv4 literal")  # IP right after a dot
+        self.put("v.md", "versions 1.2.3.4.5 and 10.0.0.1, 192.0." + "2.7, 127.0.0.1\n")
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_ipv6_other_than_loopback(self):
+        self.assertHit("a.conf", "listen [2001:" + "4860:4860::8888]:80;\n", "ipv6 literal")
+        self.put("b.conf", "listen [::1]:80; listen [::]:80; time 12:30:45\n")
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_multi_line_64_number_json(self):
+        arr = "[\n" + ",\n".join(str(i) for i in range(64)) + "\n]"
+        self.assertHit("k.json", '{"secret": ' + arr + "}\n", "keypair shape")
+        self.put("ok.json", "[" + ",".join(str(i) for i in range(63)) + "]\n")
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_env_secret_lines_by_content(self):
+        self.assertHit("notes.txt", "export DRIP_API_KEY=sk_live_abcdef\n", "env-style secret")
+        self.assertHit("run.md", "WALLET_PRIVATE_KEY=3x9QabcDEF\n", "env-style secret")
+        self.put("ok.md", "API_KEY=\nAUTH_TOKEN=<token>\nDRIP_KEYPAIR=~/k.json npm start\n"
+                          "SEED=${SEED}\nSECRET=your-secret\n")
+        rc, out = self.gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_binaries_allowlist_cap_and_denylist(self):
+        self.assertHit("x.bin", b"\0\1\2", "binary file not on the allow list")
+        self.assertHit("ok.png", b"\0" * 200, "binary over 100 bytes")
+        self.assertHit("ok.png", b"\0\1" + OWNER.encode() + b"\0", "denylisted (binary)")
+
+    def test_unicode_confusables_and_concatenation(self):
+        tricked = OWNER.replace("a", "а", 1)  # Cyrillic a
+        self.assertHit("c.md", f"by {tricked}\n", "denylisted")
+        self.assertHit("w.md", "by " + OWNER[:3] + "​" + OWNER[3:] + "\n", "denylisted")
+        self.assertHit("f.md", "by " + "ａ" + OWNER[1:] + "\n", "denylisted")  # fullwidth a, NFKC
+        self.assertHit("j.ts", f'const h = "{OWNER[:3]}" + "{OWNER[3:]}";\n', "denylisted")
+
+    def test_encoded_forms(self):
+        n = (198 << 24) | (18 << 16) | (7 << 8) | 9
+        self.assertHit("i.ts", f"const ip = {n};\n", "encoded form")
+        b = base64.b64encode(f"user {OWNER} here".encode()).decode()
+        self.assertHit("b.txt", b + "\n", "encoded form")
+
+    def test_new_denylist_entries(self):
+        with open(DENY) as fh:
+            deny = fh.read().lower()
+        for word in ("macprovider", "antseed", "ohmyclaude", "antfeed", "malibu", "flop-watch",
+                     "flop-markets"):
+            with self.subTest(word=word):
+                self.assertIn(word, deny)
 
 
 if __name__ == "__main__":

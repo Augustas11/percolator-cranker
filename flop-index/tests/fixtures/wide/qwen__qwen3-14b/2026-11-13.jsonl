@@ -1,4 +1,4 @@
-{"at_ms":1794559005679,"model":"qwen/qwen3-14b","rows":[{"provider":"NextBit","tag":"nextbit/int4","quantization":"int4","prompt":1E-7,"completion":2.2E-7,"status":0,"uptime_30m":100,"context":40960},{"provider":"DeepInfra","tag":"deepinfra/fp8","quantization":"fp8","prompt":1.2E-7,"completion":2.4E-7,"status":0,"uptime_30m":100,"context":40960}]}
+{"at_ms":1794559005679,"model":"qwen/qwen3-14b","rows":[{"provider":"Seller B","tag":"seller-b/int4","quantization":"int4","prompt":1.09e-07,"completion":2.39e-07,"status":0,"uptime_30m":100,"context":40960},{"provider":"Seller C","tag":"seller-c/fp8","quantization":"fp8","prompt":9.65e-08,"completion":1.93e-07,"status":0,"uptime_30m":100,"context":40960}]}
 not json
 {"at_ms":1794558705679,"model":"qwen/qwen3-14b","rows":[]}
 {"at_ms":17945

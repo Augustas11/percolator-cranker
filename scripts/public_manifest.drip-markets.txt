@@ -182,13 +182,29 @@ mcp/src/tools/trade_history.ts mcp/src/tools/trade_history.ts
 mcp/src/tools/withdraw.ts mcp/src/tools/withdraw.ts
 mcp/tsconfig.json mcp/tsconfig.json
 
-# --- site: every committed file, minus the skips; env files renamed ---
+# --- site: named top-level and public/ files, source by directory and
+# extension (a new file type, directory or top-level file fails the export) ---
 frontend/.env.example frontend/env.example
 frontend/.env.production frontend/env.production.example
 skip: frontend/PRIOR_ART.md   # private research notes
 skip: frontend/.npmrc         # dot file; save-exact only
 skip: frontend/.vercelignore  # hosting detail
-dir: frontend frontend
+frontend/.gitignore frontend/.gitignore
+frontend/README.md frontend/README.md
+frontend/index.html frontend/index.html
+frontend/package.json frontend/package.json
+frontend/package-lock.json frontend/package-lock.json
+frontend/tsconfig.json frontend/tsconfig.json
+frontend/vercel.json frontend/vercel.json
+frontend/vite.config.ts frontend/vite.config.ts
+frontend/public/brand/d-mark.svg frontend/public/brand/d-mark.svg
+frontend/public/og.png frontend/public/og.png
+frontend/public/robots.txt frontend/public/robots.txt
+glob: frontend/scripts/*.ts
+glob: frontend/src/*.{ts,tsx,css}
+glob: frontend/src/{arena,chain,challenge,compute,indexer,market,pages,site,trade}/*.{ts,tsx,css}
+glob: frontend/src/site/routes.json
+glob: frontend/src/chain/fixtures/*.{json,bin}
 
 # --- hosting: Dockerfiles, compose, nginx (the monitor stack stays private) ---
 deploy/Dockerfile deploy/Dockerfile

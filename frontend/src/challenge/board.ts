@@ -62,7 +62,7 @@ export const MOCK_BOARD: ChallengeBoard = {
   entries: [
     { rank: 1, handle: "tessellate", kind: "agent", gain: 0.214, se: 0.041, beats_rule: true, terms: t(0.012, 0.004, 0.006, 0.021, 0.003, 0.038, 0.017), module_hash: "9f3c2e71a0b4d6e8", rounds: 3 },
     { rank: 2, handle: "mkovac", kind: "human", gain: 0.187, se: 0.052, beats_rule: true, terms: t(0.015, 0.006, 0.004, 0.026, 0.005, 0.041, 0.019), module_hash: "41be07c9d2f85a13", rounds: 4 },
-    { rank: 3, handle: "quantile-swarm", kind: "agent", gain: 0.142, se: 0.049, beats_rule: true, terms: t(0.009, 0.011, 0.013, 0.024, 0.004, 0.052, 0.022), module_hash: "c07d5a2b8e1f4936", rounds: 2 },
+    { rank: 3, handle: "quantile-band", kind: "agent", gain: 0.142, se: 0.049, beats_rule: true, terms: t(0.009, 0.011, 0.013, 0.024, 0.004, 0.052, 0.022), module_hash: "c07d5a2b8e1f4936", rounds: 2 },
     { rank: 4, handle: "median of all sellers", kind: "reference", gain: 0.061, se: 0.038, beats_rule: false, terms: t(0.031, 0.044, 0.027, 0.033, 0.012, 0.035, 0.000), module_hash: "ref-median-all", rounds: 4 },
     { rank: 5, handle: "lin_r", kind: "human", gain: 0.044, se: 0.057, beats_rule: false, terms: t(0.022, 0.018, 0.035, 0.041, 0.009, 0.047, 0.028), module_hash: "e2a94c6f17d03b58", rounds: 1 },
     { rank: 6, handle: "live rule", kind: "reference", gain: 0, se: 0, beats_rule: false, terms: t(0.048, 0.007, 0.009, 0.062, 0.006, 0.091, 0.031), module_hash: "ref-live-rule", rounds: 4 },
@@ -71,7 +71,7 @@ export const MOCK_BOARD: ChallengeBoard = {
   season: { entries: [
     { rank: 1, handle: "mkovac", kind: "human", gain: 0.171, se: 0.029, beats_rule: true, terms: t(0.016, 0.006, 0.005, 0.027, 0.005, 0.043, 0.019), module_hash: "41be07c9d2f85a13", rounds: 4 },
     { rank: 2, handle: "tessellate", kind: "agent", gain: 0.168, se: 0.033, beats_rule: true, terms: t(0.013, 0.005, 0.007, 0.023, 0.004, 0.040, 0.018), module_hash: "9f3c2e71a0b4d6e8", rounds: 3 },
-    { rank: 3, handle: "quantile-swarm", kind: "agent", gain: 0.119, se: 0.036, beats_rule: true, terms: t(0.010, 0.012, 0.012, 0.025, 0.005, 0.050, 0.021), module_hash: "c07d5a2b8e1f4936", rounds: 2 },
+    { rank: 3, handle: "quantile-band", kind: "agent", gain: 0.119, se: 0.036, beats_rule: true, terms: t(0.010, 0.012, 0.012, 0.025, 0.005, 0.050, 0.021), module_hash: "c07d5a2b8e1f4936", rounds: 2 },
     { rank: 4, handle: "median of all sellers", kind: "reference", gain: 0.058, se: 0.021, beats_rule: false, terms: t(0.030, 0.045, 0.028, 0.034, 0.012, 0.036, 0.000), module_hash: "ref-median-all", rounds: 4 },
     { rank: 5, handle: "live rule", kind: "reference", gain: 0, se: 0, beats_rule: false, terms: t(0.047, 0.007, 0.010, 0.060, 0.006, 0.089, 0.030), module_hash: "ref-live-rule", rounds: 4 },
   ] },

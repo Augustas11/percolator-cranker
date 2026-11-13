@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 """Allowlist export of a public tree (private repo only).
 
-    export_public.py [--profile drip|drip-markets] <target-dir>
+    export_public.py [--profile drip|drip-markets] [--release] <target-dir>
 
 Profiles (PROFILES below): "drip" (the default) is the reference keeper tree,
 "drip-markets" the products tree. Each has its own manifest, checked
 directories, forbidden names, rewrites and public name.
 
-* <target-dir> must NOT exist. The tree is built in a fresh temporary
-  directory next to it and published only after every check passes, by an
-  atomic mkdir of <target-dir> (fails if anything exists there) and moving
-  the entries in. A failed export, including one that fails while moving
-  entries into the directory it just created, leaves nothing behind and
-  never touches existing files.
+* <target-dir> must NOT exist (and must not start with "-"). The tree is
+  built in a fresh temporary directory next to it and published only after
+  every check passes, by an atomic mkdir of <target-dir> (fails if anything
+  exists there) and moving the entries in. A failed export, including one
+  that fails while moving entries into the directory it just created, leaves
+  nothing behind and never touches existing files.
 * HEAD is resolved once. Exactly the files in the profile's manifest
   (as committed at that HEAD) are exported, read from that commit with
-  `git cat-file`, never from the working tree.
+  `git cat-file`, never from the working tree. The gate scripts and the
+  denylist are read from that commit too, so an uncommitted edit to them
+  changes nothing.
 * Every file committed at that HEAD under the profile's checked directories
-  must be listed in the manifest (as a file, under a `dir:` entry, or as a
-  deliberate `skip:`); a new file reaches the public tree only by being
+  must be listed in the manifest (as a file, matched by a `glob:` line, or
+  as a deliberate `skip:`); a new file reaches the public tree only by being
   added on purpose.
 * Destinations are unique (case-insensitively), normalized, and must stay
   inside the tree, outside the
@@ -27,26 +29,33 @@ directories, forbidden names, rewrites and public name.
   .dockerignore).
 * Layout rewrites are explicit and anchored; then the leak helper
   (scripts/check_public_tree.sh, a plain pattern check) runs with the
-  private denylist. The allowlist above is the control; the helper and the
-  owner's read of the tree before the first push are the backstops.
+  private denylist, and for drip-markets the strict gate
+  (scripts/check_public_strict.py). The allowlist above is the control; the
+  gates and the owner's read of the tree before the first push are the
+  backstops.
 
 Manifest lines (`#` starts a comment):
     <private path> <public path>     one committed file
-    dir: <private dir> <public dir>  every committed file under the dir that
-                                     no other line names; refused if any of
-                                     them matches the exclude rules
-                                     (excluded()) or a denylisted name
+    glob: <pattern>                  committed files matching the pattern, at
+                                     the same path (`*` and `?` within one
+                                     path segment, `**/` any directories,
+                                     `{a,b}` alternatives); refused if it
+                                     matches nothing, or a match is caught by
+                                     the exclude rules (excluded()) or names
+                                     a denylisted string
     skip: <private path>             a committed file under a checked dir
                                      that deliberately stays private
-    allow-phrase: <words>            the leak helper ignores this phrase
+    allow-phrase: <words>            the leak gates ignore this phrase
                                      (letters, digits, space, - _) when it
                                      matches denylisted strings
 
 Env: PUBLIC_NAME (default: the profile's name) replaces
 @PUBLIC_NAME@. SECURITY_CONTACT replaces @SECURITY_CONTACT@; without it the
-export is a DRAFT (the gate runs with --draft) and is not releasable.
+export is a DRAFT, NOT RELEASABLE (the gate runs with --draft and the tool
+says so); with --release a missing SECURITY_CONTACT fails the export.
 """
 
+import argparse
 import fnmatch
 import os
 import posixpath
@@ -167,10 +176,23 @@ MARKETS_REWRITES = [
      "# scripts/launch_market.sh;", "# LAUNCH_RUN_DIR is the launch's run dir (state.json + keys/, 0600), made by\n"
      "# the launch steps (docs/RUNBOOK.md);"),
     ("frontend/src/site/config.ts", "// TODO-OWNER: ", "// "),
+    # Docs that stay private: the public tree points at docs/RUNBOOK.md.
+    ("frontend/src/chain/tx.ts", " (docs/LAUNCH.md)", ""),
+    ("launch/flop-compute.toml", " (docs/LAUNCH.md).", "."),
+    ("*", ' (docs/LAUNCH.md, "Matcher reference age")', " (`matcher_ops set-params`, matcher/README.md)"),
+    ("staging/src/launch.rs", "/// by hand (docs/LAUNCH.md).", "/// by hand (`matcher_ops set-params`)."),
     # Hosting defaults: no server paths.
     ("*", "/opt/drip/", "/srv/drip/"),
     # Wrapper checkout: upstream/percolator-prog (scripts/fetch_upstream.sh).
     ("*", "repo-prog", "upstream/percolator-prog"),
+]
+
+# Public hosts the products tree names in URLs (the strict gate refuses others).
+MARKETS_DOMAINS = [
+    "github.com", "githubusercontent.com", "solana.com", "drip-devnet.vercel.app",
+    "openapi.vercel.sh", "apache.org", "w3.org", "googleapis.com", "gstatic.com",
+    "x.com", "openrouter.ai", "flop.network", "binance.com", "binance.us",
+    "kraken.com", "coinbase.com",
 ]
 
 PROFILES = {
@@ -182,28 +204,49 @@ PROFILES = {
         "subs": {},
         "keep": [],
         "dot_ok": DOT_OK,
+        "strict": None,
+        "must_not_contain": [],
     },
     "drip-markets": {
         "manifest": "scripts/public_manifest.drip-markets.txt",
         "scanned": MARKETS_SCANNED,
-        "forbidden": MARKETS_FORBIDDEN,
+        "forbidden": MARKETS_FORBIDDEN | {"check_public_strict.py"},
         "rewrites": MARKETS_REWRITES,
         # The live site, one value for every skeleton file that names it.
         "subs": {"@SITE_URL@": "https://drip-devnet.vercel.app"},
         # Placeholders the public tree keeps on purpose (a deployer fills them).
         "keep": ["DEPLOY_HOST"],
         "dot_ok": DOT_OK | {".dockerignore"},
+        # scripts/check_public_strict.py options (public paths).
+        "strict": {
+            "allow_domain": MARKETS_DOMAINS,
+            # Recorded transactions, account dumps, data hashes, URL-parsing tests.
+            "fixture": ["indexer/tests/fixtures/*.json", "frontend/src/chain/fixtures/*.json",
+                        "flop-index/pins/*/MANIFEST", "cranker/tests/common/mod.rs",
+                        "cranker/src/submit.rs", "mcp/src/drip.test.ts"],
+            # The first matcher fill's transaction signature (matcher/README.md).
+            # A public Pyth price-feed id (launch/*.toml); an all-ones test cursor (indexer/src/api.rs).
+            "allow_token": ["ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d", "1" * 64,
+                            "4biJBxUbhkEXpr1Zb43CYmEFU74rqBH12p6qjeGM7JfuWNy4Vf4wLMkLEtPHLiQNoq7xgjjSi9iAvKjHJnhemaZt"],
+            "allow_binary": ["frontend/public/og.png", "frontend/src/chain/fixtures/*.bin"],
+            "binary_cap": 256 * 1024,
+        },
+        # Private docs and scripts the public tree must not point at.
+        "must_not_contain": ["docs/LAUNCH.md", "launch_market"],
     },
 }
 
-# dir: entries refuse any expanded file that matches these (path components,
-# base-name globs, size caps). Explicit file lines are deliberate and exempt.
+# glob: matches refuse any file that matches these (path components, base-name
+# globs, size caps). Explicit file lines are deliberate and exempt.
 EXCLUDE_COMPONENTS = {"node_modules", "dist", "target", ".vercel", "keys", ".git"}
-EXCLUDE_GLOBS = [".env*", "*.sqlite*", "*.db", "*.pem", "*keypair*.json", "id.json", "*.so",
-                 "*.key", "*.p8", "*.p12", "*.jks", "*.log", "*secret*", "credentials*"]
+EXCLUDE_GLOBS = [".env*", "env.*", "*.env", "*.sqlite*", "*.db", "*.pem", "*keypair*.json",
+                 "id.json", "*.so", "*.key", "*.p8", "*.p12", "*.jks", "*.log", "*secret*",
+                 "credentials*"]
 MAX_BIN = 64 * 1024      # *.bin fixtures
 MAX_FILE = 1024 * 1024   # anything else
 PHRASE_OK = re.compile(r"^[A-Za-z0-9 _-]+$")
+GATE_FILES = ["scripts/check_public_tree.sh", "scripts/check_public_strict.py",
+              "scripts/public_denylist.txt"]
 
 
 def die(msg):
@@ -230,7 +273,7 @@ def check_dest(to, dot_ok=DOT_OK):
 
 
 def excluded(path, size):
-    """Why a dir: expansion must not export this file, or None."""
+    """Why a glob: match must not be exported, or None."""
     comps = path.split("/")
     hit = EXCLUDE_COMPONENTS.intersection(comps)
     if hit:
@@ -246,8 +289,33 @@ def excluded(path, size):
     return None
 
 
-def denylist_patterns(head):
-    text = git("cat-file", "blob", f"{head}:scripts/public_denylist.txt")
+def glob_regex(pattern):
+    """A manifest glob as an anchored regex over committed paths."""
+    out, i = "", 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern.startswith("**/", i):
+            out += "(?:[^/]+/)*"
+            i += 3
+            continue
+        if c == "*":
+            out += "[^/]*"
+        elif c == "?":
+            out += "[^/]"
+        elif c == "{":
+            j = pattern.find("}", i)
+            if j < 0:
+                die(f"bad glob (unclosed brace): {pattern}")
+            out += "(?:" + "|".join(re.escape(a) for a in pattern[i + 1:j].split(",")) + ")"
+            i = j + 1
+            continue
+        else:
+            out += re.escape(c)
+        i += 1
+    return re.compile(out + r"\Z")
+
+
+def denylist_patterns(text):
     out = []
     for raw in text.splitlines():
         p = raw.split("#", 1)[0].strip()
@@ -257,32 +325,30 @@ def denylist_patterns(head):
 
 
 def parse_args(argv):
-    profile = "drip"
-    rest = []
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if a == "--profile" and i + 1 < len(argv):
-            profile = argv[i + 1]
-            i += 2
-            continue
-        if a.startswith("--profile="):
-            profile = a.split("=", 1)[1]
-        else:
-            rest.append(a)
-        i += 1
-    return profile, rest
+    ap = argparse.ArgumentParser(
+        prog="export_public.py",
+        description="Allowlist export of a public tree from the committed HEAD (see the module docstring).")
+    ap.add_argument("--profile", choices=sorted(PROFILES), default="drip",
+                    help="export profile (default: drip)")
+    ap.add_argument("--release", action="store_true",
+                    help="refuse to export without SECURITY_CONTACT (a releasable tree)")
+    ap.add_argument("target", help="directory to create; must not exist")
+    a = ap.parse_args(argv)
+    if a.target.startswith("-"):
+        ap.error(f"target looks like a flag: {a.target}")
+    return a
 
 
 def main(argv):
-    profile_name, args = parse_args(argv)
-    if len(args) != 1 or profile_name not in PROFILES:
-        print(__doc__.strip().splitlines()[2], file=sys.stderr)
-        print("profiles: " + ", ".join(PROFILES), file=sys.stderr)
-        return 2
+    args = parse_args(argv)
+    profile_name = args.profile
     prof = PROFILES[profile_name]
     forbidden = prof["forbidden"]
-    dest = os.path.abspath(args[0])
+    dest = os.path.abspath(args.target)
+    contact = os.environ.get("SECURITY_CONTACT", "")
+    if args.release and not contact:
+        die("NOT RELEASABLE: --release needs SECURITY_CONTACT (SECURITY.md would keep "
+            "@SECURITY_CONTACT@)")
     if os.path.lexists(dest):
         die(f"{dest} already exists; export into a path that does not exist yet")
     parent = os.path.dirname(dest)
@@ -291,7 +357,8 @@ def main(argv):
     head = git("rev-parse", "--verify", "HEAD^{commit}").strip()
     manifest_path = prof["manifest"]
     manifest = git("cat-file", "blob", f"{head}:{manifest_path}")
-    entries, listed, dests, dirs, skips, phrases = [], set(), set(), [], set(), []
+    deny = denylist_patterns(git("cat-file", "blob", f"{head}:scripts/public_denylist.txt"))
+    entries, listed, dests, globs, skips, phrases = [], set(), set(), [], set(), []
 
     def add(src, to):
         if any(part in forbidden for part in posixpath.normpath(src).split("/")):
@@ -315,12 +382,11 @@ def main(argv):
             continue
         parts = line.split()
         if parts[0] == "dir:":
-            if len(parts) != 3:
+            die(f"dir: entries are gone; list files or use glob: ({raw!r})")
+        if parts[0] == "glob:":
+            if len(parts) != 2 or parts[1].startswith(("/", "../")) or "/../" in parts[1]:
                 die(f"bad manifest line: {raw!r}")
-            src_dir, to_dir = (posixpath.normpath(p) for p in parts[1:])
-            if src_dir != parts[1].rstrip("/") or src_dir.startswith(("/", "..")) or src_dir == ".":
-                die(f"bad dir: source: {raw!r}")
-            dirs.append((src_dir, to_dir))
+            globs.append(parts[1])
             continue
         if parts[0] == "skip:":
             if len(parts) != 2:
@@ -333,30 +399,30 @@ def main(argv):
 
     for src in skips & listed:
         die(f"manifest both exports and skips: {src}")
-    if dirs:
-        deny = denylist_patterns(head)
-        for src_dir, to_dir in dirs:
-            tree = git("ls-tree", "-r", "-l", "-z", head, "--", src_dir + "/").split("\0")
-            found = False
-            for rec in tree:
-                if not rec:
-                    continue
-                meta, path = rec.split("\t", 1)
-                found = True
+    if globs:
+        tree = [r for r in git("ls-tree", "-r", "-l", "-z", head).split("\0") if r]
+        sized = []
+        for rec in tree:
+            meta, path = rec.split("\t", 1)
+            size = meta.split()[3]
+            sized.append((path, int(size) if size != "-" else 0))
+        for pattern in globs:
+            rx = glob_regex(pattern)
+            matched = [(p, n) for p, n in sized if rx.match(p)]
+            if not matched:
+                die(f"glob: {pattern} matches no committed file")
+            for path, size in matched:
                 if path in listed or path in skips:
                     continue
-                size = int(meta.split()[3]) if meta.split()[3] != "-" else 0
                 why = excluded(path, size)
                 if why:
-                    die(f"dir: {src_dir} would export {path} ({why}); skip: it or export it "
+                    die(f"glob: {pattern} would export {path} ({why}); skip: it or export it "
                         "by an explicit line")
                 low = path.lower()
                 for p in deny:
                     if p in low:
-                        die(f"dir: {src_dir} would export a denylisted name: {path}")
-                add(path, posixpath.join(to_dir, path[len(src_dir) + 1:]))
-            if not found:
-                die(f"dir: {src_dir} has no committed files")
+                        die(f"glob: {pattern} would export a denylisted name: {path}")
+                add(path, path)
 
     committed = git("ls-tree", "-r", "-z", "--name-only", head, "--", *prof["scanned"]).split("\0")
     committed = [p for p in committed if p]
@@ -369,6 +435,7 @@ def main(argv):
             "private by moving them): " + ", ".join(unlisted))
 
     tmp = tempfile.mkdtemp(prefix=".export-", dir=parent)
+    gates = tempfile.mkdtemp(prefix=".export-gate-", dir=parent)
     ok = created = False
     try:
         for src, to in entries:
@@ -428,7 +495,6 @@ def main(argv):
 
         subs = {"@PUBLIC_NAME@": os.environ.get("PUBLIC_NAME", profile_name)}
         subs.update(prof["subs"])
-        contact = os.environ.get("SECURITY_CONTACT", "")
         if contact:
             subs["@SECURITY_CONTACT@"] = contact
         for dirpath, _, files in os.walk(tmp):
@@ -447,16 +513,34 @@ def main(argv):
             for name in dirs_ + files:
                 if name in forbidden:
                     die(f"export leaked forbidden path: {os.path.relpath(os.path.join(dirpath, name), tmp)}")
+                if prof["must_not_contain"] and name in files:
+                    try:
+                        s = open(os.path.join(dirpath, name), encoding="utf-8").read()
+                    except (UnicodeDecodeError, ValueError):
+                        continue
+                    for bad in prof["must_not_contain"]:
+                        if bad in s:
+                            die(f"export still refers to private {bad}: "
+                                f"{os.path.relpath(os.path.join(dirpath, name), tmp)}")
+
+        # The gates as committed at HEAD, never the working copy.
+        for g in GATE_FILES:
+            if g.endswith(".py") and prof["strict"] is None:
+                continue
+            with open(os.path.join(gates, os.path.basename(g)), "wb") as f:
+                f.write(git("cat-file", "blob", f"{head}:{g}", binary=True))
+        denylist = os.path.join(gates, "public_denylist.txt")
 
         n = sum(len(f) for _, _, f in os.walk(tmp))
         print(f"exported {n} files from {head[:12]} (profile {profile_name})")
-        gate = ["bash", os.path.join(HERE, "check_public_tree.sh")]
+        gate = ["bash", os.path.join(gates, "check_public_tree.sh")]
         if contact:
             if "@" in contact:
                 gate += ["--allow-email", contact]
         else:
-            print("DRAFT: SECURITY_CONTACT not set, so @SECURITY_CONTACT@ remains; "
-                  "this tree is not releasable yet.")
+            print("NOT RELEASABLE (draft): SECURITY_CONTACT is not set, so SECURITY.md still "
+                  "has @SECURITY_CONTACT@. Set it and export again (--release enforces it) "
+                  "before publishing this tree.")
             gate.append("--draft")
         for k in prof["keep"]:
             gate += ["--keep-placeholder", k]
@@ -464,9 +548,20 @@ def main(argv):
             gate += ["--allow-phrase", ph]
         if profile_name != "drip":
             gate.append("--ipv4")
-        gate += [tmp, os.path.join(HERE, "public_denylist.txt")]
+        gate += [tmp, denylist]
         if subprocess.run(gate).returncode != 0:
             die("leak helper found hits (see above)")
+        st = prof["strict"]
+        if st is not None:
+            strict = [sys.executable, "-I", os.path.join(gates, "check_public_strict.py"), tmp, denylist,
+                      "--binary-cap", str(st["binary_cap"])]
+            for ph in phrases:
+                strict += ["--allow-phrase", ph]
+            for key in ("allow_domain", "fixture", "allow_token", "allow_binary"):
+                for v in st[key]:
+                    strict += ["--" + key.replace("_", "-"), v]
+            if subprocess.run(strict).returncode != 0:
+                die("strict leak gate found hits (see above)")
         # No-replace publication: mkdir is atomic and fails if anything now
         # exists at dest (a plain rename could replace an empty directory
         # created meanwhile). Then move the entries into the directory we own.
@@ -480,8 +575,11 @@ def main(argv):
         os.rmdir(tmp)
         ok = True
         print(f"exported to {dest}")
+        if not contact:
+            print("NOT RELEASABLE (draft): see above.")
         return 0
     finally:
+        shutil.rmtree(gates, ignore_errors=True)
         if not ok:
             shutil.rmtree(tmp, ignore_errors=True)
             if created:
