@@ -11,6 +11,11 @@ use crate::{spec_quote, OrEndpoint, SPEC};
 pub trait Rule {
     fn step(&mut self, at_ms: u64, endpoints: &[OrEndpoint]) -> Option<f64>;
     fn clone_box(&self) -> Box<dyn Rule>;
+    /// Why the rule is out of the running, if it is (a WebAssembly rule
+    /// that broke a limit). The scorer then returns an error, not losses.
+    fn disqualified(&self) -> Option<String> {
+        None
+    }
 }
 
 /// USD per 1M tokens at the SPEC's 15:1 input:output blend.

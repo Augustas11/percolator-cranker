@@ -111,7 +111,7 @@ fn attack_case(k: usize) -> (f64, f64) {
         Ok(q) => (q.usd_e6 as f64 / 1e6 / clean).ln().abs() / 2.0,
         Err(_) => 0.0, // stale: the mark holds
     };
-    let got = day_losses(&Spec, &[s], 1)[&DAY0].attack[k];
+    let got = day_losses(&Spec, &[s], 1).unwrap()[&DAY0].attack[k];
     assert!((got - want).abs() < 1e-12, "{}: got {got} want {want}", SCENARIOS[k]);
     (got, clean)
 }
@@ -153,7 +153,7 @@ fn with_two_providers_one_down_holds_the_mark() {
     }
     // Stale (one up endpoint): the baseline holds, the attack costs nothing.
     // (Day 0 has no earlier mark to hold, so day 1.)
-    assert_eq!(day_losses(&Spec, &[s], 1)[&(DAY0 + 1)].attack[2], 0.0);
+    assert_eq!(day_losses(&Spec, &[s], 1).unwrap()[&(DAY0 + 1)].attack[2], 0.0);
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn a_jump_the_median_explains_costs_nothing() {
         e.prompt *= 2.0;
         e.completion *= 2.0;
     }
-    let l = day_losses(&Spec, &[s], 1);
+    let l = day_losses(&Spec, &[s], 1).unwrap();
     assert!(l[&(DAY0 + 1)].jump < 1e-5, "{}", l[&(DAY0 + 1)].jump);
     assert_eq!(l[&DAY0].jump, 0.0, "no earlier snapshot");
 }
@@ -264,7 +264,7 @@ fn on_hourly_data_an_instant_follower_pays_nothing_and_a_lagging_one_pays() {
     let mut s = flat(1);
     let eps = s.snaps[0].endpoints.clone();
     s.snaps = (0..24 * 6).map(|h| Snapshot { at_ms: DAY0 * DAY_MS + h * 3_600_000, endpoints: eps.clone() }).collect();
-    let l = day_losses(&Spec, std::slice::from_ref(&s), 1);
+    let l = day_losses(&Spec, std::slice::from_ref(&s), 1).unwrap();
     assert!(l.values().all(|d| d.follow == 0.0));
     // Holds each new mark for 12 h before following.
     #[derive(Clone, Default)]
@@ -284,6 +284,6 @@ fn on_hourly_data_an_instant_follower_pays_nothing_and_a_lagging_one_pays() {
             Box::new(self.clone())
         }
     }
-    let lag = day_losses(&Lag12::default(), &[s], 1);
+    let lag = day_losses(&Lag12::default(), &[s], 1).unwrap();
     assert!(lag.values().any(|d| d.follow > 0.01), "{:?}", lag.values().map(|d| d.follow).collect::<Vec<_>>());
 }
