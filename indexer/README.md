@@ -3,8 +3,9 @@
 A synchronous, read-only Solana poller for the devnet SOL-PERP market. It decodes
 landed top-level wrapper instructions, keeps SQLite WAL history and portfolio
 snapshots, and serves frontend history/positions plus honest keeper statistics.
-It never submits transactions. Executed NoCpi fill count is reported; CPI requests
-are retained separately. Season volume uses each fill's reported price; open
+It never submits transactions. Executed fill count covers NoCpi fills and matcher
+(TradeCpi/BatchTradeCpi) fills whose execution is known; other CPI requests are
+retained separately. Volume uses each fill's reported or matcher price; open
 interest uses the latest mark.
 
 From the repository root:
@@ -24,7 +25,9 @@ The default database is relative to **cwd**. Use a private writable directory or
 `--db indexer/indexer.sqlite`; do not commit database files. Root `/indexer.sqlite*`
 and indexer-local SQLite files are ignored. Legacy databases with `exec_price` or
 marks without `observation_sequence` are refused: preserve the old database and use a new `--db` path with `backfill` to
-rebuild corrected market filtering, crank outcomes, and mark history. No automatic
+rebuild corrected market filtering, crank outcomes, and mark history. Databases whose
+`fills` table lacks `executed_size` (before matcher fills were decoded) are refused the
+same way: start a fresh data directory and backfill. No automatic
 migration or deletion is performed.
 
 A devnet backfill of about 230 transactions takes about 15 minutes on the public
@@ -97,10 +100,16 @@ unknown block times. An empty or zero-duration window has a null percentage.
 computed once per completed pass and stored in `meta.stats_json`; requests read
 that cached JSON without history scans. Before the first pass the empty shape is
 returned, with window_end 0. Open interest includes per-asset lifecycle and
-effective engine OI.
+effective engine OI. `fills` counts `executed` rows (NoCpi and executed CPI). `fills_24h`
+and `volume_24h` cover executed fills from every taker (bots included) with block time
+within 24 hours of `as_of`; volume is `|executed_size| * price / 1e6` as a decimal
+string (the `/season` `volume_usd` unit), with price from the reported price, else the
+matcher price, else the last mark; fills with no price count without volume. Funding
+rate is not reported: it is supplied per crank observation, not stored in the market
+account.
 
 ```json
-{"market":"7p8DtcMHSjdCsM9xWvBwF6TebGBSL18wKvfM7BS1zyHq","program":"GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS","as_of_slot":null,"as_of":null,"cranks":{"total":0,"ok":0,"idle":0,"failed":0,"reverted":0,"success_rate":null,"first_at":null,"last_at":null},"uptime":{"cycle_secs":3,"window_start":null,"window_end":0,"covered_secs":null,"missed_secs":null,"uptime_pct":null,"longest_gap_secs":null,"gaps_over_slack":null},"liquidations_observed":0,"liquidations_since_slot":null,"open_interest":{},"depositors":0,"portfolios":0,"fills":0,"mode":null,"materialized_portfolio_count":null,"insurance":null,"vault":null}
+{"market":"7p8DtcMHSjdCsM9xWvBwF6TebGBSL18wKvfM7BS1zyHq","program":"GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS","as_of_slot":null,"as_of":null,"cranks":{"total":0,"ok":0,"idle":0,"failed":0,"reverted":0,"success_rate":null,"first_at":null,"last_at":null},"uptime":{"cycle_secs":3,"window_start":null,"window_end":0,"covered_secs":null,"missed_secs":null,"uptime_pct":null,"longest_gap_secs":null,"gaps_over_slack":null},"liquidations_observed":0,"liquidations_since_slot":null,"open_interest":{},"depositors":0,"portfolios":0,"fills":0,"fills_24h":0,"volume_24h":"0","mode":null,"materialized_portfolio_count":null,"insurance":null,"vault":null}
 ```
 
 `GET /leaderboard` — up to 100 wallets, sorted by PnL descending then wallet ascending,
@@ -122,10 +131,18 @@ including inside one slot or transaction. The exclusive cursor format is
 
 Each row has signature, ix/leg, slot/time, both portfolio keys/IDs, asset/market ID,
 raw taker-signed `size_q`, `reported_price` (NoCpi instruction price, otherwise
-null), `limit_price` (CPI), `requested_fee_bps`, `mark_price`, `status`, and `side`
-from the queried portfolio's view (buy means it went longer). NoCpi rows are
-`executed`; TradeCpi/BatchTradeCpi rows are `requested`, because successful handlers
-can execute zero size. `/stats.fills` counts only `executed` rows. CPI uses the
+null), `limit_price` (CPI), `requested_fee_bps`, `mark_price`, `status`,
+`executed_size` (taker-signed, null while unknown), `applied_price` (CPI: the mark the
+wrapper passed to the matcher for that leg), and `side` from the queried portfolio's
+view (buy means it went longer). NoCpi rows are `executed`. Landed CPI rows are
+`executed` with `executed_size = size_q` when the fill is provably full: every
+BatchTradeCpi (the wrapper rejects any leg whose matcher size differs from the request),
+and TradeCpi through a full-fill matcher (`FULL_FILL_MATCHERS` in `src/decode.rs`: the
+drip matcher `8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE`, which never sets
+`FLAG_PARTIAL_OK`, so zero and partial fills are rejected). TradeCpi through other
+matchers stays `requested`: the transaction has no logs or return data with the
+executed size, and the matcher context holding it is overwritten by the next trade.
+`/stats.fills` counts only `executed` rows. CPI uses the
 configured base fee and NoCpi may derive a dynamic fee, so requested fees are not
 actual charged fees. The old `exec_price`, `fee_bps`, and `price_known` fields are
 removed.
@@ -145,6 +162,19 @@ Every fill includes:
 
 ```json
 {"fills":[],"next_before":null}
+```
+
+`GET /trades?limit=100&before=<cursor>` — market-wide `executed` fills from every taker,
+newest first, same ordering, limit (1..500, default 100) and cursor as `/fills`. Each row
+has `signature`, `ix_index`, `leg`, `slot`, `block_time`, taker-view `side` (buy/sell),
+unsigned `size` (decimal string of executed size_q), `price` (integer e6 or null),
+`price_source` (`reported`, `matcher_oracle`, `last_mark`, or null), `wallet` (taker
+owner: instruction signer 0, which the wrapper requires to own the taker portfolio),
+`taker_portfolio`, `maker_portfolio` and `asset_index`; the response has `trades`,
+`next_before` and a `price_note`.
+
+```json
+{"trades":[],"next_before":null,"price_note":"..."}
 ```
 
 `GET /fills/recent?limit=20` — newest agent taker fills, executed or requested; limit 1..100.
@@ -191,8 +221,10 @@ so a confirmed close cannot remove a portfolio before it closes at finalized.
 - Fill prices are estimates. The wrapper uses the engine effective price when
   the profile does not update the mark from trades (this AuthMark market), and
   otherwise clamps the reported price. The last pushed mark is an estimate, not
-  proof of the engine execution price. CPI size and limit are requests; matcher
-  execution/return data is not decoded.
+  proof of the engine execution price. CPI `applied_price` is read from the
+  wrapper's matcher CPI instruction data (inner instruction); on AuthMark markets the
+  engine books at that mark. Matcher return data is not in the transaction, so a CPI
+  is `executed` only when the rules above prove a full fill.
 - Snapshots are saved only when owner, capital, pnl or active-leg JSON changes. Discovery
   uses drip's confirmed key/layout filtering plus current portfolio keys, then
   account data is re-read finalized. Only valid portfolios for this market remain current.
