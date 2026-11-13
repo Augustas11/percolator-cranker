@@ -133,7 +133,7 @@ test("the perp and FLOP panels show the settlement price, its sellers and FLOP's
   const how = container.querySelector('[aria-labelledby="compute-how-heading"]')!;
   expect(how.textContent).toContain("staging verify-push-log");
   expect(how.textContent).toContain("Clamp now: off (n<3).");
-  expect(how.textContent).toContain(`Combines the ${marketFixture().index.n_models} model medians`);
+  expect(how.textContent).toContain(`Geometric mean of the ${marketFixture().index.n_models} model medians`);
 });
 
 test("trade link appears when configured", async () => {
