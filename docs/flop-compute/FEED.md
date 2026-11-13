@@ -31,7 +31,10 @@ pusher").
   `{"at_ms", "model", "rows": [{"provider", "tag", "quantization", "prompt", "completion", "status", "uptime_30m", "context"}]}`
   (prices in USD per token). Optional in the same directory: `hf-map.tsv`
   (`<openrouter id>\t<hugging face id>\t<slug>`) and `demand/YYYY-MM-DD.jsonl`
-  (`{"at_ms", "model", "hf", "downloads_30d", "likes", "params"}`); missing or odd
+  (`{"at_ms", "model", "hf", "downloads_30d", "likes", "params", "config"}`,
+  `config` from the model's `config.json`: `hidden_size`, `num_hidden_layers`,
+  `vocab_size`, `experts_per_tok`, `experts`, `shared_experts` and others,
+  any null); missing or odd
   ones mean no aliases or no demand data, not an error. Only directories
   named `<org>__<name>` are models. Adds `market.json`, and keeps the index state
   in `<out dir>/index-state.json`.
@@ -129,13 +132,13 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
 | `index.series` | `[t_ms, level]`, at most 500; both sides of every change |
 | `models[]` | Per model, most up sellers first: `id` (shortest id of its alias group), `aliases` (the other ids), `name`, `family`, `data_ms` (its newest snapshot), `stale` (that is over 30 minutes old: no quote is reported up), `sellers_total`, `sellers_up`, `median`, `p25`, `p75` (over the index input's set, below), `min`, `max` (over quotes up now), `thin`, `quotes_held` (providers in the median's set held at their last up price), `cheapest` (`provider`, `quantization`, `price`; null if no quote is up and priced), `change_24h_pct` (same set as `median`), `demand` (below), `sellers_added_7d`, `series` (`[t_ms, median]`, at most 200), `quotes[]` (`provider`, `quantization`, `price` or null, `up`, `uptime_24h_pct`), cheapest first, unpriced next, down last |
 | `models[].demand` | From the newest demand line of the model (or an alias): `hf_downloads_30d`, `hf_likes`, `as_of_ms`, and `hf_downloads_change_7d_pct` against the newest line at least 6 days older (null without one). All null without demand data. |
-| `models[].compute` | `params` (newest known count from the demand lines, or null), `active_params` (from `--compute` or the id, or null), `gn_per_token`, `basis`: `flop_registry`, `2x_active_params`, `2x_params_dense`, or null when unknown (then every G_n field of the model is null). `source` repeats `basis` for older readers. |
+| `models[].compute` | `params` (newest known count from the demand lines, or null), `active_params` and `active_params_source` (`table`, `id`, `config_estimate`, or null), `gn_per_token`, `basis`: `flop_registry`, `2x_active_params`, `2x_active_params_est`, `2x_params_dense`, or null when unknown (then every G_n field of the model is null). `source` repeats `basis` for older readers. |
 | `models[].usd_per_bn_gn` | `median` in USD per billion G_n; `usd_per_bn_gn_min`, `usd_per_bn_gn_max` likewise from `min`, `max` |
 | `models[].mix` | `chat_3_1`, `avg_15_1`, `agent_150_1`: USD per 1M tokens at 3:1, 15:1, 150:1 input:output (`avg_15_1` = `median`); null with no set |
 | `models[].out_in_ratio` | Median completion ÷ prompt price over the median's set; null if none has a prompt price above 0 |
 | `models[].sellers_added_7d` | Quotes (provider, quantization) listed now that were not listed in the snapshot 7 days ago; null without data that old. Sellers adding a model is a supply-side read of demand. |
 | `models` (empty) | With no wide data yet the file is still written, with `models: []`, null `data_ms`, `level` and `base_ms` |
-| `compute_price` | `median_usd_per_bn_gn`, `p25`, `p75` of `usd_per_bn_gn` over models that are not `thin` and have one, and their count `n_models`; `n_unknown` counts the models not `thin` left out for lack of a G_n figure; null with none |
+| `compute_price` | `median_usd_per_bn_gn`, `p25`, `p75` of `usd_per_bn_gn` over models that are not `thin` and have one, and their count `n_models`, of which `n_estimated` use a config estimate; `n_unknown` counts the models not `thin` left out for lack of a G_n figure; null with none |
 | `mixes` | `chat_3_1`, `avg_15_1`, `agent_150_1`: the median of the models' `mix` (models not `thin`) |
 | `out_in_ratio_median` | The median of the models' `out_in_ratio` (models not `thin`) |
 | `flop` | `gn_price_flop` (from `--flop-gn-price`, or null), `basis_model` (`qwen/qwen3.8-27b`), `implied_flop_usd` (null without both) |
@@ -260,14 +263,48 @@ The broad index, from the wide collector. Prices are USD per 1M tokens at a
      DeepSeek-V3 anchor (74) applies to `deepseek/deepseek-chat-v3.1`,
      `deepseek/deepseek-v3.2` and `deepseek/deepseek-r1-0528` only when
      their Hugging Face parameter count is within 1% of DeepSeek-V3's 685B.
-  2. `2x_active_params`: active parameters from `--compute`, else from an
-     id carrying `-a<N>b` (`qwen3.5-397b-a17b` → 17e9, so 34 G_n per token).
-  3. `2x_params_dense`: 2 × the Hugging Face parameter count, only up to
-     100B weights.
-  4. null: over 100B weights with no known active count. Such a model is
-     almost certainly sparse, so we do not guess; it is left out of
-     `compute_price` and counted in `n_unknown`. DeepSeek V4, GLM, Kimi and
-     MiniMax are here until FLOP or their makers give an active count.
+  2. `2x_active_params`: active parameters from `--compute`
+     (`active_params_source: table`), else from an id carrying `-a<N>b`
+     (`id`; `qwen3.5-397b-a17b` → 17e9, so 34 G_n per token).
+  3. `2x_active_params_est`: active parameters estimated from the
+     Hugging Face config when it gives `experts` and `experts_per_tok`
+     (`config_estimate`, below).
+  4. `2x_params_dense`: 2 × the Hugging Face parameter count, only up to
+     100B weights and only when the config shows no experts (a model with
+     `experts` in its config is never dense).
+  5. null: anything else, such as a model over 100B weights with no active
+     count and no expert counts in its config. Such a model is almost
+     certainly sparse, so we do not guess; it is left out of
+     `compute_price` and counted in `n_unknown`. On 2026-11-13: DeepSeek
+     V4.1 Flash, GLM 5.3 Flash, Kimi K2.5/K2.6/K2.7-code/K3/K3.1-pro,
+     MiniMax M3 and M3.1 Flash, Nemotron 3.5 Super VL, Inkling 2 Small, Muse
+     Spark, Llama 3.1 8B (no parameter count), and Llama 4 Scout and Mistral
+     Small 2603 (both thin).
+  - **Active-parameter estimate.** Attention and embedding weights always
+    run: fixed = layers × 4 × hidden² + vocab × hidden (vocab 150,000 if
+    unknown). The rest, total − fixed, is expert weights, of which
+    (per token + shared) / (experts + shared) run (shared 0 if unknown).
+    Active = fixed + (total − fixed) × that share, clamped to [0, total].
+    Without layers or hidden size: total × the share. It ignores dense MLP
+    layers, norms and biases, and hybrid (Mamba) layers. Checked on
+    2026-11-13 against every model with a stated active count and expert
+    counts in its config:
+
+    | Model | Stated active | Estimated | Ratio |
+    |---|---|---|---|
+    | Qwen3-235B-A22B-2507 | 22B (id) | 21.19B | 0.963 |
+    | Qwen3-30B-A3B-2507 | 3B (id) | 2.95B | 0.985 |
+    | Qwen3.8-2.4T-A95B | 95B (id) | 73.99B | 0.779 |
+    | Beam 1.0 501B-A23B | 23B (id) | 21.70B | 0.943 |
+    | Nemotron 3 Ultra 550B-A55B | 55B (id) | 25.13B | 0.457 |
+    | DeepSeek V3.2 (V3 class) | 37B (FLOP's 74 G_n anchor) | 36.99B | 1.000 |
+    | gpt-oss-120b | 5.1B (OpenAI) | 5.37B | 1.053 |
+
+    Median absolute error 5.3%; it runs low on the largest models, and
+    Nemotron 3 Ultra (no layer count in its config, so total × share) is
+    54% low. Those two have the id count, which wins; the estimate is used
+    only where nothing better exists. gpt-oss-20b (32 experts, 4 per
+    token): 3.82B active, so 7.64 G_n per token instead of 41.8 as dense.
   - `usd_per_bn_gn` = median (USD per 1M tokens) / (G_n per token × 1e6) × 1e9.
     Qwen3.8-27B on 2026-11-13 (registry, 52): $0.296875 / 52e6 × 1e9 =
     $5.709 per billion G_n. DeepSeek V3.2 (685,355,329,792 params, anchor
