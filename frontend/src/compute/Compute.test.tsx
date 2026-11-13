@@ -90,6 +90,15 @@ test("draws one range strip per model on a shared log scale", async () => {
   expect(container.querySelectorAll(".board-row.is-thin").length).toBeGreaterThan(0);
 });
 
+test("shows the top 20 models until asked for all", async () => {
+  const container = await render(liveFeed(Date.now(), m => ({ ...m, models: [...m.models, ...m.models.slice(0, 5).map(x => ({ ...x, id: `${x.id}-b`, name: `${x.name} B` }))] })));
+  expect(container.querySelectorAll(".board-row")).toHaveLength(20);
+  const more = container.querySelector("#board .cx-more")!;
+  expect(more.textContent).toBe("Show all 25 models");
+  await click(more);
+  expect(container.querySelectorAll(".board-row")).toHaveLength(25);
+});
+
 test("a row expands to its full seller list and collapses again", async () => {
   const market = marketFixture();
   const container = await render(liveFeed());

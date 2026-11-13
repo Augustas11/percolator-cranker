@@ -108,7 +108,10 @@ function ModelRow({ model, scale, open, onToggle }: { model: MarketModel; scale:
   </li>;
 }
 
+const MODELS_SHOWN = 20;
+
 function Board({ market }: { market: ComputeMarket }) {
+  const [all, setAll] = useState(false);
   const [sort, setSort] = useState<SortKey>("sellers");
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const scale = useMemo(() => marketScale(market), [market]);
@@ -130,8 +133,9 @@ function Board({ market }: { market: ComputeMarket }) {
       <div className="board-cols" aria-hidden="true">
         <span className="c-model">Model</span><span className="c-sellers">Up</span><span className="c-strip"><Axis scale={scale} /></span><span className="c-median">Median</span><span className="c-spread">Spread</span><span className="c-cheap">Cheapest</span><span className="c-chg">24 h</span><span className="c-chev" />
       </div>
-      <ul className="board-list">{models.map(m => <ModelRow key={m.id} model={m} scale={scale} open={open.has(m.id)} onToggle={() => toggle(m.id)} />)}</ul>
+      <ul className="board-list">{(all ? models : models.slice(0, MODELS_SHOWN)).map(m => <ModelRow key={m.id} model={m} scale={scale} open={open.has(m.id)} onToggle={() => toggle(m.id)} />)}</ul>
     </div>
+    {models.length > MODELS_SHOWN && <button type="button" className="cx-more" aria-expanded={all} onClick={() => setAll(a => !a)}>{all ? `Show top ${MODELS_SHOWN}` : `Show all ${models.length} models`}</button>}
   </section>;
 }
 

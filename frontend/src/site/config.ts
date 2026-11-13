@@ -5,7 +5,7 @@ const market = devnetConfig.market.toBase58();
 
 export const site = {
   heroLine: null as string | null, // TODO-OWNER: hero line slot. null = not rendered.
-  paths: { home: "/", tools: "/tools", arena: "/arena", build: "/build", trade: "/trade", compute: "/compute", docs: "/docs" },
+  paths: { home: "/", tools: "/tools", arena: "/arena", build: "/build", trade: "/trade", compute: "/compute", docs: "/docs", agents: "/agents" },
   computeTrade: null as string | null, // TODO-OWNER: trade page for the compute perp; until set, /compute links the market account on Solana explorer
   computeRepo: "" as string, // empty while the repo is private; the /compute page hides the link when empty
   repo,
@@ -26,6 +26,7 @@ export const site = {
     package: "@driptech/mcp",
     final: true,
     install: "claude mcp add drip -- npx -y @driptech/mcp",
+    computeMarket: null as string | null, // TODO-OWNER: the MCP `market` value for COMPUTE-PERP; /agents shows compute trading examples once set
     json: `{\n  "mcpServers": {\n    "drip": { "command": "npx", "args": ["-y", "@driptech/mcp"] }\n  }\n}`,
   },
   agents: {

@@ -4,9 +4,8 @@ import type { MarketClient } from "../market/types";
 import type { IndexerClient } from "../indexer/client";
 import type { ComputeFeedClient } from "../compute/client";
 import Home from "../pages/Home";
-import Tools from "../pages/Tools";
 import Arena from "../pages/Arena";
-import Build from "../pages/Build";
+import Agents from "../pages/Agents";
 import Compute from "../pages/Compute";
 import Docs from "../pages/Docs";
 import Nav from "./Nav";
@@ -34,13 +33,18 @@ export default function Site({ client, indexer, indexerBase = null, computeFeed 
   }, []);
   const [tradeMounted, setTradeMounted] = useState(path === site.paths.trade);
   useEffect(() => { if (path === site.paths.trade) setTradeMounted(true); }, [path]);
-  const titles: Record<string, string> = { [site.paths.home]: "drip", [site.paths.tools]: "Tools · drip", [site.paths.arena]: "Arena · drip", [site.paths.build]: "Build · drip", [site.paths.compute]: "Compute index · drip", [site.paths.docs]: "Docs · drip", [site.paths.trade]: "Trade · drip" };
+  const titles: Record<string, string> = { [site.paths.home]: "drip", [site.paths.agents]: "Agents · drip", [site.paths.tools]: "Agents · drip", [site.paths.arena]: "Arena · drip", [site.paths.build]: "Agents · drip", [site.paths.compute]: "Compute index · drip", [site.paths.docs]: "Docs · drip", [site.paths.trade]: "Trade · drip" };
+  // The old Tools and Build pages are now /agents; keep their links working.
+  useEffect(() => {
+    if (path !== site.paths.tools && path !== site.paths.build) return;
+    window.history.replaceState({}, "", site.paths.agents + window.location.hash);
+    window.dispatchEvent(new Event("site:navigate"));
+  }, [path]);
   const title = titles[path] ?? "Page not found · drip";
   useEffect(() => { document.title = title; }, [title]);
   const page = path === site.paths.home ? <Home client={client} indexer={indexer} indexerBase={indexerBase} computeFeed={computeFeed} />
-    : path === site.paths.tools ? <Tools />
+    : path === site.paths.agents || path === site.paths.tools || path === site.paths.build ? <Agents feed={computeFeed} />
     : path === site.paths.arena ? <Arena indexerBase={indexerBase} />
-    : path === site.paths.build ? <Build />
     : path === site.paths.compute ? <Compute feed={computeFeed} />
     : path === site.paths.docs ? <Docs feed={computeFeed} />
     : <><h1>Page not found</h1><Link to={site.paths.home}>drip</Link></>;

@@ -3,8 +3,8 @@ import { Link } from "./router";
 
 export default function Footer() {
   const columns = [
-    { title: "PRODUCT", links: [["Index", "/compute"], ["Trade", "/trade"], ["Arena", "/arena"], ["Tools", "/tools"]] },
-    { title: "BUILD", links: [["Docs", "/docs"], ["GitHub", site.repo], ["MCP", "/tools"]] },
+    { title: "PRODUCT", links: [["Index", "/compute"], ["Trade", "/trade"], ["Arena", "/arena"], ["Agents", "/agents"]] },
+    { title: "BUILD", links: [["Docs", "/docs"], ["GitHub", site.repo], ["MCP", "/agents#install"]] },
     { title: "COMMUNITY", links: [["X", site.x], ["Telegram", site.telegram], ["Status", site.status]] },
   ];
   return <footer className="site-footer"><div className="footer-inner">

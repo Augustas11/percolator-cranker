@@ -150,3 +150,8 @@
   .site .compute-card { padding: 16px; }
 }
 .site .nowrap { white-space: nowrap; }
+.site .hero-trade { display: inline-flex; }
+.site .hero-trade { position: relative; }
+.site .hero-trade .trade-note { position: absolute; left: 0; right: 0; top: calc(100% + 8px); text-align: center; }
+.site .home-hero .hero-actions .button-link { padding: 0 24px; }
+.site .home-hero .hero-actions { margin-bottom: 18px; }
