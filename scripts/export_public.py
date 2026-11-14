@@ -89,8 +89,8 @@ REWRITES = [
 # drip-markets: the products tree, private layout kept (cranker/, client/,
 # flop-index/, ...), the pinned wrapper fetched into upstream/.
 MARKETS_SCANNED = [
-    "agents", "client", "cranker", "deploy", "docs/flop-compute", "faucet",
-    "flop-index", "frontend", "indexer", "launch", "matcher", "mcp",
+    "agents", "client", "cranker", "deploy", "docs/flop-compute", "engine-fuzz",
+    "faucet", "flop-index", "frontend", "indexer", "launch", "matcher", "mcp",
     "public-markets", "staging",
 ]
 MARKETS_FORBIDDEN = {
@@ -99,7 +99,7 @@ MARKETS_FORBIDDEN = {
     "repo", "repo-prog", ".preview", ".solana-test-ledger", "public_denylist.txt",
     "export_public.sh", "export_public.py", "public_manifest.txt",
     "public_manifest.drip-markets.txt", "scenario-findings.md", "ops", "research",
-    "hedger", "monitor", "engine-fuzz", "launch-runs", ".staging-runs", ".claude",
+    "hedger", "monitor", "launch-runs", ".staging-runs", ".claude",
     ".omc", ".vercel", "PREMISE.md", "PRIOR_ART.md", "node_modules", "keys",
 }
 # Every (path, old, new) must match: a stale anchor fails the export. Path "*"

@@ -1,7 +1,10 @@
 # Builds and tests everything that needs no secrets. The Solana crates build
-# against the upstream wrapper at the commit in scripts/pins.env
-# (scripts/fetch_upstream.sh); the matcher's LiteSVM tests and the validator
-# tests need SBF builds and a validator, so they are not run here.
+# against the pinned wrapper at the commit in scripts/pins.env
+# (scripts/fetch_upstream.sh). On pull requests the e2e job also builds the
+# wrapper and matcher for SBF, brings up a local validator, and runs the
+# matcher LiteSVM tests, money-path tests, a keeper dry-run and the validator
+# integration tests. engine-fuzz runs the upstream bug replays and a money
+# fuzz smoke run against the pinned engine.
 name: ci
 
 on:
@@ -19,6 +22,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  SOLANA_VERSION: "2.0.21"
 
 jobs:
   flop-index:
@@ -71,6 +75,111 @@ jobs:
         run: cargo test --release --locked --manifest-path indexer/Cargo.toml
       - name: matcher host tools (LiteSVM tests need the SBF builds)
         run: cargo build --release --locked --manifest-path matcher/host/Cargo.toml --bins
+
+  engine-fuzz:
+    name: engine replays + money fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine-fuzz/target
+          key: engine-fuzz-${{ runner.os }}-${{ hashFiles('engine-fuzz/Cargo.lock') }}
+          restore-keys: engine-fuzz-${{ runner.os }}-
+      - name: replays + money fuzz (64 cases)
+        env:
+          FUZZ_CASES: "64"
+        run: cargo test --release --locked --manifest-path engine-fuzz/Cargo.toml
+
+  e2e:
+    name: SBF build + bring-up + dry-run + validator tests
+    needs: solana-crates
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - name: layout
+        run: |
+          source scripts/env.sh
+          {
+            echo "PERCOLATOR_PROG_DIR=$PERCOLATOR_PROG_DIR"
+            echo "BRINGUP_DIR=$BRINGUP_DIR"
+            echo "CRANKER_MANIFEST=$CRANKER_MANIFEST"
+          } >> "$GITHUB_ENV"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cranker/target
+            client/target
+            matcher/host/target
+          key: e2e-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'scripts/pins.env') }}
+          restore-keys: e2e-${{ runner.os }}-
+      - name: cache Solana CLI + platform-tools v1.52
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/solana
+            ~/.cache/solana
+          key: solana-cli-${{ runner.os }}-${{ env.SOLANA_VERSION }}-platform-tools-v1.52
+      - name: install Solana CLI
+        run: |
+          if [ ! -x "$HOME/.local/share/solana/install/active_release/bin/solana" ]; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          fi
+          solana --version
+      - name: fetch pinned wrapper
+        run: ./scripts/fetch_upstream.sh
+      - name: cache wrapper SBF build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.PERCOLATOR_PROG_DIR }}/target
+            matcher/program/target
+          key: sbf-${{ runner.os }}-${{ hashFiles('scripts/pins.env', 'matcher/program/Cargo.*', 'matcher/program/src/**') }}
+      - name: payer keypair (throwaway, local validator only)
+        run: |
+          mkdir -p ~/.config/solana
+          solana-keygen new --no-bip39-passphrase --silent --force --outfile ~/.config/solana/id.json
+      - name: SBF build + local bring-up
+        run: ./scripts/m1_bringup.sh
+      - name: matcher SBF + LiteSVM money-path tests
+        run: |
+          (cd matcher/program && cargo build-sbf --tools-version v1.52)
+          cargo test --release --manifest-path matcher/host/Cargo.toml
+      - name: local money-path tests
+        env:
+          MONEY_PATH_REQUIRE_SBF: "1"
+        run: cargo test --release --manifest-path "$CRANKER_MANIFEST" --test money_path
+      - name: keeper dry-run (3 cycles)
+        run: |
+          export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
+          CRANKER_CYCLES=3 CRANKER_FAIL_ON_ERRORS=1 cargo run --release --bin drip --manifest-path "$CRANKER_MANIFEST"
+      - name: validator integration tests (lifecycle, rollback, conservation, cycle through Resolved)
+        run: |
+          export PERCOLATOR_TEST_RPC=http://127.0.0.1:8899
+          export PERCOLATOR_PROGRAM_ID=$(solana-keygen pubkey "$PERCOLATOR_PROG_DIR/target/deploy/percolator_prog-keypair.json")
+          cargo test --release --manifest-path "$CRANKER_MANIFEST" \
+            --test lifecycle --test hard_reject --test invariants --test cycle_resolved -- --include-ignored
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validator-log
+          path: /tmp/solana-test-validator.log
+          if-no-files-found: ignore
 
   node:
     name: ${{ matrix.dir }}

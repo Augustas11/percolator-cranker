@@ -2,7 +2,7 @@
 # <private path> <public path>, `dir:`, `skip:` and `allow-phrase:` lines; see
 # the exporter's docstring. Exported from the COMMITTED tree (HEAD) only. Every
 # file committed under the profile's checked directories (MARKETS_SCANNED:
-# agents client cranker deploy docs/flop-compute faucet flop-index frontend
+# agents client cranker deploy docs/flop-compute engine-fuzz faucet flop-index frontend
 # indexer launch matcher mcp public-markets staging) must appear here as a
 # file, under a dir: entry, or as a skip:. Layout: the private one, with the
 # pinned wrapper fetched into upstream/percolator-prog (scripts/fetch_upstream.sh).
@@ -301,3 +301,16 @@ sha256: a398cff60fed71dc7acf376e07b1c8c62a895f1c25ce522475e005ad16e50520 flop-in
 sha256: 9dfc23292901904b32da35e5d3121f114b1b3b4b0b6793eca3bb21758cd12f89 flop-index/testdata/wasm/hostile/too-many-globals.wasm
 sha256: 9599eb277ca22c041c6edbffe9a2b4178006f0dfa82b943909109551f4a18aaa flop-index/testdata/wasm/live.wasm
 sha256: 5f1adec6e6bc8ebdcdd964b21acbf91fce74524c17a327cc9dd5a6b6323a8820 flop-index/testdata/wasm/median.wasm
+
+# --- engine money fuzzer + upstream bug replays (CI parity) ---
+engine-fuzz/.gitignore engine-fuzz/.gitignore
+engine-fuzz/Cargo.lock engine-fuzz/Cargo.lock
+engine-fuzz/Cargo.toml engine-fuzz/Cargo.toml
+engine-fuzz/README.md engine-fuzz/README.md
+engine-fuzz/run.sh engine-fuzz/run.sh
+engine-fuzz/src/lib.rs engine-fuzz/src/lib.rs
+engine-fuzz/tests/money_fuzz.rs engine-fuzz/tests/money_fuzz.rs
+engine-fuzz/tests/replays.rs engine-fuzz/tests/replays.rs
+
+# --- SBF build + local validator bring-up (CI e2e job) ---
+scripts/m1_bringup.sh scripts/m1_bringup.sh
