@@ -27,16 +27,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use percolator::PortfolioAccountV16Account;
 use percolator_prog::ix::Instruction as ProgInstruction;
 use percolator_prog::state::{read_market, read_portfolio, MarketGroupV16};
+use solana_client::client_error::ClientError;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     compute_budget::ComputeBudgetInstruction,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    signature::{read_keypair_file, Keypair, Signer},
-    transaction::Transaction,
+    signature::{read_keypair_file, Keypair, Signature, Signer},
+    transaction::{Transaction, TransactionError},
 };
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use drip::discovery::{discover_portfolios, DiscoveredPortfolio};
 use drip::setup::CrankerEnv;
@@ -72,8 +74,10 @@ pub fn live_from_env() -> Option<Live> {
     let market = std::env::var("PERCOLATOR_TEST_MARKET")
         .ok()
         .and_then(|s| Pubkey::from_str(&s).ok())?;
+    let rpc = RpcClient::new_with_commitment(url, CommitmentConfig::confirmed());
+    wait_for_validator(&rpc, VALIDATOR_READY_TIMEOUT).expect("local validator not ready");
     Some(Live {
-        rpc: RpcClient::new_with_commitment(url, CommitmentConfig::confirmed()),
+        rpc,
         program_id,
         market,
     })
@@ -131,7 +135,170 @@ pub fn rpc_and_program_from_env() -> Option<(RpcClient, Pubkey)> {
     let program_id = std::env::var("PERCOLATOR_PROGRAM_ID")
         .ok()
         .and_then(|s| Pubkey::from_str(&s).ok())?;
-    Some((RpcClient::new_with_commitment(url, CommitmentConfig::confirmed()), program_id))
+    let rpc = RpcClient::new_with_commitment(url, CommitmentConfig::confirmed());
+    wait_for_validator(&rpc, VALIDATOR_READY_TIMEOUT).expect("local validator not ready");
+    Some((rpc, program_id))
+}
+
+// ---------------------------------------------------------------------------
+// Setup-transaction plumbing. The transactions these test helpers send
+// themselves (ATA creation, resolve, close, ...) go through `send_setup_tx`.
+// The market bootstrap is `drip::setup` and keeps its own send path.
+// ---------------------------------------------------------------------------
+
+/// How long the env constructors wait for the validator before panicking.
+const VALIDATOR_READY_TIMEOUT: Duration = Duration::from_secs(60);
+/// Sends per setup transaction; only a blockhash rejection is retried.
+const SETUP_SEND_ATTEMPTS: usize = 5;
+const SETUP_RETRY_PAUSE: Duration = Duration::from_millis(400);
+
+/// Block until the validator reports healthy AND has rooted a slot past
+/// genesis, or `timeout` passes. A just-started validator answers RPC before
+/// it has a confirmed bank a preflight simulation can resolve a blockhash in.
+pub fn wait_for_validator(rpc: &RpcClient, timeout: Duration) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        let state = match rpc.get_health() {
+            Err(e) => format!("unhealthy: {e}"),
+            Ok(()) => match rpc.get_slot_with_commitment(CommitmentConfig::finalized()) {
+                Ok(slot) if slot > 0 => return Ok(()),
+                Ok(_) => "healthy, no rooted slot yet".to_string(),
+                Err(e) => format!("rooted slot unreadable: {e}"),
+            },
+        };
+        if start.elapsed() >= timeout {
+            bail!("validator at {} not ready after {timeout:?}: {state}", rpc.url());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// `true` when a send was refused because the validator did not know the
+/// transaction's blockhash. That is a preflight/admission rejection: the
+/// transaction never executed, so re-signing with a new blockhash and
+/// resending cannot double-apply it.
+fn blockhash_rejected(e: &ClientError) -> bool {
+    matches!(e.get_transaction_error(), Some(TransactionError::BlockhashNotFound))
+        || e.to_string().contains("Blockhash not found")
+}
+
+/// Sign and send one setup transaction, `payer` paying fees, `signers` being
+/// every required signer (payer included).
+///
+/// The blockhash is fetched right before each signing, at the SAME commitment
+/// the client preflights at (`rpc.commitment()`). Fetching it at `processed`
+/// while preflight simulates against the `confirmed` bank is a race: the
+/// newest processed blockhash may not be confirmed yet, and the simulation
+/// answers "Blockhash not found". A blockhash rejection is still retried with
+/// a fresh blockhash, up to `SETUP_SEND_ATTEMPTS` sends; any other error is
+/// returned as is.
+pub fn send_setup_tx(
+    rpc: &RpcClient,
+    ixs: &[Instruction],
+    payer: &Keypair,
+    signers: &[&Keypair],
+) -> Result<Signature> {
+    send_with_blockhash_retry(
+        || {
+            let bh = rpc.get_latest_blockhash().context("get_latest_blockhash")?;
+            Ok(Transaction::new_signed_with_payer(ixs, Some(&payer.pubkey()), signers, bh))
+        },
+        |tx| rpc.send_and_confirm_transaction(tx),
+        SETUP_RETRY_PAUSE,
+    )
+}
+
+/// The retry loop behind [`send_setup_tx`], with the RPC calls injected so the
+/// policy is unit-testable without a validator. `build` must return a
+/// transaction signed over a freshly fetched blockhash.
+fn send_with_blockhash_retry(
+    mut build: impl FnMut() -> Result<Transaction>,
+    mut send: impl FnMut(&Transaction) -> std::result::Result<Signature, ClientError>,
+    pause: Duration,
+) -> Result<Signature> {
+    let mut attempt = 1;
+    loop {
+        let tx = build()?;
+        match send(&tx) {
+            Ok(sig) => return Ok(sig),
+            Err(e) if blockhash_rejected(&e) && attempt < SETUP_SEND_ATTEMPTS => {
+                eprintln!("setup tx: blockhash rejected (send {attempt}/{SETUP_SEND_ATTEMPTS}), retrying: {e}");
+                attempt += 1;
+                std::thread::sleep(pause);
+            }
+            Err(e) => return Err(anyhow!(e).context(format!("setup tx failed on send {attempt}"))),
+        }
+    }
+}
+
+#[cfg(test)]
+fn blockhash_not_found_error() -> ClientError {
+    use solana_client::rpc_request::{RpcError, RpcResponseErrorData};
+    use solana_client::rpc_response::RpcSimulateTransactionResult;
+    RpcError::RpcResponseError {
+        code: -32002,
+        message: "Transaction simulation failed: Blockhash not found".to_string(),
+        data: RpcResponseErrorData::SendTransactionPreflightFailure(RpcSimulateTransactionResult {
+            err: Some(TransactionError::BlockhashNotFound),
+            logs: None,
+            accounts: None,
+            units_consumed: None,
+            return_data: None,
+            inner_instructions: None,
+        }),
+    }
+    .into()
+}
+
+#[test]
+fn setup_send_retries_a_blockhash_rejection_with_a_rebuilt_tx() {
+    let (mut builds, mut sends) = (0, 0);
+    let sig = send_with_blockhash_retry(
+        || {
+            builds += 1;
+            Ok(Transaction::default())
+        },
+        |_| {
+            sends += 1;
+            if sends < 3 { Err(blockhash_not_found_error()) } else { Ok(Signature::default()) }
+        },
+        Duration::ZERO,
+    )
+    .unwrap();
+    assert_eq!(sig, Signature::default());
+    assert_eq!((builds, sends), (3, 3), "each resend must rebuild (re-fetch blockhash, re-sign)");
+}
+
+#[test]
+fn setup_send_gives_up_after_the_attempt_cap() {
+    let mut sends = 0;
+    let err = send_with_blockhash_retry(
+        || Ok(Transaction::default()),
+        |_| {
+            sends += 1;
+            Err(blockhash_not_found_error())
+        },
+        Duration::ZERO,
+    )
+    .unwrap_err();
+    assert_eq!(sends, SETUP_SEND_ATTEMPTS);
+    assert!(format!("{err:#}").contains("Blockhash not found"), "{err:#}");
+}
+
+#[test]
+fn setup_send_does_not_retry_other_errors() {
+    let mut sends = 0;
+    let err = send_with_blockhash_retry(
+        || Ok(Transaction::default()),
+        |_| {
+            sends += 1;
+            Err(ClientError::from(TransactionError::AccountInUse))
+        },
+        Duration::ZERO,
+    )
+    .unwrap_err();
+    assert_eq!(sends, 1, "a non-blockhash failure must surface on the first send");
+    assert!(format!("{err:#}").contains("Account in use"), "{err:#}");
 }
 
 /// Load the funded validator payer, mirroring `main.rs`: `PERCOLATOR_TEST_PAYER`
@@ -310,27 +477,7 @@ fn send_prog_tx(
     let mut signers: Vec<&Keypair> = Vec::with_capacity(1 + extra_signers.len());
     signers.push(payer);
     signers.extend_from_slice(extra_signers);
-    for attempt in 0..5 {
-        let (bh, _) = rpc.get_latest_blockhash_with_commitment(CommitmentConfig::processed())?;
-        let tx = Transaction::new_signed_with_payer(
-            &[cu.clone(), heap.clone(), instruction.clone()],
-            Some(&payer.pubkey()),
-            &signers,
-            bh,
-        );
-        match rpc.send_and_confirm_transaction(&tx) {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                let msg = format!("{e}");
-                if msg.contains("Blockhash not found") && attempt < 4 {
-                    std::thread::sleep(std::time::Duration::from_millis(400));
-                    continue;
-                }
-                return Err(anyhow!(msg));
-            }
-        }
-    }
-    bail!("send_prog_tx: retries exhausted");
+    send_setup_tx(rpc, &[cu, heap, instruction], payer, &signers).map(|_| ())
 }
 
 /// Transition the market Live -> Resolved. Admin-gated: `handle_resolve_market`
@@ -506,10 +653,7 @@ pub fn ensure_ata(
         mint,
         &spl_token::ID,
     );
-    let (bh, _) = rpc.get_latest_blockhash_with_commitment(CommitmentConfig::processed())?;
-    let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &[payer], bh);
-    rpc.send_and_confirm_transaction(&tx)
-        .context("create ATA")?;
+    send_setup_tx(rpc, &[ix], payer, &[payer]).context("create ATA")?;
     Ok(ata)
 }
 
