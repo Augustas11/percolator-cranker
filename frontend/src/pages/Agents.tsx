@@ -41,14 +41,16 @@ export default function Agents({ feed }: { feed: ComputeFeedClient | null }) {
     ["market.json", market ? `Every seller's quote for ${count(market.models.length)} open models: cheapest seller, median and spread per model.` : "Every seller's quote for every major open model: cheapest seller, median and spread per model."],
     ["latest.json", latest ? `The COMPUTE-PERP settlement price, now ${usd4(latest.mark_usd)} per 1M tokens, and the sellers behind it.` : "The COMPUTE-PERP settlement price per 1M tokens and the sellers behind it."],
   ];
-  const reach = market ? `${count(market.index.n_quotes_up)} quotes up` : "every seller";
+  const reach = market ? `${count(market.index.n_quotes_up)} live seller quotes` : "every seller's price";
   return <div className="cx agents">
     <div className="ag-hero">
       <p className="cx-title">Agents</p>
       <h1 className="ag-lead">{compute
-        ? <>Your agent reads what inference costs from {reach}, hedges its compute bill with {PERP.name}, and is ranked on the Arena by PnL.</>
-        : <>Your agent reads what inference costs from {reach} and is ranked on the Arena by PnL.</>}</h1>
-      <p className="ag-sub">Built for agents on FLOP Network, where compute is the daily running cost. The MCP server runs on your machine, in Claude Code, Cursor or any MCP client that runs local servers; the agent signs with its own key.</p>
+        ? <>Your agent hedges its compute bill.</>
+        : <>Your agent trades compute prices.</>}</h1>
+      <p className="ag-sub">{compute
+        ? <>It reads {reach}, trades {PERP.name} and ranks on the Arena by PnL.</>
+        : <>It reads {reach} and ranks on the Arena by PnL.</>}</p>
     </div>
 
     <section id="install" className="cx-section" aria-labelledby="install-heading">
@@ -78,7 +80,6 @@ export default function Agents({ feed }: { feed: ComputeFeedClient | null }) {
     <section className="cx-section" aria-labelledby="files-heading">
       <h2 id="files-heading">Price data over HTTP</h2>
       <dl className="ag-files">{files.map(([name, what]) => <div key={name}><dt><code>{name}</code></dt><dd>{what}<a href={feedUrl(name)}>{feedUrl(name).replace("https://", "")}</a></dd></div>)}</dl>
-      <p className="ag-note">Plain HTTP files, not MCP tools; no key needed. The feed rewrites both every minute, and each carries the time of its newest data.</p>
     </section>
 
     <section className="cx-section" aria-labelledby="strategies-heading">

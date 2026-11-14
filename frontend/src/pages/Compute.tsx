@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket, MarketModel, MixKey } from "../compute/client";
-import { Axis, DEFAULT_MIX, benchmarkRouted, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadSwarm, computeSpread, hasMixes, marketScale, medianAt, sinceLabel, typicalPrice, upPriced, widest, type LogScale } from "../compute/charts";
-import { addressUrl, ago, clock, count, day, direction, pct, short, times, txUrl, usd, usd4, usdSmall, when } from "../compute/format";
+import { Axis, DEFAULT_MIX, benchmarkRouted, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadRanks, computeSpread, hasMixes, marketScale, medianAt, sinceLabel, typicalPrice, widestModels, type LogScale } from "../compute/charts";
+import { addressUrl, ago, clock, count, direction, pct, short, times, txUrl, usd, usd4, usdSmall, when } from "../compute/format";
 import { latestStale, marketDataTime, marketStale, modelStale, useComputeFeed } from "../compute/useFeed";
 import FeedBoundary from "../compute/FeedBoundary";
 import { site } from "../site/config";
@@ -21,13 +21,9 @@ const CAPPED = "No seller counts for more than half.";
 export const MIXES: [MixKey, string, string][] = [["chat_3_1", "Chat", "3:1"], ["avg_15_1", "Average", "15:1"], ["agent_150_1", "Agent", "150:1"]];
 const ratioOf = (mix: MixKey) => MIXES.find(([k]) => k === mix)![2];
 const GN_FORMULA = "Price per 1M tokens ÷ compute per token. Compute per token is FLOP's registry value where it lists the model, otherwise 2 × active parameters, taken from the model id or estimated from its expert counts (marked est.); — when unknown.";
-const fmtTimes = (n: number) => (n >= 10 ? n.toFixed(0) : n.toFixed(1)) + "×";
 
-function MixSwitch({ mix, onMix, ratio }: { mix: MixKey; onMix: (m: MixKey) => void; ratio: number | null | undefined }) {
-  return <div className="cx-mix">
-    <div className="cx-sort" role="group" aria-label="Input:output token mix">{MIXES.map(([key, label, r]) => <button key={key} type="button" aria-pressed={mix === key} onClick={() => onMix(key)}>{label} {r}</button>)}</div>
-    <p className="cx-mix-why">What you pay depends on how much your app reads versus writes{typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? <>; output tokens cost about {fmtTimes(ratio)} input</> : null}.</p>
-  </div>;
+function MixSwitch({ mix, onMix }: { mix: MixKey; onMix: (m: MixKey) => void }) {
+  return <div className="cx-mix cx-sort" role="group" aria-label="Input:output token mix">{MIXES.map(([key, label, r]) => <button key={key} type="button" aria-pressed={mix === key} onClick={() => onMix(key)}>{label} {r}</button>)}</div>;
 }
 
 const Up = ({ up, stale = false }: { up: boolean; stale?: boolean }) => {
@@ -35,7 +31,7 @@ const Up = ({ up, stale = false }: { up: boolean; stale?: boolean }) => {
   return <span className={`state is-${state}`}><i aria-hidden="true" /><span className="state-t">{state}</span></span>;
 };
 const Change = ({ value }: { value: number | null }) => <span className={`chg is-${direction(value)}`}>{pct(value)}</span>;
-const Stale = ({ why }: { why: string }) => <span className="stale"><span className="badge compute-stale">stale</span> {why}</span>;
+const Stale = ({ why }: { why: string }) => <span className="badge compute-stale" title={why}>stale<span className="sr-only">: {why}</span></span>;
 
 function Skeleton() {
   return <div className="cx-skeleton" aria-busy="true">
@@ -45,11 +41,11 @@ function Skeleton() {
   </div>;
 }
 
-/** The benchmark model's three numbers side by side, each under its own label: what a request pays, the median list price, the perp mark. */
+/** The benchmark model: what a request pays now and the perp mark. */
 function Benchmark({ market, latest }: { market: ComputeMarket; latest: ComputeLatest | null }) {
   const b = benchmarkRouted(market);
   const mark = typeof latest?.mark_usd === "number" && Number.isFinite(latest.mark_usd) ? latest.mark_usd : null;
-  if (b.price === null && b.median === null && mark === null) return null;
+  if (b.price === null && mark === null) return null;
   return <section className="cx-bench" aria-label={`${b.name} prices`}>
     <p className="cx-k">{b.name} · per 1M tokens</p>
     <dl className="cx-bench-nums">
@@ -58,47 +54,40 @@ function Benchmark({ market, latest }: { market: ComputeMarket; latest: ComputeL
         <dd><strong>{usd(b.price)}</strong>{b.change1h !== null && <span className="cx-bench-chg">1 h <Change value={b.change1h} /></span>}</dd>
         <Sparkline series={b.series} label={`${b.name} routed price ${sinceLabel(b.series)}.`} className="spark spark-sm" />
       </div>}
-      {b.median !== null && <div><dt>Median list price</dt><dd><strong>{usd(b.median)}</strong></dd></div>}
       {mark !== null && <div><dt>Perp mark</dt><dd><strong>{usd4(mark)}</strong></dd></div>}
     </dl>
-    <p className="cx-bench-why">List prices are what sellers post. The routed price is what you pay when your request goes to the sellers that are up, mostly the cheapest.</p>
+    {site.computeTrade?.startsWith("/") && <Link className="button-link cx-bench-go" to={site.computeTrade}>Trade {PERP.name} <Arrow /></Link>}
   </section>;
 }
 
 function Hero({ market, latest, now, error, mix, onMix }: { market: ComputeMarket; latest: ComputeLatest | null; now: number; error: string; mix: MixKey; onMix: (m: MixKey) => void }) {
   const { index } = market;
   const stale = marketStale(market, now);
-  const wide = widest(market);
+  const wide = widestModels(market)[0] ?? null;
   const typical = typicalPrice(market, mix);
-  const level = index.level;
-  const hasSeries = level !== null && index.series.length >= MIN_SERIES_POINTS;
   const read = marketDataTime(market);
-  return <header className="cx-hero" aria-labelledby="compute-title">
+  return <header className={`cx-hero${wide ? "" : " is-empty"}`} aria-labelledby="compute-title">
     <div className="cx-hero-main">
       <h1 id="compute-title" className="cx-title">Compute index</h1>
       {typical ? <>
         <p className="cx-label">Median price to run an open model</p>
         <div className="cx-price"><strong>{usd(typical.median)}</strong><span>per 1M tokens</span></div>
-        <p className="cx-range">Cheapest model <b>{typical.cheapest.name} {usd(typical.at(typical.cheapest))}</b> · dearest <b>{typical.dearest.name} {usd(typical.at(typical.dearest))}</b></p>
-        {hasMixes(market) && <MixSwitch mix={mix} onMix={onMix} ratio={market.out_in_ratio_median} />}
+        {hasMixes(market) && <MixSwitch mix={mix} onMix={onMix} />}
       </> : <p className="cx-label">{market.models.length ? "No model has enough sellers for a price right now." : "No prices right now."}</p>}
-      {typical && <p className="cx-proof"><b>{count(index.n_quotes_up)}</b> quotes up from <b>{count(index.n_providers)}</b> providers. Median of the <b>{count(typical.models)}</b> models with 3 or more sellers{typical.held > 0 && <>, counting {count(typical.held)} quotes held at their last price while the seller is offline</>}. Input and output tokens mixed {ratioOf(mix)}.</p>}
-      <p className="cx-updated">
-        <span className="cx-indexstat">Index {level === null ? "—" : level.toFixed(2)}{index.base_ms !== null && <> · 100 = {day(index.base_ms)}</>}{index.change_24h_pct !== null && <> · 24 h <Change value={index.change_24h_pct} /></>}{index.change_7d_pct !== null && <> · 7 d <Change value={index.change_7d_pct} /></>}</span>
-        {read !== null && <span>Updated {ago(read, now)} · {clock(read)} UTC</span>}
-        {stale && <Stale why={stale} />}
-      </p>
-      {hasSeries && <figure className="cx-index-line"><Sparkline series={index.series} label={`Index level ${sinceLabel(index.series)}: from ${index.series[0][1].toFixed(2)} to ${level?.toFixed(2)}.`} className="spark" /><figcaption>Index {sinceLabel(index.series)}</figcaption></figure>}
+      <div className="cx-foot">
+        {typical && <ul className="cx-proof">
+          <li><b>{count(index.n_quotes_up)}</b> live quotes</li>
+          <li><b>{count(index.n_providers)}</b> providers</li>
+          <li><b>{count(market.models.length)}</b> models</li>
+        </ul>}
+        {(read !== null || stale) && <p className={`cx-updated${stale ? " is-stale" : ""}`}>{read !== null ? <>Updated {ago(read, now)} · {clock(read)} UTC</> : "No recent update"}{stale && <span className="sr-only"> (stale: {stale})</span>}</p>}
+      </div>
       {error && <p className="note" role="status">Could not refresh ({error}). Showing the last data received.</p>}
     </div>
-    <div className="cx-hero-side">
-      {wide && <div className="cx-widest">
-        <p className="cx-spread-line">The same model costs up to <strong>{times(wide.min, wide.max)}</strong> more depending on the seller.</p>
-        <p className="cx-spread-eg">{wide.name}: {usd(wide.min)} to {usd(wide.max)} per 1M tokens across {upPriced(wide).length} sellers up.</p>
-      </div>}
-      <p className="cx-k">Every live quote against its model's median</p>
-      <SpreadSwarm market={market} />
-    </div>
+    {wide && <div className="cx-hero-side">
+      <p className="cx-spread-line">The same model costs up to <strong>{times(wide.min, wide.max)}</strong> more depending on the seller.</p>
+      <SpreadRanks market={market} />
+    </div>}
     <Benchmark market={market} latest={latest} />
   </header>;
 }
@@ -210,9 +199,7 @@ function Board({ market, now, mix }: { market: ComputeMarket; now: number; mix: 
     <div className="cx-section-head">
       <div>
         <h2 id="compute-board-heading">Price by model</h2>
-        <p className="cx-sub">{mixed
-          ? `Same model, every seller. USD per 1M tokens. Medians at ${ratioOf(mix)} input:output; strips and cheapest seller at 15:1 quotes, log scale shared by all rows.`
-          : "Same model, every seller. USD per 1M tokens, 15:1 input:output, log scale shared by all rows."}</p>
+        <p className="cx-sub">USD per 1M tokens</p>
       </div>
       <div className="cx-sort" role="group" aria-label="Sort models">{sorts.filter(([key]) => (key !== "gn" || showGn) && (key !== "paid" || showPaid)).map(([key, label]) => <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>{label}</button>)}</div>
     </div>
@@ -220,10 +207,9 @@ function Board({ market, now, mix }: { market: ComputeMarket; now: number; mix: 
     <div className="cx-legend" aria-hidden="true">
       <span><i className="lg-whisker" />cheapest to dearest</span><span><i className="lg-box" />middle half</span><span><i className="lg-median" />median</span><span><i className="lg-dot" />one seller</span><span><i className="lg-dot is-down" />seller down</span>
     </div>
-    {spread && <p className="cx-gn-note"><b>$ per bn G_n</b>, dollars per billion units of compute (FLOP's unit): {GN_FORMULA}{spread.median !== null && <> Across {count(spread.n)} models the median is {usdSmall(spread.median)}{spread.p25 !== null && spread.p75 !== null && <>, middle half {usdSmall(spread.p25)} to {usdSmall(spread.p75)}</>}{spread.lo < spread.hi && <>; cheapest {usdSmall(spread.lo)}, dearest {usdSmall(spread.hi)} ({times(spread.lo, spread.hi)})</>}.</>}</p>}
     <div className={`board${market.models.some(m => m.change_24h_pct !== null) ? "" : " no-chg"}${showGn ? " has-gn" : ""}${showPaid ? " has-paid" : ""}`}>
       <div className="board-cols" aria-hidden="true">
-        <span className="c-model">Model</span><span className="c-sellers">Up</span><span className="c-strip"><Axis scale={scale} /></span><span className="c-median">Median</span>{showPaid && <span className="c-paid" title="What a request pays now, spread across the sellers that are up">Paid now</span>}<span className="c-spread">Spread</span>{showGn && <span className="c-gn" title={GN_FORMULA}>Per unit of compute<small>$ per bn G_n (FLOP's unit)</small></span>}<span className="c-cheap">Cheapest</span><span className="c-chg">24 h</span><span className="c-chev" />
+        <span className="c-model">Model</span><span className="c-sellers">Up</span><span className="c-strip"><Axis scale={scale} /></span><span className="c-median">Median{mixed && mix !== DEFAULT_MIX ? ` ${ratioOf(mix)}` : ""}</span>{showPaid && <span className="c-paid" title="What a request pays now, spread across the sellers that are up">Paid now</span>}<span className="c-spread">Spread</span>{showGn && <span className="c-gn" title={GN_FORMULA}>Per unit of compute<small>$ per bn G_n (FLOP's unit)</small></span>}<span className="c-cheap">Cheapest</span><span className="c-chg">24 h</span><span className="c-chev" />
       </div>
       <ul className="board-list">{(all ? models : models.slice(0, MODELS_SHOWN)).map(m => <ModelRow key={m.id} model={m} scale={scale} now={now} mix={mix} spread={showGn ? spread : false} showPaid={showPaid} open={open.has(m.id)} onToggle={() => toggle(m.id)} />)}</ul>
     </div>
@@ -316,7 +302,6 @@ function Perp({ latest, history, now }: { latest: ComputeLatest; history: Comput
       <Sparkline step min={2} series={history.points} label={`Settlement price over 7 days: low ${usd4(history.low)}, high ${usd4(history.high)}.`} className="spark spark-sm" />
       <figcaption>7 d · low {usd4(history.low)} · high {usd4(history.high)}</figcaption>
     </figure>}
-    <p className="perp-why">Set by the full-precision (bf16/fp16) sellers of one benchmark model, so every contract settles on the same product. Cheaper sellers weigh more (1 ÷ price²).</p>
     <p className="cx-k">{latest.pricing_set.filter(r => r.up).length} of {latest.pricing_set.length} full-precision sellers up</p>
     <ul className="perp-sellers" aria-label="Sellers in the settlement price">{latest.pricing_set.map(r => <li key={`${r.provider}-${r.quantization}`}>
       <span>{r.provider} <span className="q">{r.quantization}</span></span><b>{usd4(r.priced)}</b><Up up={r.up} />
@@ -343,7 +328,6 @@ function Flop({ latest, market, now }: { latest: ComputeLatest; market: ComputeM
   const implied = market?.flop?.implied_flop_usd;
   const basisId = market?.flop?.basis_model ?? null;
   const basis = basisId ? market?.models.find(m => m.id === basisId)?.name ?? basisId : null;
-  const openrouter = latest.source === "openrouter";
   const routed = parity?.implied_flop_usd_routed ?? market?.flop?.implied_flop_usd_routed;
   const list = parity?.implied_flop_usd ?? implied;
   const gnPrice = parity?.market_usd_per_bn_gn;
@@ -354,7 +338,7 @@ function Flop({ latest, market, now }: { latest: ComputeLatest; market: ComputeM
   const headline = ok(routed) ? routed : list;
   return <article className="cx-panel" aria-labelledby="compute-flop-heading">
     <p className="cx-k">FLOP Network · on-chain</p>
-    <h2 id="compute-flop-heading">{live ? "FLOP parity" : "FLOP price per unit of compute"}</h2>
+    <h2 id="compute-flop-heading">{live ? "FLOP parity" : "FLOP price per unit of compute"}{latest.source !== "openrouter" && <> <span className="badge compute-stale" title="The perp settles on this rate right now, converted to USD at a fixed rate.">perp source<span className="sr-only">: the perp settles on this rate right now, converted to USD at a fixed rate.</span></span></>}</h2>
     {live ? <div className="flop-parity">
       <div className="perp-price"><strong>{perMFlop(headline)}</strong><span>per 1M FLOP, {ok(routed) ? "from what requests pay" : "from list prices"}</span></div>
       {ok(routed) && ok(list) && <p className="flop-list"><b>{perMFlop(list)}</b> per 1M FLOP, from list prices</p>}
@@ -380,9 +364,7 @@ function Flop({ latest, market, now }: { latest: ComputeLatest; market: ComputeM
       ["Jobs settled", flop.prints ?? "—"],
       ["Gateway share of compute", flop.gateway_share == null ? "—" : `${Math.round(flop.gateway_share * 100)}%`],
     ] as const).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
-    <p className="note">FLOP's gateway buys on behalf of all its customers, so it counts as one buyer.</p>
     {flop.stale && <p className="note">Not computed right now: {flop.stale}.</p>}
-    <p className="perp-why">{openrouter ? "FLOP's listed rate for compute today, paid by its buyers to its miners. The perp settles on seller prices, not on this rate." : "This sets the settlement price right now, converted to USD at a fixed rate."}</p>
   </article>;
 }
 

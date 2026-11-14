@@ -11,7 +11,7 @@
 .site-watermark { position: absolute; top: 40px; right: -220px; width: 980px; height: auto; opacity: 0.05; pointer-events: none; }
 .site .site-header { position: relative; z-index: 2; display: block; max-width: 1280px; margin: 0 auto; padding: 22px var(--site-gutter) 0; }
 .site .site-nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 12px 14px 12px 20px; background: var(--site-nav-bg); border: 1px solid var(--site-line-7); border-radius: 18px; backdrop-filter: blur(10px); }
-.site .brand { display: flex; align-items: center; gap: 2px; color: var(--site-text); font-family: var(--site-display); font-weight: 600; font-size: 26px; letter-spacing: -0.5px; line-height: 1; }
+.site .brand { display: flex; align-items: center; gap: 2px; color: var(--site-text); font-family: var(--site-brand); font-weight: 600; font-size: 26px; letter-spacing: -0.5px; line-height: 1; }
 .site .brand img { width: 30px; height: 34px; }
 .site .nav-links { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
 .site .nav-links a { color: var(--site-secondary); font-weight: 500; font-size: 15px; }
@@ -34,8 +34,8 @@
 .site .announcement .button-link svg { width: 16px; height: 16px; }
 .site main { position: relative; z-index: 1; width: 100%; max-width: var(--site-width); margin: 0 auto; padding: 32px var(--site-gutter); }
 .site .site-page { display: grid; gap: 24px; }
-.site h1, .site h2, .site h3 { font-family: var(--site-display); line-height: 1.1; }
-.site .site-page h1 { margin: 0; font-weight: 700; text-transform: uppercase; font-size: clamp(30px,3.6vw,48px); letter-spacing: -1px; }
+.site h1, .site h2, .site h3 { font-family: var(--site-display); font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; }
+.site .site-page h1 { margin: 0; font-weight: 800; font-size: clamp(32px,4vw,52px); letter-spacing: -0.03em; }
 .site h2 { margin: 0 0 16px; font-size: 20px; }
 .site h3 { margin: 0 0 8px; font-size: 16px; }
 .site p { margin: 16px 0; }
