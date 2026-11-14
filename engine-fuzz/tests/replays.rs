@@ -66,16 +66,15 @@ fn case_250(w2_pyramids: bool) -> Report {
     run(s, &acts)
 }
 
-/// Flip to `assert_clean` once upstream fixes #250.
+/// Fixed upstream by #260 (c7ae2256): the lien leaves the rate denominator.
 #[test]
-fn upstream_250_lien_rate_dilution_is_present() {
+fn upstream_250_lien_rate_dilution_is_fixed() {
     let r = case_250(true);
-    // W1 is owed 30_000 (20_000 + 10_000 gain) but is paid at rate 0.625; the cut
-    // 3_750 expires to the junior residual and is retired.
-    assert_violates(&r, &[Invariant::NoDefaultPayout, Invariant::NoDefaultRetired]);
-    assert_eq!(r.accounts[0].out(), 26_250);
+    // W1 is owed 30_000 (20_000 + 10_000 gain) and is now paid in full; nothing is retired.
+    assert_clean(&r);
+    assert_eq!(r.accounts[0].out(), 30_000);
     assert_eq!(r.accounts[0].fair, 30_000);
-    assert_eq!(r.retired, 3_750);
+    assert_eq!(r.retired, 0);
 }
 
 #[test]
@@ -122,16 +121,13 @@ fn case_252(reversal: bool) -> Report {
     run(s, &acts)
 }
 
-/// Flip to `assert_clean` once upstream fixes #252.
+/// Fixed upstream by #260 (6666a2ab): the K/F loss cancels against the account's own face.
 #[test]
-fn upstream_252_provider_leak_is_present() {
+fn upstream_252_provider_leak_is_fixed() {
     let r = case_252(true);
-    // Trader payouts are exact; the provider recovers 96_000 and 4_000 is retired.
-    assert_violates(&r, &[Invariant::NoDefaultRetired, Invariant::ProviderPrincipal]);
-    assert_eq!(r.provider_out, 96_000);
-    assert_eq!(r.retired, 4_000);
-    let outs: Vec<u128> = r.accounts.iter().map(|a| a.out()).collect();
-    assert_eq!(outs, vec![1_000_000, 992_000, 1_008_000]);
+    // The provider recovers its principal; nothing is retired.
+    assert_clean(&r);
+    assert_eq!(r.retired, 0);
 }
 
 #[test]
