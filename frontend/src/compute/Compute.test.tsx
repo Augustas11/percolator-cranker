@@ -6,7 +6,7 @@ import Docs from "../pages/Docs";
 import type { ComputeFeedClient, ComputeMarket } from "./client";
 import { MockComputeFeedClient } from "./mock";
 import { marketFixture } from "./fixture";
-import { SpreadRanks, logScale, typicalPrice, upPriced, widestModels } from "./charts";
+import { logScale, spreadRatios, typicalPrice, upPriced, widestModels } from "./charts";
 import { count, times, usd, usdSmall } from "./format";
 import { site } from "../site/config";
 
@@ -48,15 +48,14 @@ test("renders the index, its scale and every section from the fixture", async ()
   expect(container.querySelector(".cx-indexstat")).toBeNull();
   expect(container.querySelector(".cx-spread-line")?.textContent).toBe("The same model costs up to 21\u00d7 more depending on the seller.");
   expect(container.querySelector(".cx-spread-eg")).toBeNull();
-  const ranks = Array.from(container.querySelectorAll(".cx-hero-side .ranks li"));
   const wide = widestModels(market);
-  expect(ranks).toHaveLength(wide.length);
-  expect(ranks.map(li => li.querySelector(".rk-name")?.textContent)).toEqual(wide.map(m => m.name));
-  expect(ranks[0].classList.contains("is-top")).toBe(true);
-  expect(ranks[0].querySelector(".rk-name")?.textContent).toBe("GLM 5.3");
-  expect(ranks[0].querySelector(".rk-range")?.textContent).toBe(`${usd(wide[0].min)}\u2013${usd(wide[0].max)}, median ${usd(wide[0].median)}`);
-  expect(ranks[0].querySelector(".rk-x")?.textContent).toBe(times(wide[0].min, wide[0].max));
-  expect(container.querySelector(".cx-hero-side .cx-spread-line strong")?.textContent).toBe(ranks[0].querySelector(".rk-x")?.textContent);
+  expect(container.querySelector(".cx-hero-side .cx-spread-line strong")?.textContent).toBe(times(wide[0].min, wide[0].max));
+  expect(container.querySelector(".ranks")).toBeNull();
+  const swarm = container.querySelector(".cx-hero-side .swarm svg");
+  expect(swarm?.getAttribute("aria-label")).toMatch(/^\d+ live quotes, each divided by its model's median price/);
+  expect(container.querySelectorAll(".cx-hero-side circle.swarm-dot")).toHaveLength(spreadRatios(market).length);
+  expect(container.querySelector(".swarm-count")).toBeNull();
+  expect(container.querySelector(".cx-hero-side .swarm figcaption")?.textContent).toBe("below medianabove median");
   // Who it is for: each entry jumps to a section that exists.
   const who = Array.from(container.querySelectorAll(".cx-who a"));
   expect(who.map(a => a.getAttribute("href"))).toEqual(["#board", "#providers", "#perp"]);
@@ -67,7 +66,6 @@ test("renders the index, its scale and every section from the fixture", async ()
   const order = ["#board", "#perp", "#providers"].map(id => Array.from(container.querySelectorAll("section, article")).indexOf(container.querySelector(id)!));
   expect(order).toEqual([...order].sort((a, b) => a - b));
   // The hero no longer carries an index line.
-  expect(container.querySelector(".swarm")).toBeNull();
   expect(container.querySelector(".cx-index-line")).toBeNull();
   expect(text).not.toMatch(/\b(?:mock|sample)\b/i);
   for (const heading of ["Price by model", "Providers", "Price moves"]) expect(text).toContain(heading);
@@ -594,18 +592,10 @@ test("FLOP parity without the routed figure labels everything as list-based", as
   expect(flop.querySelector(".flop-parity .flop-facts small")?.textContent).toMatch(/, from list prices$/);
 });
 
-test("SpreadRanks orders by dearest/cheapest, skips thin and stale models, and caps at six", async () => {
+test("widestModels orders by dearest/cheapest, skips thin and stale models, and caps at six", async () => {
   const market = marketFixture(Date.now());
   const base = market.models[0];
   const mk = (id: string, min: number, max: number, extra: object = {}) => ({ ...base, id, name: id, min, max, median: (min + max) / 2, thin: false, stale: false, ...extra });
   const models = [mk("a", 1, 2), mk("b", 1, 9), mk("c", 1, 5), mk("thin", 1, 100, { thin: true }), mk("stale", 1, 90, { stale: true }), mk("flat", 1, 1), ...["d", "e", "f", "g"].map((id, i) => mk(id, 1, 3 + i / 10))];
-  const container = document.createElement("div");
-  const root = createRoot(container);
-  cleanup = async () => { await act(async () => { root.unmount(); }); };
-  await act(async () => { root.render(<SpreadRanks market={{ ...market, models }} />); });
-  const names = Array.from(container.querySelectorAll(".ranks li .rk-name"), n => n.textContent);
-  expect(names).toEqual(["b", "c", "g", "f", "e", "d"]);
-  expect(container.querySelector(".ranks li")?.classList.contains("is-top")).toBe(true);
-  expect(container.querySelectorAll(".ranks li.is-top")).toHaveLength(1);
-  expect(container.querySelector(".ranks li .rk-x")?.textContent).toBe(times(1, 9));
+  expect(widestModels({ ...market, models }).map(m => m.name)).toEqual(["b", "c", "g", "f", "e", "d"]);
 });

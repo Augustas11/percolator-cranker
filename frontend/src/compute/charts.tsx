@@ -75,21 +75,47 @@ export function widestModels(market: ComputeMarket, n = 6) {
   return market.models.filter(m => !m.thin && !m.stale && m.min > 0 && m.max > m.min).sort((a, b) => b.max / b.min - a.max / a.min).slice(0, n);
 }
 
-/** One bar per model from its cheapest to its dearest seller, on a shared log scale, with a tick at the median. */
-export function SpreadRanks({ market }: { market: ComputeMarket }) {
-  const rows = widestModels(market);
-  if (!rows.length) return null;
-  const top = Math.log(rows[0].max / rows[0].min);
-  return <ol className="ranks" aria-label="Models with the widest price gap between sellers">{rows.map((m, i) => {
-    const w = Math.max(4, Math.log(m.max / m.min) / top * 100);
-    const med = m.median > m.min ? Math.min(100, Math.log(m.median / m.min) / Math.log(m.max / m.min) * 100) : 0;
-    return <li key={m.id} className={i === 0 ? "is-top" : undefined}>
-      <span className="rk-name">{m.name}</span>
-      <span className="rk-bar" aria-hidden="true"><i style={{ width: `${w}%` }}><b style={{ left: `${med}%` }} /></i></span>
-      <span className="rk-range">{usd(m.min)}–{usd(m.max)}<span className="sr-only">, median {usd(m.median)}</span></span>
-      <strong className="rk-x">{times(m.min, m.max)}</strong>
-    </li>;
-  })}</ol>;
+/** Each live quote divided by its model's median: how far sellers sit from the going rate. */
+export function spreadRatios(market: ComputeMarket) {
+  const ratios: number[] = [];
+  for (const m of market.models) if (m.median > 0 && !m.stale) for (const q of m.quotes) if (q.up && q.price !== null && q.price > 0) ratios.push(q.price / m.median);
+  return ratios.sort((a, b) => a - b);
+}
+
+const fmtRatio = (r: number) => (r >= 10 ? r.toFixed(0) : r >= 1 ? r.toFixed(1) : r.toFixed(2)) + "\u00d7";
+
+/** Beeswarm of every live quote as a multiple of its model's median, on a log axis. The plot grows to fit the tallest stack, so no dot is cut. */
+export function SpreadSwarm({ market }: { market: ComputeMarket }) {
+  const ratios = spreadRatios(market);
+  if (!ratios.length) return null;
+  const W = 640, r = 2.6, col = r * 2 + 0.6, step = col;
+  const lo = Math.min(0.25, niceDown(ratios[0])), hi = Math.max(4, niceUp(ratios[ratios.length - 1]));
+  const x = (v: number) => 8 + Math.log(v / lo) / Math.log(hi / lo) * (W - 16);
+  const stacks = new Map<number, number>();
+  const dots = ratios.map(v => {
+    const c = Math.round(x(v) / col), n = stacks.get(c) ?? 0;
+    stacks.set(c, n + 1);
+    return { cx: c * col, n, v };
+  });
+  const tallest = Math.max(...stacks.values());
+  const H = Math.max(230, tallest * step + 48), base = H - 26;
+  const q1 = quantile(ratios, 0.25), q3 = quantile(ratios, 0.75), top = ratios[ratios.length - 1], bottom = ratios[0];
+  const marks = [0.25, 0.5, 1, 2, 4, 8, 16].filter(t => t >= lo && t <= hi);
+  const label = `${ratios.length} live quotes, each divided by its model's median price. Half sit between ${fmtRatio(q1)} and ${fmtRatio(q3)} the median. Cheapest ${fmtRatio(bottom)}, dearest ${fmtRatio(top)}.`;
+  return <figure className="swarm">
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMax meet" role="img" aria-label={label}>
+      <rect className="swarm-band" x={x(q1)} y={0} width={x(q3) - x(q1)} height={base + 4} />
+      {marks.map(t => <g key={t}>
+        <line className={t === 1 ? "swarm-one" : "swarm-tick"} x1={x(t)} x2={x(t)} y1={t === 1 ? 0 : base - 4} y2={base + 6} />
+        <text className="swarm-label" x={x(t)} y={H - 4} textAnchor="middle">{t < 1 ? (t === 0.5 ? "\u00bd" : "\u00bc") : t}{"\u00d7"}</text>
+      </g>)}
+      {dots.map((d, i) => <circle key={i} cx={d.cx} cy={base - r - d.n * step} r={r} className={d.v < 0.995 ? "swarm-dot is-cheap" : d.v > 1.005 ? "swarm-dot is-dear" : "swarm-dot"} />)}
+    </svg>
+    <figcaption>
+      <span><i className="key is-cheap" aria-hidden="true" />below median</span>
+      <span><i className="key is-dear" aria-hidden="true" />above median</span>
+    </figcaption>
+  </figure>;
 }
 
 /** A plain line over a time series; returns null below MIN_SERIES_POINTS so a short history never draws as a dead line. */

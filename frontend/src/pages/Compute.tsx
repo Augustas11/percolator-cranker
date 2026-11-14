@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket, MarketModel, MixKey } from "../compute/client";
-import { Axis, DEFAULT_MIX, benchmarkRouted, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadRanks, computeSpread, hasMixes, marketScale, medianAt, sinceLabel, typicalPrice, widestModels, type LogScale } from "../compute/charts";
+import { Axis, DEFAULT_MIX, benchmarkRouted, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadSwarm, computeSpread, hasMixes, marketScale, medianAt, sinceLabel, typicalPrice, widestModels, type LogScale } from "../compute/charts";
 import { addressUrl, ago, clock, count, direction, pct, short, times, txUrl, usd, usd4, usdSmall, when } from "../compute/format";
 import { latestStale, marketDataTime, marketStale, modelStale, useComputeFeed } from "../compute/useFeed";
 import FeedBoundary from "../compute/FeedBoundary";
@@ -86,7 +86,7 @@ function Hero({ market, latest, now, error, mix, onMix }: { market: ComputeMarke
     </div>
     {wide && <div className="cx-hero-side">
       <p className="cx-spread-line">The same model costs up to <strong>{times(wide.min, wide.max)}</strong> more depending on the seller.</p>
-      <SpreadRanks market={market} />
+      <SpreadSwarm market={market} />
     </div>}
     <Benchmark market={market} latest={latest} />
   </header>;
