@@ -33,10 +33,10 @@ use solana_sdk::{
     compute_budget::ComputeBudgetInstruction,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    signature::{read_keypair_file, Keypair, Signer},
-    transaction::Transaction,
+    signature::{read_keypair_file, Keypair, Signature, Signer},
 };
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use drip::discovery::{discover_portfolios, DiscoveredPortfolio};
 use drip::setup::CrankerEnv;
@@ -72,8 +72,10 @@ pub fn live_from_env() -> Option<Live> {
     let market = std::env::var("PERCOLATOR_TEST_MARKET")
         .ok()
         .and_then(|s| Pubkey::from_str(&s).ok())?;
+    let rpc = RpcClient::new_with_commitment(url, CommitmentConfig::confirmed());
+    wait_for_validator(&rpc, VALIDATOR_READY_TIMEOUT).expect("local validator not ready");
     Some(Live {
-        rpc: RpcClient::new_with_commitment(url, CommitmentConfig::confirmed()),
+        rpc,
         program_id,
         market,
     })
@@ -131,7 +133,51 @@ pub fn rpc_and_program_from_env() -> Option<(RpcClient, Pubkey)> {
     let program_id = std::env::var("PERCOLATOR_PROGRAM_ID")
         .ok()
         .and_then(|s| Pubkey::from_str(&s).ok())?;
-    Some((RpcClient::new_with_commitment(url, CommitmentConfig::confirmed()), program_id))
+    let rpc = RpcClient::new_with_commitment(url, CommitmentConfig::confirmed());
+    wait_for_validator(&rpc, VALIDATOR_READY_TIMEOUT).expect("local validator not ready");
+    Some((rpc, program_id))
+}
+
+// ---------------------------------------------------------------------------
+// Setup-transaction plumbing. The transactions these test helpers send
+// themselves (ATA creation, resolve, close, ...) go through `send_setup_tx`,
+// the same sender the market bootstrap in `drip::setup` uses.
+// ---------------------------------------------------------------------------
+
+/// How long the env constructors wait for the validator before panicking.
+const VALIDATOR_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Block until the validator reports healthy AND has rooted a slot past
+/// genesis, or `timeout` passes. A just-started validator answers RPC before
+/// it has a confirmed bank a preflight simulation can resolve a blockhash in.
+pub fn wait_for_validator(rpc: &RpcClient, timeout: Duration) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        let state = match rpc.get_health() {
+            Err(e) => format!("unhealthy: {e}"),
+            Ok(()) => match rpc.get_slot_with_commitment(CommitmentConfig::finalized()) {
+                Ok(slot) if slot > 0 => return Ok(()),
+                Ok(_) => "healthy, no rooted slot yet".to_string(),
+                Err(e) => format!("rooted slot unreadable: {e}"),
+            },
+        };
+        if start.elapsed() >= timeout {
+            bail!("validator at {} not ready after {timeout:?}: {state}", rpc.url());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Sign and send one setup transaction through the crate's own setup sender
+/// (`drip::setup::send_setup_tx`): blockhash fetched right before signing at
+/// the client's commitment, bounded retry on a blockhash rejection only.
+pub fn send_setup_tx(
+    rpc: &RpcClient,
+    ixs: &[Instruction],
+    payer: &Keypair,
+    signers: &[&Keypair],
+) -> Result<Signature> {
+    drip::setup::send_setup_tx(rpc, ixs, payer, signers)
 }
 
 /// Load the funded validator payer, mirroring `main.rs`: `PERCOLATOR_TEST_PAYER`
@@ -310,27 +356,7 @@ fn send_prog_tx(
     let mut signers: Vec<&Keypair> = Vec::with_capacity(1 + extra_signers.len());
     signers.push(payer);
     signers.extend_from_slice(extra_signers);
-    for attempt in 0..5 {
-        let (bh, _) = rpc.get_latest_blockhash_with_commitment(CommitmentConfig::processed())?;
-        let tx = Transaction::new_signed_with_payer(
-            &[cu.clone(), heap.clone(), instruction.clone()],
-            Some(&payer.pubkey()),
-            &signers,
-            bh,
-        );
-        match rpc.send_and_confirm_transaction(&tx) {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                let msg = format!("{e}");
-                if msg.contains("Blockhash not found") && attempt < 4 {
-                    std::thread::sleep(std::time::Duration::from_millis(400));
-                    continue;
-                }
-                return Err(anyhow!(msg));
-            }
-        }
-    }
-    bail!("send_prog_tx: retries exhausted");
+    send_setup_tx(rpc, &[cu, heap, instruction], payer, &signers).map(|_| ())
 }
 
 /// Transition the market Live -> Resolved. Admin-gated: `handle_resolve_market`
@@ -506,10 +532,7 @@ pub fn ensure_ata(
         mint,
         &spl_token::ID,
     );
-    let (bh, _) = rpc.get_latest_blockhash_with_commitment(CommitmentConfig::processed())?;
-    let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &[payer], bh);
-    rpc.send_and_confirm_transaction(&tx)
-        .context("create ATA")?;
+    send_setup_tx(rpc, &[ix], payer, &[payer]).context("create ATA")?;
     Ok(ata)
 }
 
