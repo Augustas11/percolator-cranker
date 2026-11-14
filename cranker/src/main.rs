@@ -256,7 +256,6 @@ fn run_q6_withdrawal_test(
     use solana_sdk::{
         compute_budget::ComputeBudgetInstruction,
         instruction::{AccountMeta, Instruction},
-        transaction::Transaction,
     };
 
     println!("\n== withdrawal spot-check ==");
@@ -278,16 +277,13 @@ fn run_q6_withdrawal_test(
     };
     let cu = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
     let heap = ComputeBudgetInstruction::request_heap_frame(128 * 1024);
-    let bh = rpc.get_latest_blockhash_with_commitment(CommitmentConfig::processed())?.0;
-    let tx = Transaction::new_signed_with_payer(
+    let sync_sig = setup::send_setup_tx(
+        rpc,
         &[cu.clone(), heap.clone(), sync_instr],
-        Some(&env.payer.pubkey()),
+        &env.payer,
         &[&env.payer],
-        bh,
-    );
-    let sync_sig = rpc
-        .send_and_confirm_transaction(&tx)
-        .context("SyncMaintenanceFee to route fee to cranker portfolio")?;
+    )
+    .context("SyncMaintenanceFee to route fee to cranker portfolio")?;
     println!("SyncMaintenanceFee sig = {sync_sig}");
 
     // Create the payer's ATA (Withdraw dest); mint the payer as owner
@@ -303,14 +299,7 @@ fn run_q6_withdrawal_test(
             &env.mint,
             &spl_token::ID,
         );
-    let bh = rpc.get_latest_blockhash_with_commitment(CommitmentConfig::processed())?.0;
-    let tx = Transaction::new_signed_with_payer(
-        &[create_ata_ix],
-        Some(&env.payer.pubkey()),
-        &[&env.payer],
-        bh,
-    );
-    rpc.send_and_confirm_transaction(&tx)
+    setup::send_setup_tx(rpc, &[create_ata_ix], &env.payer, &[&env.payer])
         .context("create payer ATA for withdraw dest")?;
     let dest_before: u64 = spl_token_amount(rpc, &payer_ata)?;
     println!("payer ATA before Withdraw: {} atoms", dest_before);
@@ -351,16 +340,13 @@ fn run_q6_withdrawal_test(
         ],
         data: withdraw_ix.encode(),
     };
-    let bh = rpc.get_latest_blockhash_with_commitment(CommitmentConfig::processed())?.0;
-    let tx = Transaction::new_signed_with_payer(
+    let withdraw_sig = setup::send_setup_tx(
+        rpc,
         &[cu, heap, withdraw_instr],
-        Some(&env.payer.pubkey()),
+        &env.payer,
         &[&env.payer],
-        bh,
-    );
-    let withdraw_sig = rpc
-        .send_and_confirm_transaction(&tx)
-        .with_context(|| format!("Withdraw({withdraw_amount}) from cranker portfolio"))?;
+    )
+    .with_context(|| format!("Withdraw({withdraw_amount}) from cranker portfolio"))?;
     println!("Withdraw({withdraw_amount}) sig = {withdraw_sig}");
 
     let dest_after = spl_token_amount(rpc, &payer_ata)?;

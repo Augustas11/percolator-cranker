@@ -27,7 +27,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use percolator::PortfolioAccountV16Account;
 use percolator_prog::ix::Instruction as ProgInstruction;
 use percolator_prog::state::{read_market, read_portfolio, MarketGroupV16};
-use solana_client::client_error::ClientError;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
@@ -35,7 +34,6 @@ use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     signature::{read_keypair_file, Keypair, Signature, Signer},
-    transaction::{Transaction, TransactionError},
 };
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -142,15 +140,12 @@ pub fn rpc_and_program_from_env() -> Option<(RpcClient, Pubkey)> {
 
 // ---------------------------------------------------------------------------
 // Setup-transaction plumbing. The transactions these test helpers send
-// themselves (ATA creation, resolve, close, ...) go through `send_setup_tx`.
-// The market bootstrap is `drip::setup` and keeps its own send path.
+// themselves (ATA creation, resolve, close, ...) go through `send_setup_tx`,
+// the same sender the market bootstrap in `drip::setup` uses.
 // ---------------------------------------------------------------------------
 
 /// How long the env constructors wait for the validator before panicking.
 const VALIDATOR_READY_TIMEOUT: Duration = Duration::from_secs(60);
-/// Sends per setup transaction; only a blockhash rejection is retried.
-const SETUP_SEND_ATTEMPTS: usize = 5;
-const SETUP_RETRY_PAUSE: Duration = Duration::from_millis(400);
 
 /// Block until the validator reports healthy AND has rooted a slot past
 /// genesis, or `timeout` passes. A just-started validator answers RPC before
@@ -173,132 +168,16 @@ pub fn wait_for_validator(rpc: &RpcClient, timeout: Duration) -> Result<()> {
     }
 }
 
-/// `true` when a send was refused because the validator did not know the
-/// transaction's blockhash. That is a preflight/admission rejection: the
-/// transaction never executed, so re-signing with a new blockhash and
-/// resending cannot double-apply it.
-fn blockhash_rejected(e: &ClientError) -> bool {
-    matches!(e.get_transaction_error(), Some(TransactionError::BlockhashNotFound))
-        || e.to_string().contains("Blockhash not found")
-}
-
-/// Sign and send one setup transaction, `payer` paying fees, `signers` being
-/// every required signer (payer included).
-///
-/// The blockhash is fetched right before each signing, at the SAME commitment
-/// the client preflights at (`rpc.commitment()`). Fetching it at `processed`
-/// while preflight simulates against the `confirmed` bank is a race: the
-/// newest processed blockhash may not be confirmed yet, and the simulation
-/// answers "Blockhash not found". A blockhash rejection is still retried with
-/// a fresh blockhash, up to `SETUP_SEND_ATTEMPTS` sends; any other error is
-/// returned as is.
+/// Sign and send one setup transaction through the crate's own setup sender
+/// (`drip::setup::send_setup_tx`): blockhash fetched right before signing at
+/// the client's commitment, bounded retry on a blockhash rejection only.
 pub fn send_setup_tx(
     rpc: &RpcClient,
     ixs: &[Instruction],
     payer: &Keypair,
     signers: &[&Keypair],
 ) -> Result<Signature> {
-    send_with_blockhash_retry(
-        || {
-            let bh = rpc.get_latest_blockhash().context("get_latest_blockhash")?;
-            Ok(Transaction::new_signed_with_payer(ixs, Some(&payer.pubkey()), signers, bh))
-        },
-        |tx| rpc.send_and_confirm_transaction(tx),
-        SETUP_RETRY_PAUSE,
-    )
-}
-
-/// The retry loop behind [`send_setup_tx`], with the RPC calls injected so the
-/// policy is unit-testable without a validator. `build` must return a
-/// transaction signed over a freshly fetched blockhash.
-fn send_with_blockhash_retry(
-    mut build: impl FnMut() -> Result<Transaction>,
-    mut send: impl FnMut(&Transaction) -> std::result::Result<Signature, ClientError>,
-    pause: Duration,
-) -> Result<Signature> {
-    let mut attempt = 1;
-    loop {
-        let tx = build()?;
-        match send(&tx) {
-            Ok(sig) => return Ok(sig),
-            Err(e) if blockhash_rejected(&e) && attempt < SETUP_SEND_ATTEMPTS => {
-                eprintln!("setup tx: blockhash rejected (send {attempt}/{SETUP_SEND_ATTEMPTS}), retrying: {e}");
-                attempt += 1;
-                std::thread::sleep(pause);
-            }
-            Err(e) => return Err(anyhow!(e).context(format!("setup tx failed on send {attempt}"))),
-        }
-    }
-}
-
-#[cfg(test)]
-fn blockhash_not_found_error() -> ClientError {
-    use solana_client::rpc_request::{RpcError, RpcResponseErrorData};
-    use solana_client::rpc_response::RpcSimulateTransactionResult;
-    RpcError::RpcResponseError {
-        code: -32002,
-        message: "Transaction simulation failed: Blockhash not found".to_string(),
-        data: RpcResponseErrorData::SendTransactionPreflightFailure(RpcSimulateTransactionResult {
-            err: Some(TransactionError::BlockhashNotFound),
-            logs: None,
-            accounts: None,
-            units_consumed: None,
-            return_data: None,
-            inner_instructions: None,
-        }),
-    }
-    .into()
-}
-
-#[test]
-fn setup_send_retries_a_blockhash_rejection_with_a_rebuilt_tx() {
-    let (mut builds, mut sends) = (0, 0);
-    let sig = send_with_blockhash_retry(
-        || {
-            builds += 1;
-            Ok(Transaction::default())
-        },
-        |_| {
-            sends += 1;
-            if sends < 3 { Err(blockhash_not_found_error()) } else { Ok(Signature::default()) }
-        },
-        Duration::ZERO,
-    )
-    .unwrap();
-    assert_eq!(sig, Signature::default());
-    assert_eq!((builds, sends), (3, 3), "each resend must rebuild (re-fetch blockhash, re-sign)");
-}
-
-#[test]
-fn setup_send_gives_up_after_the_attempt_cap() {
-    let mut sends = 0;
-    let err = send_with_blockhash_retry(
-        || Ok(Transaction::default()),
-        |_| {
-            sends += 1;
-            Err(blockhash_not_found_error())
-        },
-        Duration::ZERO,
-    )
-    .unwrap_err();
-    assert_eq!(sends, SETUP_SEND_ATTEMPTS);
-    assert!(format!("{err:#}").contains("Blockhash not found"), "{err:#}");
-}
-
-#[test]
-fn setup_send_does_not_retry_other_errors() {
-    let mut sends = 0;
-    let err = send_with_blockhash_retry(
-        || Ok(Transaction::default()),
-        |_| {
-            sends += 1;
-            Err(ClientError::from(TransactionError::AccountInUse))
-        },
-        Duration::ZERO,
-    )
-    .unwrap_err();
-    assert_eq!(sends, 1, "a non-blockhash failure must surface on the first send");
-    assert!(format!("{err:#}").contains("Account in use"), "{err:#}");
+    drip::setup::send_setup_tx(rpc, ixs, payer, signers)
 }
 
 /// Load the funded validator payer, mirroring `main.rs`: `PERCOLATOR_TEST_PAYER`
