@@ -151,6 +151,5 @@
 }
 .site .nowrap { white-space: nowrap; }
 .site .cc-chg { font: 13px var(--site-mono); color: var(--site-muted); }
-.site .cc-index { margin-top: 2px; }
 .site .home-hero .hero-actions .button-link { padding: 0 24px; }
 .site .home-hero .hero-actions { margin-bottom: 18px; }

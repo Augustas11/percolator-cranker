@@ -61,10 +61,11 @@
   --site-bg-transparent: rgba(14,18,17,0);
   --site-graphite-transparent: rgba(31,31,31,0);
   --site-shadow: rgba(0,0,0,0.45);
-  /* Glancyr is the brand display face; Unbounded stands in until it is licensed. */
-  --site-display: "Unbounded", system-ui, sans-serif;
+  /* Glancyr is the brand face; Unbounded stands in for the wordmark until it is licensed. */
+  --site-brand: "Unbounded", system-ui, sans-serif;
+  --site-display: "Manrope", system-ui, sans-serif;
   --site-font: "Manrope", system-ui, sans-serif;
-  --site-mono: "Space Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  --site-mono: "Geist Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   --site-radius: 14px;
   --site-width: 1280px;
   --site-gutter: 32px;

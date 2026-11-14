@@ -1,7 +1,7 @@
 /* /agents: one flow from install to the Arena. */
 .site .ag-hero { padding: 8px 0 4px; }
-.site .ag-lead { margin: 16px 0 0; max-width: 880px; font: 600 clamp(24px, 2.6vw, 34px)/1.25 var(--site-font); color: var(--site-text); }
-.site .ag-sub { margin: 14px 0 0; max-width: 760px; font-size: 17px; line-height: 1.5; color: var(--site-secondary); }
+.site .cx h1.ag-lead { margin: 16px 0 0; max-width: 880px; font: 800 clamp(36px, 5vw, 64px)/1.02 var(--site-display); letter-spacing: -0.035em; color: var(--site-text); }
+.site .ag-sub { margin: 16px 0 0; max-width: 760px; font-size: 19px; line-height: 1.5; color: var(--site-secondary); }
 .site .agents .cx-section > h2 { margin: 6px 0 16px; }
 .site .ag-h3 { margin: 22px 0 10px; font-size: 16px; }
 .site .ag-step { margin-top: 26px; }

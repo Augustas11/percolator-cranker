@@ -10,7 +10,7 @@ import type { IndexerClient } from "../indexer/client";
 import { MockComputeFeedClient } from "../compute/mock";
 import { marketFixture } from "../compute/fixture";
 import { typicalPrice } from "../compute/charts";
-import { day, pct, usd } from "../compute/format";
+import { pct, usd } from "../compute/format";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -39,7 +39,7 @@ async function render(path: string, indexer: IndexerClient | null = new MockInde
 
 test.each([
   [site.paths.home, "Price andhedge AIcompute.", "From agent to a COMPUTE-PERP position.", "Drip · the price of AI compute"],
-  [site.paths.agents, "Your agent reads what inference costs from every seller, hedges its compute bill with COMPUTE-PERP, and is ranked on the Arena by PnL.", "Install the MCP", "Agents · Drip"],
+  [site.paths.agents, "Your agent hedges its compute bill.", "Install the MCP", "Agents · Drip"],
   [site.paths.arena, "Arena", "Leaderboard", "Arena · Drip"],
   [site.paths.compute, "Compute index", "The compute index is unreachable right now.", "Compute index · Drip"],
   [site.paths.trade, "COMPUTE-PERP", "Connect wallet", "Trade COMPUTE-PERP · Drip"],
@@ -384,10 +384,10 @@ test("one quote count on Home, /compute and /agents", async () => {
   expect(home.querySelector('[aria-labelledby="why-title"] p')?.textContent).toContain(`${n} quotes up`);
   await cleanup?.();
   const compute = await render(site.paths.compute, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient(now));
-  expect(compute.querySelector(".cx-proof")?.textContent).toContain(`${n} quotes up`);
+  expect(compute.querySelector(".cx-proof")?.textContent).toContain(`${n} live quotes`);
   await cleanup?.();
   const agents = await render(site.paths.agents, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient(now));
-  expect(agents.querySelector("h1.ag-lead")?.textContent).toContain(`${n} quotes up`);
+  expect(agents.querySelector(".ag-sub")?.textContent).toContain(`${n} live seller quotes`);
 });
 
 test("home card survives a feed with no index base and no cheapest seller", async () => {
@@ -409,12 +409,12 @@ test("home leads with the compute index, then the perp", async () => {
   const routed = market.models.find(m => m.id === "qwen/qwen3.8-27b")!.routed!;
   expect(card.querySelector(".cc-level")?.textContent).toBe(`What a request pays now, Qwen3.8-27B${usd(routed.price)}per 1M tokens1 h ${pct(routed.change_1h_pct)}`);
   expect(card.querySelector(".cc-meta")?.textContent).toBe(`Median across open models ${usd(typicalPrice(market)!.median)} · ${market.index.n_quotes_up} quotes up · ${market.index.n_providers} providers · ${typicalPrice(market)!.models} models`);
-  expect(card.querySelector(".cc-index")?.textContent).toBe(`Index ${market.index.level!.toFixed(2)} · 100 = ${day(market.index.base_ms!)}`);
+  expect(card.querySelector(".cc-index")).toBeNull();
   expect(container.querySelector(".announcement")).toBeNull();
   expect(card.querySelectorAll(".cc-models .strip")).toHaveLength(4);
   expect(card.querySelector(".cc-perp .market-price")?.textContent).toBe("$0.3036 / 1M tokens");
-  expect(card.textContent).toContain("Settlement price, pushed 3 min ago. 2 of 2 full-precision sellers up, cheaper sellers weigh more (1 ÷ price²).");
-  expect(container.querySelector(".hero-description")?.textContent).toContain(`What open-model inference costs right now: ${market.index.n_quotes_up} quotes up from ${market.index.n_providers} providers on ${typicalPrice(market)!.models} models with 3 or more sellers.`);
+  expect(card.textContent).toContain("Settlement price · pushed 3 min ago · 2 of 2 sellers up");
+  expect(container.querySelector(".hero-description")?.textContent).toContain(`What open-model inference costs right now: ${market.index.n_quotes_up} quotes up from ${market.index.n_providers} providers on ${typicalPrice(market)!.models} models.`);
   expect(container.querySelector('.home-hero .hero-primary')?.getAttribute("href")).toBe("/compute");
   expect(container.querySelector(".hero-credit")?.textContent).toBe("Built for perp traders and for agents on FLOP Network.");
   const sections = Array.from(container.querySelectorAll("main > section")).map(s => s.className);
@@ -525,10 +525,11 @@ test("agents page: one flow from install to the Arena, compute examples only onc
   expect(names).not.toContain("market.json");
   expect(Array.from(container.querySelectorAll(".ag-files dt"), d => d.textContent)).toEqual(["market.json", "latest.json"]);
   expect(Array.from(container.querySelectorAll(".ag-files a"), a => a.getAttribute("href"))).toEqual([`${site.officialSite}/compute-feed/market.json`, `${site.officialSite}/compute-feed/latest.json`]);
-  expect(container.textContent).toContain("rewrites both every minute");
+  expect(container.textContent).not.toContain("rewrites both every minute");
   // The MCP trades the configured market, COMPUTE-PERP.
   const quotes = (await new MockComputeFeedClient().market()).index.n_quotes_up;
-  expect(container.querySelector("h1.ag-lead")?.textContent).toBe(`Your agent reads what inference costs from ${quotes} quotes up, hedges its compute bill with COMPUTE-PERP, and is ranked on the Arena by PnL.`);
+  expect(container.querySelector("h1.ag-lead")?.textContent).toBe("Your agent hedges its compute bill.");
+  expect(container.querySelector(".ag-sub")?.textContent).toBe(`It reads ${quotes} live seller quotes, trades COMPUTE-PERP and ranks on the Arena by PnL.`);
   expect(container.querySelector("#install pre")?.textContent).toBe("claude mcp add drip -- npx -y @driptech/mcp");
   expect(Array.from(container.querySelectorAll("#install pre"), p => p.textContent)).toContain("Claim test funds, deposit 500 USDC and open a 100-unit long on COMPUTE-PERP. Then show my position.");
   expect(container.textContent).toContain("Long COMPUTE-PERP");
@@ -541,11 +542,11 @@ test("agents page: one flow from install to the Arena, compute examples only onc
   expect(prompts).toContain("Open a 50-unit long on COMPUTE-PERP to hedge my inference bill, then show my position.");
   expect(prompts.join(" ")).not.toContain("Read the compute index");
   expect(container.textContent).not.toMatch(/ChatGPT|5-sample|SOL-PERP/);
-  expect(container.textContent).toContain("any MCP client that runs local servers");
+  expect(container.textContent).toContain("MCP clients that run local servers");
   expect(container.textContent).toContain("exponential average");
   expect(container.querySelector(".addresses")?.textContent).toContain("COMPUTE-PERP market");
   expect(container.querySelector(".addresses")?.textContent).toContain("uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J");
-  expect(container.textContent).toContain("Built for agents on FLOP Network");
+  expect(container.textContent).not.toContain("Built for agents on FLOP Network");
   expect(container.querySelectorAll("#install pre")).toHaveLength(4);
   expect(container.textContent).not.toMatch(/Percolator|market: "/);
   await cleanup?.(); cleanup = undefined;
@@ -555,7 +556,9 @@ test("agents page: one flow from install to the Arena, compute examples only onc
   try {
     const c2 = await render(site.paths.agents);
     expect(c2.querySelectorAll("#install pre")).toHaveLength(3);
+    expect(c2.querySelector(".ag-lead")?.textContent).toBe("Your agent trades compute prices.");
     expect(c2.querySelector(".ag-lead")?.textContent).not.toMatch(/hedges/);
+    expect(c2.querySelector(".ag-sub")?.textContent).not.toContain("trades");
     expect(c2.textContent).not.toMatch(/Long COMPUTE-PERP/);
     expect(c2.querySelector(".addresses")).toBeNull();
   } finally { site.mcp.computeMarket = compute; site.showAddresses = true; }
