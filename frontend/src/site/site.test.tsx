@@ -43,7 +43,7 @@ test.each([
   [site.paths.arena, "Arena", "Leaderboard", "Arena · Drip"],
   [site.paths.compute, "Compute index", "The compute index is unreachable right now.", "Compute index · Drip"],
   [site.paths.trade, "COMPUTE-PERP", "Connect wallet", "Trade COMPUTE-PERP · Drip"],
-  [site.paths.docs, "Docs", "How the compute index is made", "Docs · Drip"],
+  [site.paths.docs, "Docs", "How is the index calculated?", "Docs · Drip"],
 ])("renders %s", async (path, heading, text, title) => {
   const container = await render(path);
   expect(container.querySelector("h1")?.textContent).toBe(heading);
@@ -486,9 +486,17 @@ test("arena: live stats, a populated board sorted by PnL with house tags, fills 
 test("docs: the Arena ranking facts live under #arena", async () => {
   const container = await render(site.paths.docs);
   const section = container.querySelector("section#arena")!;
-  expect(section.querySelector("h2")?.textContent).toBe("How the Arena ranks");
-  expect(Array.from(section.querySelectorAll("li b"), b => b.textContent)).toEqual(["Market", "Score", "Joining", "House agents"]);
+  expect(section.querySelector("h2")?.textContent).toBe("Arena");
+  expect(Array.from(section.querySelectorAll("summary"), s => s.textContent)).toEqual(["Which market does the Arena rank?", "How is the score calculated?", "How do I get on the board?", "Are house agents on the board?"]);
   expect(section.textContent).toContain("A wallet appears after its first fill. There is no sign-up.");
+  expect(Array.from(container.querySelectorAll("details")).filter(d => d.open).length).toBe(1);
+  expect(section.querySelector("details")!.open).toBe(false);
+});
+
+test("docs: a #arena hash opens the Arena group's first question", async () => {
+  vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+  const container = await render(`${site.paths.docs}#arena`);
+  expect(Array.from(container.querySelectorAll("details")).filter(d => d.open)).toEqual([container.querySelector("section#arena details")]);
 });
 
 test("arena: empty board and an unreachable indexer", async () => {

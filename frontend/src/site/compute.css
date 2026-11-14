@@ -223,6 +223,18 @@
 .site .method dd { text-align: left; margin: 0; font: 14px/1.55 var(--site-font); color: var(--site-body-muted); }
 .site .method code { font-size: 13px; color: var(--site-text); }
 
+/* FAQ */
+.site .faq { max-width: 720px; border-top: 1px solid var(--site-line-6); }
+.site .faq:last-of-type { border-bottom: 1px solid var(--site-line-6); }
+.site .cx-section > h2 + .faq { margin-top: 14px; }
+.site .faq summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; list-style: none; cursor: pointer; font: 600 17px/1.35 var(--site-display, var(--site-font)); color: var(--site-text); }
+.site .faq summary::-webkit-details-marker { display: none; }
+.site .faq summary::after { content: ""; flex: none; width: 8px; height: 8px; border-right: 2px solid var(--site-muted); border-bottom: 2px solid var(--site-muted); transform: rotate(45deg); transition: transform .15s; }
+.site .faq[open] summary::after { transform: rotate(-135deg); }
+.site .faq summary:focus-visible { outline-offset: -3px; }
+.site .faq-a { padding: 0 32px 18px 0; font: 15px/1.6 var(--site-font); color: var(--site-secondary); }
+.site .faq-a a { color: var(--site-accent); }
+
 /* Loading */
 .site .cx-skeleton { display: grid; gap: 16px; padding: 8px 0; }
 .site .sk { border-radius: 10px; background: linear-gradient(90deg, var(--site-white-3) 0%, var(--site-line-8) 50%, var(--site-white-3) 100%); background-size: 200% 100%; animation: cx-shimmer 1.4s ease-in-out infinite; }
