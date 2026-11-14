@@ -6,7 +6,7 @@ import Docs from "../pages/Docs";
 import type { ComputeFeedClient, ComputeMarket } from "./client";
 import { MockComputeFeedClient } from "./mock";
 import { marketFixture } from "./fixture";
-import { SpreadRanks, logScale, typicalPrice, upPriced, widestModels } from "./charts";
+import { logScale, spreadRatios, typicalPrice, upPriced, widestModels } from "./charts";
 import { count, times, usd, usdSmall } from "./format";
 import { site } from "../site/config";
 
@@ -48,15 +48,14 @@ test("renders the index, its scale and every section from the fixture", async ()
   expect(container.querySelector(".cx-indexstat")).toBeNull();
   expect(container.querySelector(".cx-spread-line")?.textContent).toBe("The same model costs up to 21\u00d7 more depending on the seller.");
   expect(container.querySelector(".cx-spread-eg")).toBeNull();
-  const ranks = Array.from(container.querySelectorAll(".cx-hero-side .ranks li"));
   const wide = widestModels(market);
-  expect(ranks).toHaveLength(wide.length);
-  expect(ranks.map(li => li.querySelector(".rk-name")?.textContent)).toEqual(wide.map(m => m.name));
-  expect(ranks[0].classList.contains("is-top")).toBe(true);
-  expect(ranks[0].querySelector(".rk-name")?.textContent).toBe("GLM 5.3");
-  expect(ranks[0].querySelector(".rk-range")?.textContent).toBe(`${usd(wide[0].min)}\u2013${usd(wide[0].max)}, median ${usd(wide[0].median)}`);
-  expect(ranks[0].querySelector(".rk-x")?.textContent).toBe(times(wide[0].min, wide[0].max));
-  expect(container.querySelector(".cx-hero-side .cx-spread-line strong")?.textContent).toBe(ranks[0].querySelector(".rk-x")?.textContent);
+  expect(container.querySelector(".cx-hero-side .cx-spread-line strong")?.textContent).toBe(times(wide[0].min, wide[0].max));
+  expect(container.querySelector(".ranks")).toBeNull();
+  const swarm = container.querySelector(".cx-hero-side .swarm svg");
+  expect(swarm?.getAttribute("aria-label")).toMatch(/^\d+ live quotes, each divided by its model's median price/);
+  expect(container.querySelectorAll(".cx-hero-side circle.swarm-dot")).toHaveLength(spreadRatios(market).length);
+  expect(container.querySelector(".swarm-count")).toBeNull();
+  expect(container.querySelector(".cx-hero-side .swarm figcaption")?.textContent).toBe("below medianabove median");
   // Who it is for: each entry jumps to a section that exists.
   const who = Array.from(container.querySelectorAll(".cx-who a"));
   expect(who.map(a => a.getAttribute("href"))).toEqual(["#board", "#providers", "#perp"]);
@@ -67,7 +66,6 @@ test("renders the index, its scale and every section from the fixture", async ()
   const order = ["#board", "#perp", "#providers"].map(id => Array.from(container.querySelectorAll("section, article")).indexOf(container.querySelector(id)!));
   expect(order).toEqual([...order].sort((a, b) => a - b));
   // The hero no longer carries an index line.
-  expect(container.querySelector(".swarm")).toBeNull();
   expect(container.querySelector(".cx-index-line")).toBeNull();
   expect(text).not.toMatch(/\b(?:mock|sample)\b/i);
   for (const heading of ["Price by model", "Providers", "Price moves"]) expect(text).toContain(heading);
@@ -181,8 +179,8 @@ test("the perp and FLOP panels show the settlement price, its sellers and FLOP's
   const flop = container.querySelector('[aria-labelledby="compute-flop-heading"]')!;
   expect(Array.from(flop.querySelectorAll(".flop-parity .flop-facts dd"), v => v.textContent)).toEqual([usd(marketFixture().flop!.parity!.market_usd_per_bn_gn), "0.00291"]);
   expect(flop.querySelector(".flop-window")?.textContent).toBe("Last 6 hours");
-  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dt")).map(v => v.textContent)).toEqual(["Buyer accounts", "Miners", "Jobs settled", "Gateway share of compute"]);
-  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dd")).map(v => v.textContent)).toEqual(["3", "34", "185", "50%"]);
+  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dt")).map(v => v.textContent)).toEqual(["Buyer accounts", "Miners", "Jobs settled"]);
+  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dd")).map(v => v.textContent)).toEqual(["3", "34", "185"]);
   expect(flop.textContent).not.toContain("FLOP's gateway buys on behalf");
   expect(flop.textContent).not.toContain("The perp settles on seller prices, not on this rate.");
 });
@@ -347,18 +345,23 @@ async function renderDocs(feed: ComputeFeedClient | null) {
 
 test("docs explain how the index is made, with live values from the feed", async () => {
   const container = await renderDocs(liveFeed());
+  expect(Array.from(container.querySelectorAll("h2"), h => h.textContent)).toEqual(["Compute index", "COMPUTE-PERP", "Arena", "Agents"]);
   const how = container.querySelector("#compute-index")!;
-  expect(how.querySelector("h2")?.textContent).toBe("How the compute index is made");
-  expect(Array.from(how.querySelectorAll("dt")).map(d => d.textContent)).toEqual(["01Quote", "02Price", "03Up", "04Model price", "05Reads", "06Index", "07Routed price", "08Stale", "09Settlement price", "10Check it"]);
+  expect(Array.from(how.querySelectorAll("summary"), d => d.textContent)).toEqual(["What is a quote?", "How do input and output prices become one price?", "When does a seller count as up?", "How is a model's price set?", "How often are prices read?", "How is the index calculated?", "What is the routed price?", "When is data marked stale?"]);
+  expect(Array.from(container.querySelectorAll("details")).map(d => d.open)).toEqual([true, ...Array(14).fill(false)]);
   expect(how.textContent).toContain("every model every 5 minutes");
   expect(how.textContent).toContain("listed and up");
   expect(how.textContent).toContain(`Geometric mean of the ${marketFixture().index.n_models} model medians`);
-  expect(how.textContent).toContain("Clamp now: off (n<3).");
-  expect(how.textContent).toContain("Each settlement price is written to Solana (latest transaction).");
-  expect(how.textContent).not.toContain("signed line");
+  expect(how.textContent).toContain("Median of the quotes that are up.");
   expect(how.textContent).toContain("cheaper sellers get more (1 ÷ price²), weighted by each seller's recent uptime, with no seller above half the weight");
-  expect(how.textContent).not.toMatch(/verify-push-log|stand-in/);
-  expect(how.textContent).toContain("Independent of Flop Labs and OpenRouter.");
+  expect(how.textContent).toContain("No new read for 30 minutes. The update time turns red");
+  const perp = container.querySelector("#compute-perp")!;
+  expect(Array.from(perp.querySelectorAll("summary"), d => d.textContent)).toEqual(["What does COMPUTE-PERP settle on?", "How can I check a settlement price?"]);
+  expect(perp.textContent).toContain("Clamp now: off (n<3).");
+  expect(perp.textContent).toContain("Each settlement price is written to Solana (latest transaction).");
+  expect(container.textContent).not.toContain("signed line");
+  expect(container.textContent).not.toMatch(/verify-push-log|stand-in/);
+  expect(container.textContent).toContain("Independent of Flop Labs and OpenRouter.");
 });
 
 test("docs state the rules without live counts when there is no feed", async () => {
@@ -373,7 +376,7 @@ test("docs describe a flop_standin settlement price", async () => {
   const base = await feed.latest();
   vi.spyOn(feed, "latest").mockResolvedValue({ ...base, source: "flop_standin" });
   const container = await renderDocs(feed);
-  expect(container.querySelector("#compute-index")!.textContent).toContain("FLOP's on-chain price (flop_standin)");
+  expect(container.querySelector("#compute-perp")!.textContent).toContain("FLOP's on-chain price (flop_standin)");
 });
 
 test("mix switch: hidden without per-mix data, then moves the headline, the medians and the sort", async () => {
@@ -594,18 +597,10 @@ test("FLOP parity without the routed figure labels everything as list-based", as
   expect(flop.querySelector(".flop-parity .flop-facts small")?.textContent).toMatch(/, from list prices$/);
 });
 
-test("SpreadRanks orders by dearest/cheapest, skips thin and stale models, and caps at six", async () => {
+test("widestModels orders by dearest/cheapest, skips thin and stale models, and caps at six", async () => {
   const market = marketFixture(Date.now());
   const base = market.models[0];
   const mk = (id: string, min: number, max: number, extra: object = {}) => ({ ...base, id, name: id, min, max, median: (min + max) / 2, thin: false, stale: false, ...extra });
   const models = [mk("a", 1, 2), mk("b", 1, 9), mk("c", 1, 5), mk("thin", 1, 100, { thin: true }), mk("stale", 1, 90, { stale: true }), mk("flat", 1, 1), ...["d", "e", "f", "g"].map((id, i) => mk(id, 1, 3 + i / 10))];
-  const container = document.createElement("div");
-  const root = createRoot(container);
-  cleanup = async () => { await act(async () => { root.unmount(); }); };
-  await act(async () => { root.render(<SpreadRanks market={{ ...market, models }} />); });
-  const names = Array.from(container.querySelectorAll(".ranks li .rk-name"), n => n.textContent);
-  expect(names).toEqual(["b", "c", "g", "f", "e", "d"]);
-  expect(container.querySelector(".ranks li")?.classList.contains("is-top")).toBe(true);
-  expect(container.querySelectorAll(".ranks li.is-top")).toHaveLength(1);
-  expect(container.querySelector(".ranks li .rk-x")?.textContent).toBe(times(1, 9));
+  expect(widestModels({ ...market, models }).map(m => m.name)).toEqual(["b", "c", "g", "f", "e", "d"]);
 });
