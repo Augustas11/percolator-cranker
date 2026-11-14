@@ -198,6 +198,7 @@ MARKETS_DOMAINS = [
     "openapi.vercel.sh", "apache.org", "w3.org", "googleapis.com", "gstatic.com",
     "x.com", "openrouter.ai", "flop.network", "binance.com", "binance.us",
     "kraken.com", "coinbase.com",
+    "anza.xyz",        # the Solana CLI installer (CI e2e job)
     "z.ai",            # an OpenRouter provider's name (frontend/src/compute/fixture.ts)
     "127.0.0.1.evil",  # a URL-parsing test host (cranker/tests/common/mod.rs)
 ]
@@ -214,6 +215,8 @@ STRICT_TOKENS = [
 STRICT_VALUES = [
     # Example key paths in agents/README.md; a rejected test key (mcp/src/drip.test.ts).
     "/path/basis.json", "/path/hedge-long.json", "/path/trend.json", "invalid",
+    # The local wrapper keypair path (scripts/m1_bringup.sh).
+    '"$PROG_DIR/target/deploy/percolator_prog-keypair.json"',
 ]
 
 PROFILES = {
