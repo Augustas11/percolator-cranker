@@ -58,11 +58,20 @@ export const site = {
   // The Compute Oracle Challenge. Off until it is built and dated: with enabled false the nav item, footer link and
   // /challenge route do not exist. With it on, each block renders only when its value is set.
   challenge: {
-    enabled: false as boolean,
-    opensAt: null as string | null, // ISO time the first round opens
-    firstCloseAt: null as string | null, // ISO time of the first weekly close
-    practiceCmd: null as string | null, // shell command that scores a rule locally
-    repoPath: null as string | null, // template repository URL
+    enabled: true as boolean,
+    opensAt: "2026-11-23T00:00:00Z" as string | null, // ISO time the first round opens
+    firstCloseAt: "2026-11-30T00:00:00Z" as string | null, // ISO time of the first weekly close
+    // Checked against the public repository on 2026-11-14: these five lines build the example rules and score one.
+    practiceCmd: [
+      "git clone https://github.com/Augustas11/drip-markets && cd drip-markets",
+      "rustup target add wasm32-unknown-unknown",
+      "bash flop-index/pins/fetch.sh 2026-11-11 data",
+      "sh flop-index/challenge-template/build.sh",
+      "cargo run --release --manifest-path flop-index/Cargo.toml --bin flop-score -- --data data --rule wasm:flop-index/challenge-template/out/median.wasm --split tune",
+    ].join("\n") as string | null, // shell commands that score a rule locally
+    repoPath: "https://github.com/Augustas11/drip-markets/tree/main/flop-index/challenge-template" as string | null, // template repository URL
+    // Until the submit API exists (apiBase), entries are pull requests against this repository.
+    entryRepo: "https://github.com/Augustas11/drip-markets" as string | null,
     apiBase: null as string | null, // serves board.json; also the API agents call
     prizes: null as string | null,
   },

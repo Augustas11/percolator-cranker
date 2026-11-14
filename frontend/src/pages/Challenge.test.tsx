@@ -40,6 +40,7 @@ const FULL = {
 };
 
 test("flag off: no nav item, no footer link, no route, and the swarm paths do not redirect", async () => {
+  Object.assign(site.challenge, { enabled: false });
   for (const path of ["/challenge", "/swarm", "/swarm-markets"]) {
     const container = await render(path);
     expect(window.location.pathname).toBe(path);
@@ -60,12 +61,12 @@ test("flag on with every value: nav, footer, the full page and the rules in Docs
   expect(container.querySelector('footer a[href="/challenge"]')?.textContent).toBe("Challenge");
   expect(document.title).toBe("Compute Oracle Challenge · Drip");
   expect(container.querySelector("h1")?.textContent).toBe("Build the compute price oracle.");
-  expect(Array.from(container.querySelectorAll("main h2"), h => h.textContent)).toEqual(["Why an oracle", "What you submit", "How it is scored", "What you win", "Agents and swarms welcome", "Leaderboard"]);
+  expect(Array.from(container.querySelectorAll("main h2"), h => h.textContent)).toEqual(["Why an oracle", "What you submit", "How it is scored", "What you win", "Agents and swarms welcome", "Score a rule locally", "Leaderboard"]);
   // Live numbers from market.json: the benchmark model's sellers up and its spread.
   const bench = (await new MockComputeFeedClient().market()).models.find(m => m.id === "qwen/qwen3.8-27b")!;
   expect(container.querySelector(".ch-pitch")?.textContent).toMatch(new RegExp(`^${bench.sellers_up} sellers list the same AI model at prices up to [\\d.]+× apart\\. Your code turns their quotes into one price\\.$`));
   expect(container.querySelector(".ch-score-line")?.textContent).toBe("Follow real price changes, ignore fake ones. Tested on next week's market and attacked with fake listings.");
-  expect(container.querySelector('[aria-labelledby="ch-win"] p')?.textContent).toBe("The best oracle runs the live market, with your name on it.");
+  expect(container.querySelector('[aria-labelledby="ch-win"] p')?.textContent).toBe("The best oracle runs the live market after an independent review, with your name on it.");
   expect(Array.from(container.querySelectorAll('[aria-labelledby="ch-why"] li'), l => l.textContent)).toEqual([
     "On-chain markets settle on whatever their oracle reports.",
     "An oracle that can be faked or that lags gets traders liquidated.",
@@ -76,7 +77,7 @@ test("flag on with every value: nav, footer, the full page and the rules in Docs
   expect(container.querySelector(".ch-next dd")?.textContent).toBe("4d 12:00:00");
   expect(container.querySelector(".ch-prizes")?.textContent).toBe("Prizes: 1,000 USDC to the top three");
   expect(container.textContent).toContain("challenge_submit");
-  expect(container.querySelector('[aria-labelledby="ch-agents"] pre')?.textContent).toBe(FULL.practiceCmd);
+  expect(container.querySelector('[aria-labelledby="ch-try"] pre')?.textContent).toBe(FULL.practiceCmd);
   expect(Array.from(container.querySelectorAll(".ch-hero a"), a => [a.textContent?.trim(), a.getAttribute("href")])).toEqual([["Read the rules", "/docs#challenge"], ["Get the template", FULL.repoPath]]);
   expect(container.textContent).not.toMatch(/TBD|coming soon|Paradigm|imd\.fun/i);
   // Season board and round board, reference entries from the data.
@@ -97,13 +98,14 @@ test("flag on with every value: nav, footer, the full page and the rules in Docs
 });
 
 test("flag on with partial config renders only the configured blocks", async () => {
-  Object.assign(site.challenge, { enabled: true });
+  Object.assign(site.challenge, { enabled: true, opensAt: null, firstCloseAt: null, practiceCmd: null, repoPath: null, apiBase: null, prizes: null, entryRepo: null });
   const container = await render("/challenge");
   expect(container.querySelector("h1")?.textContent).toBe("Build the compute price oracle.");
   expect(container.querySelector(".ch-dates")).toBeNull();
   expect(container.querySelector(".ch-prizes")).toBeNull();
   expect(container.querySelector("#ch-board")).toBeNull();
-  expect(container.querySelector('[aria-labelledby="ch-agents"] pre')).toBeNull();
+  expect(container.querySelector('[aria-labelledby="ch-try"]')).toBeNull();
+  expect(container.querySelector(".ch-enter")).toBeNull();
   expect(container.textContent).not.toContain("challenge_submit");
   expect(container.textContent).not.toContain("Get the template");
   expect(container.textContent).not.toMatch(/TBD|coming soon|Prizes/i);
@@ -111,6 +113,20 @@ test("flag on with partial config renders only the configured blocks", async () 
   Object.assign(site.challenge, { firstCloseAt: "2026-12-06T00:00:00Z" });
   const c2 = await render("/challenge");
   expect(Array.from(c2.querySelectorAll(".ch-dates dt"), d => d.textContent)).toEqual(["First close", "Next close in"]);
+});
+
+test("the shipped default config: dates, pull-request entry, template link and practice command, no board", async () => {
+  const container = await render("/challenge");
+  expect(container.querySelector("h1")?.textContent).toBe("Build the compute price oracle.");
+  expect(Array.from(container.querySelectorAll("a"), a => a.textContent?.trim()).filter(t => t === "Get the template").length).toBeGreaterThan(0);
+  for (const a of Array.from(container.querySelectorAll("a")).filter(a => a.textContent?.trim() === "Get the template")) expect(a.getAttribute("href")).toBe(site.challenge.repoPath);
+  const local = container.querySelector('[aria-labelledby="ch-try"]')!;
+  expect(local.querySelector("h2")?.textContent).toBe("Score a rule locally");
+  expect(local.querySelector("pre")?.textContent).toBe(site.challenge.practiceCmd);
+  expect(Array.from(container.querySelectorAll(".ch-dates dt"), d => d.textContent).slice(0, 2)).toEqual(["Opens", "First close"]);
+  expect(new Date(site.challenge.firstCloseAt!).getTime() - new Date(site.challenge.opensAt!).getTime()).toBe(7 * 86_400_000);
+  expect(container.querySelector(".ch-enter a")?.getAttribute("href")).toBe(`${site.challenge.entryRepo}/pulls`);
+  expect(container.querySelector("#ch-board")).toBeNull();
 });
 
 test("the swarm paths redirect to the challenge when it is on", async () => {

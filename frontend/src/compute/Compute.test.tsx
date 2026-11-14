@@ -345,7 +345,7 @@ async function renderDocs(feed: ComputeFeedClient | null) {
 
 test("docs explain how the index is made, with live values from the feed", async () => {
   const container = await renderDocs(liveFeed());
-  expect(Array.from(container.querySelectorAll("h2"), h => h.textContent)).toEqual(["Compute index", "COMPUTE-PERP", "Arena", "Agents"]);
+  expect(Array.from(container.querySelectorAll("h2"), h => h.textContent)).toEqual(["Compute index", "COMPUTE-PERP", "Compute Oracle Challenge rules", "Arena", "Agents"]);
   const how = container.querySelector("#compute-index")!;
   expect(Array.from(how.querySelectorAll("summary"), d => d.textContent)).toEqual(["What is a quote?", "How do input and output prices become one price?", "When does a seller count as up?", "How is a model's price set?", "How often are prices read?", "How is the index calculated?", "What is the routed price?", "When is data marked stale?"]);
   expect(Array.from(container.querySelectorAll("details")).map(d => d.open)).toEqual([true, ...Array(14).fill(false)]);

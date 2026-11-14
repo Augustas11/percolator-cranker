@@ -108,15 +108,17 @@ export function ChallengeRules() {
   const rows: [string, string][] = [
     ["Entry", "One WebAssembly module, compiled from Rust, AssemblyScript, C or Zig, exporting step(snapshot), which returns a price or holds. The rule may keep state between steps."],
     ["Input", `Each step gets the time and every quote for ${PERP.benchmark}: provider, precision, input price, output price, up or down, and 30-minute uptime.`],
-    ["Limits", "1 MB module, 64 KB of state, a fixed compute budget per step. No clock, no network, no randomness. A module that traps or runs out of budget holds its last price."],
-    ["Rounds", "Weekly. Each entrant's last submission before the close is frozen and hashed, and the list of hashes is published at the close."],
-    ["Scoring data", "The 7 days after the close: real 5-minute market data nobody had at submission, plus injected attacks seeded from a public value fixed after the close (the hash of a named Solana block)."],
+    ["Limits", "1 MB of memory, 64 KB of state, a fixed compute budget per step. No clock, no network, no randomness. A module that traps or runs out of budget holds its last price for that step; 100 traps in one series disqualify it."],
+    ["Rounds", site.challenge.apiBase || !site.challenge.entryRepo
+      ? "Weekly. Each entrant's last submission before the close is frozen and hashed, and the list of hashes is published at the close."
+      : "Weekly. Enter by pull request to the public repository, adding your rule's source to the template's examples. The last commit of an account's most recent pull request before the close is the entry; it is built, hashed, and the list of hashes is published at the close. Pull requests opened before the round opens are not scored."],
+    ["Scoring data", "The 7 days after the close: real 5-minute market data nobody had at submission, plus injected attacks drawn from a seed fixed after the close and published with the results."],
     ["Attacks", "A fake listing, a promo price, half the sellers offline, and a 10× relisting. A must-follow term checks the rule still tracks real price moves."],
     ["Score", "One number: the paired gain over the live rule in log units, higher is better, with its standard error. An entry beats the rule only when gain is more than twice the error."],
     ["Loss terms", "jump (moves not caused by price changes), spoof, promo, down, relist, follow and reference distance. Weights are fixed for the season."],
-    ["Boards", "A round board, and a season board ranked by mean rank over rounds (two rounds or more). Each row shows handle, human or agent, gain and error, the per-term losses, module hash and rounds entered."],
+    ["Boards", (site.challenge.apiBase ? "" : "Posted in the repository after each round. ") + "A round board, and a season board ranked by mean rank over rounds (two rounds or more). Each row shows handle, human or agent as declared in the entry, gain and error, the per-term losses, module hash and rounds entered."],
     ["Published", "After each round: inputs, seeds, per-term losses and the frozen modules of the top 10, so anyone can re-run the board."],
-    ["Fair play", "One frozen submission per account per round. Linked accounts with the same module hash count once. The top 3 of each round are checked for scorer exploits before the result is final; a confirmed exploit is patched, published and re-scored."],
+    ["Fair play", "One entry per GitHub account per round. Identical modules from different accounts count once. The top 3 of each round are checked for scorer exploits before the result is final; a confirmed exploit is patched, published and re-scored."],
     ["Reward", `The season's best rule becomes the rule ${PERP.name} settles on, after an independent review (no scorer exploit, readable source disclosed), with its author credited.${site.challenge.prizes ? ` Prizes: ${site.challenge.prizes}.` : ""}`],
   ];
   return <section id="challenge" className="cx-section" aria-labelledby="challenge-rules-heading">
@@ -151,7 +153,9 @@ export default function Challenge({ feed, board = null }: { feed: ComputeFeedCli
     {(opens !== null || firstClose !== null) && <dl className="ch-dates" aria-label="Dates">
       {opens !== null && <div><dt>Opens</dt><dd>{when(opens)}</dd></div>}
       {firstClose !== null && <div><dt>First close</dt><dd>{when(firstClose)}</dd></div>}
-      {next !== null && <div className="ch-next"><dt>Next close in</dt><dd><time dateTime={new Date(next).toISOString()}>{countdown(next - now)}</time></dd></div>}
+      {opens !== null && now < opens
+        ? <div className="ch-next"><dt>Opens in</dt><dd><time dateTime={new Date(opens).toISOString()}>{countdown(opens - now)}</time></dd></div>
+        : next !== null && <div className="ch-next"><dt>Next close in</dt><dd><time dateTime={new Date(next).toISOString()}>{countdown(next - now)}</time></dd></div>}
     </dl>}
 
     <section className="cx-section" aria-labelledby="ch-why">
@@ -167,7 +171,8 @@ export default function Challenge({ feed, board = null }: { feed: ComputeFeedCli
       <section className="cx-section" aria-labelledby="ch-submit">
         <h2 id="ch-submit">What you submit</h2>
         <p>A small sandboxed program in WebAssembly with one function: it reads the current quotes and returns a price.</p>
-        <ul className="ch-limits"><li><b>1 MB</b> module</li><li><b>Fixed</b> compute budget per step</li><li><b>No</b> network or clock</li></ul>
+        <ul className="ch-limits"><li><b>1 MB</b> memory</li><li><b>Fixed</b> compute budget per step</li><li><b>No</b> network or clock</li></ul>
+        {!cfg.apiBase && cfg.entryRepo && <p className="ch-enter">Enter with a <a href={`${cfg.entryRepo}/pulls`}>pull request</a> that adds your rule to the template.</p>}
       </section>
       <section className="cx-section" aria-labelledby="ch-score">
         <h2 id="ch-score">How it is scored</h2>
@@ -180,16 +185,20 @@ export default function Challenge({ feed, board = null }: { feed: ComputeFeedCli
       </section>
       <section className="cx-section" aria-labelledby="ch-win">
         <h2 id="ch-win">What you win</h2>
-        <p>The best oracle runs the live market, with your name on it.</p>
+        <p>The best oracle runs the live market after an independent review, with your name on it.</p>
         {cfg.prizes && <p className="ch-prizes">Prizes: {cfg.prizes}</p>}
       </section>
       <section className="cx-section" aria-labelledby="ch-agents">
         <h2 id="ch-agents">Agents and swarms welcome</h2>
         <p>An agent can enter on its owner's behalf and iterate against the practice set before the close.</p>
         {cfg.apiBase && <p>API: <code>{cfg.apiBase}</code>. MCP tools: <code>challenge_submit</code>, <code>challenge_status</code>.</p>}
-        {cfg.practiceCmd && <><p className="cx-k">Score a rule locally</p><Code>{cfg.practiceCmd}</Code></>}
       </section>
     </div>
+
+    {cfg.practiceCmd && <section className="cx-section ch-try" aria-labelledby="ch-try">
+      <h2 id="ch-try">Score a rule locally</h2>
+      <Code>{cfg.practiceCmd}</Code>
+    </section>}
 
     {cfg.apiBase && load && <section className="cx-section" aria-labelledby="ch-board">
       <h2 id="ch-board">Leaderboard</h2>
