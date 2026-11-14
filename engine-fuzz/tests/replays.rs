@@ -128,6 +128,9 @@ fn upstream_252_provider_leak_is_fixed() {
     // The provider recovers its principal; nothing is retired.
     assert_clean(&r);
     assert_eq!(r.retired, 0);
+    assert_eq!(r.provider_out, 100_000);
+    let outs: Vec<u128> = r.accounts.iter().map(|a| a.out()).collect();
+    assert_eq!(outs, vec![1_000_000, 992_000, 1_008_000]);
 }
 
 #[test]
