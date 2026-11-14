@@ -78,13 +78,13 @@ export function widestModels(market: ComputeMarket, n = 6) {
 /** Each live quote divided by its model's median: how far sellers sit from the going rate. */
 export function spreadRatios(market: ComputeMarket) {
   const ratios: number[] = [];
-  for (const m of market.models) if (m.median > 0 && !m.stale) for (const q of m.quotes) if (q.up && q.price !== null && q.price > 0) ratios.push(q.price / m.median);
+  for (const m of market.models) if (m.median > 0 && !m.stale) for (const q of m.quotes) if (q.up && q.price !== null && q.price > 0 && Number.isFinite(q.price / m.median)) ratios.push(q.price / m.median);
   return ratios.sort((a, b) => a - b);
 }
 
 const fmtRatio = (r: number) => (r >= 10 ? r.toFixed(0) : r >= 1 ? r.toFixed(1) : r.toFixed(2)) + "\u00d7";
 
-/** Beeswarm of every live quote as a multiple of its model's median, on a log axis. The plot grows to fit the tallest stack, so no dot is cut. */
+/** Beeswarm of every live quote as a multiple of its model's median, on a log axis. Fixed height; every quote is drawn. */
 export function SpreadSwarm({ market }: { market: ComputeMarket }) {
   const ratios = spreadRatios(market);
   if (!ratios.length) return null;
@@ -94,14 +94,15 @@ export function SpreadSwarm({ market }: { market: ComputeMarket }) {
   // A fixed plot: a column that is full passes its extra dots to the next free column on the dot's own side of the
   // median, so every quote is drawn and the pile at exactly 1× widens instead of running off the top.
   const H = 240, base = H - 26, room = Math.floor((base - 8) / step);
-  const stacks = new Map<number, number>();
+  const stacks = new Map<number, number>(), maxCol = Math.floor((W - 4) / col);
   const side = (v: number) => v < 0.995 ? -1 : v > 1.005 ? 1 : 0;
   const order = [...ratios].sort((p, q) => Math.abs(Math.log(p)) - Math.abs(Math.log(q)));
   let flip = 1;
   const dots = order.map(v => {
     const home = Math.round(x(v) / col), dir = side(v) || (flip = -flip);
     let c = home;
-    while ((stacks.get(c) ?? 0) >= room) c += dir;
+    // Past the plot's edge there is nowhere to spill: stack on the home column instead.
+    while ((stacks.get(c) ?? 0) >= room) { c += dir; if (c < 1 || c > maxCol) { c = home; break; } }
     const n = stacks.get(c) ?? 0;
     stacks.set(c, n + 1);
     return { cx: c * col, n, v };

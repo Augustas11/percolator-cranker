@@ -22,12 +22,8 @@
 .site .arena-state { margin: 0; color: var(--site-secondary); font-size: 15px; }
 .site .arena-state p { margin: 0 0 14px; }
 .site .arena-actions, .site .arena-cta { display: flex; flex-wrap: wrap; gap: 12px; }
-.site .arena-rules { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
-.site .arena-rules li { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 14px; padding: 11px 0; border-top: 1px solid var(--site-line-6); font-size: 15px; color: var(--site-secondary); }
-.site .arena-rules b { color: var(--site-text); font-weight: 600; }
 @media (max-width: 720px) {
   .site .arena-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .site .arena-rules li { grid-template-columns: 1fr; gap: 2px; }
-}
+  }
 .site .board-card .arena-state { padding: 20px 24px; }
 .site .board-card .arena-board td a { color: var(--site-text); }
