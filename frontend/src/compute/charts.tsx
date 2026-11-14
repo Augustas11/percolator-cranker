@@ -91,14 +91,21 @@ export function SpreadSwarm({ market }: { market: ComputeMarket }) {
   const W = 640, r = 2.6, col = r * 2 + 0.6, step = col;
   const lo = Math.min(0.25, niceDown(ratios[0])), hi = Math.max(4, niceUp(ratios[ratios.length - 1]));
   const x = (v: number) => 8 + Math.log(v / lo) / Math.log(hi / lo) * (W - 16);
+  // A fixed plot: a column that is full passes its extra dots to the next free column on the dot's own side of the
+  // median, so every quote is drawn and the pile at exactly 1× widens instead of running off the top.
+  const H = 240, base = H - 26, room = Math.floor((base - 8) / step);
   const stacks = new Map<number, number>();
-  const dots = ratios.map(v => {
-    const c = Math.round(x(v) / col), n = stacks.get(c) ?? 0;
+  const side = (v: number) => v < 0.995 ? -1 : v > 1.005 ? 1 : 0;
+  const order = [...ratios].sort((p, q) => Math.abs(Math.log(p)) - Math.abs(Math.log(q)));
+  let flip = 1;
+  const dots = order.map(v => {
+    const home = Math.round(x(v) / col), dir = side(v) || (flip = -flip);
+    let c = home;
+    while ((stacks.get(c) ?? 0) >= room) c += dir;
+    const n = stacks.get(c) ?? 0;
     stacks.set(c, n + 1);
     return { cx: c * col, n, v };
   });
-  const tallest = Math.max(...stacks.values());
-  const H = Math.max(230, tallest * step + 48), base = H - 26;
   const q1 = quantile(ratios, 0.25), q3 = quantile(ratios, 0.75), top = ratios[ratios.length - 1], bottom = ratios[0];
   const marks = [0.25, 0.5, 1, 2, 4, 8, 16].filter(t => t >= lo && t <= hi);
   const label = `${ratios.length} live quotes, each divided by its model's median price. Half sit between ${fmtRatio(q1)} and ${fmtRatio(q3)} the median. Cheapest ${fmtRatio(bottom)}, dearest ${fmtRatio(top)}.`;
