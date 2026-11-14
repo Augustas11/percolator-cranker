@@ -362,7 +362,6 @@ function Flop({ latest, market, now }: { latest: ComputeLatest; market: ComputeM
       ["Buyer accounts", flop.buyers ?? "—"],
       ["Miners", flop.miners ?? "—"],
       ["Jobs settled", flop.prints ?? "—"],
-      ["Gateway share of compute", flop.gateway_share == null ? "—" : `${Math.round(flop.gateway_share * 100)}%`],
     ] as const).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
     {flop.stale && <p className="note">Not computed right now: {flop.stale}.</p>}
   </article>;

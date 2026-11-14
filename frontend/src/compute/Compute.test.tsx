@@ -179,8 +179,8 @@ test("the perp and FLOP panels show the settlement price, its sellers and FLOP's
   const flop = container.querySelector('[aria-labelledby="compute-flop-heading"]')!;
   expect(Array.from(flop.querySelectorAll(".flop-parity .flop-facts dd"), v => v.textContent)).toEqual([usd(marketFixture().flop!.parity!.market_usd_per_bn_gn), "0.00291"]);
   expect(flop.querySelector(".flop-window")?.textContent).toBe("Last 6 hours");
-  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dt")).map(v => v.textContent)).toEqual(["Buyer accounts", "Miners", "Jobs settled", "Gateway share of compute"]);
-  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dd")).map(v => v.textContent)).toEqual(["3", "34", "185", "50%"]);
+  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dt")).map(v => v.textContent)).toEqual(["Buyer accounts", "Miners", "Jobs settled"]);
+  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dd")).map(v => v.textContent)).toEqual(["3", "34", "185"]);
   expect(flop.textContent).not.toContain("FLOP's gateway buys on behalf");
   expect(flop.textContent).not.toContain("The perp settles on seller prices, not on this rate.");
 });

@@ -14,7 +14,7 @@ export default function Docs({ feed }: { feed: ComputeFeedClient | null }) {
   useEffect(() => {
     const id = window.location.hash.slice(1);
     if (!id) return;
-    const timer = setTimeout(() => document.getElementById(id)?.scrollIntoView(), 0);
+    const timer = setTimeout(() => document.getElementById(id)?.scrollIntoView?.(), 0);
     return () => clearTimeout(timer);
   }, [market, latest]);
   // A hash naming a group opens that group's first question; otherwise only the very first one opens.
