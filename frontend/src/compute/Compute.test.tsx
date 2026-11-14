@@ -6,8 +6,8 @@ import Docs from "../pages/Docs";
 import type { ComputeFeedClient, ComputeMarket } from "./client";
 import { MockComputeFeedClient } from "./mock";
 import { marketFixture } from "./fixture";
-import { logScale, typicalPrice, upPriced } from "./charts";
-import { count, usd, usdSmall } from "./format";
+import { SpreadRanks, logScale, typicalPrice, upPriced, widestModels } from "./charts";
+import { count, times, usd, usdSmall } from "./format";
 import { site } from "../site/config";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -42,12 +42,21 @@ test("renders the index, its scale and every section from the fixture", async ()
   const typical = typicalPrice(market)!;
   expect(container.querySelector(".cx-label")?.textContent).toBe("Median price to run an open model");
   expect(container.querySelector(".cx-price")?.textContent).toBe(`${usd(typical.median)}per 1M tokens`);
-  expect(container.querySelector(".cx-range")?.textContent).toBe(`Cheapest model ${typical.cheapest.name} ${usd(typical.cheapest.median)} · dearest ${typical.dearest.name} ${usd(typical.dearest.median)}`);
+  expect(container.querySelector(".cx-range")).toBeNull();
   expect(Array.from(container.querySelectorAll(".cx-proof li"), li => li.textContent)).toEqual([`${count(market.index.n_quotes_up)} live quotes`, `${count(market.index.n_providers)} providers`, `${count(market.models.length)} models`]);
   expect(typical.quotes).toBe(market.models.filter(m => !m.thin).reduce((n, m) => n + upPriced(m).length, 0));
-  expect(container.querySelector(".cx-indexstat")?.textContent).toBe(`Index ${market.index.level!.toFixed(2)}`);
+  expect(container.querySelector(".cx-indexstat")).toBeNull();
   expect(container.querySelector(".cx-spread-line")?.textContent).toBe("The same model costs up to 21\u00d7 more depending on the seller.");
-  expect(container.querySelector(".cx-spread-eg")?.textContent).toBe(`GLM 5.3: $0.150 to $3.18 per 1M tokens across ${upPriced(market.models.find(m => m.name === "GLM 5.3")!).length} sellers up.`);
+  expect(container.querySelector(".cx-spread-eg")).toBeNull();
+  const ranks = Array.from(container.querySelectorAll(".cx-hero-side .ranks li"));
+  const wide = widestModels(market);
+  expect(ranks).toHaveLength(wide.length);
+  expect(ranks.map(li => li.querySelector(".rk-name")?.textContent)).toEqual(wide.map(m => m.name));
+  expect(ranks[0].classList.contains("is-top")).toBe(true);
+  expect(ranks[0].querySelector(".rk-name")?.textContent).toBe("GLM 5.3");
+  expect(ranks[0].querySelector(".rk-range")?.textContent).toBe(`${usd(wide[0].min)}\u2013${usd(wide[0].max)}`);
+  expect(ranks[0].querySelector(".rk-x")?.textContent).toBe(times(wide[0].min, wide[0].max));
+  expect(container.querySelector(".cx-hero-side .cx-spread-line strong")?.textContent).toBe(ranks[0].querySelector(".rk-x")?.textContent);
   // Who it is for: each entry jumps to a section that exists.
   const who = Array.from(container.querySelectorAll(".cx-who a"));
   expect(who.map(a => a.getAttribute("href"))).toEqual(["#board", "#providers", "#perp"]);
@@ -57,8 +66,8 @@ test("renders the index, its scale and every section from the fixture", async ()
   // The perp sits right after the board, before providers.
   const order = ["#board", "#perp", "#providers"].map(id => Array.from(container.querySelectorAll("section, article")).indexOf(container.querySelector(id)!));
   expect(order).toEqual([...order].sort((a, b) => a - b));
-  // Two index points: the distribution, not a dead line.
-  expect(container.querySelector(".swarm svg")?.getAttribute("aria-label")).toMatch(/^\d+ live quotes, each divided by its model's median price\. Half sit between/);
+  // The hero no longer carries an index line.
+  expect(container.querySelector(".swarm")).toBeNull();
   expect(container.querySelector(".cx-index-line")).toBeNull();
   expect(text).not.toMatch(/\b(?:mock|sample)\b/i);
   for (const heading of ["Price by model", "Providers", "Price moves"]) expect(text).toContain(heading);
@@ -217,9 +226,9 @@ test("a failed market.json still shows the perp panel", async () => {
 test("marks a stale market feed and a stale settlement price", async () => {
   const now = Date.now();
   const container = await render(liveFeed(now, m => ({ ...m, generated_ms: now - 45 * 60_000 })));
-  expect(container.querySelector(".cx-hero .compute-stale")?.textContent).toMatch(/^stale: /);
-  expect(container.querySelector('.cx-hero .compute-stale')?.getAttribute("title")).toBe("No new prices read for over 30 minutes.");
-  expect(container.querySelector(".cx-hero .compute-stale .sr-only")?.textContent).toBe(": No new prices read for over 30 minutes.");
+  expect(container.querySelector(".cx-hero p.cx-updated.is-stale")).not.toBeNull();
+  expect(container.querySelector(".cx-hero .cx-updated .sr-only")?.textContent).toBe(" (stale: No new prices read for over 30 minutes.)");
+  expect(container.querySelector(".cx-hero .compute-stale")).toBeNull();
   await cleanup?.();
   const mock = new MockComputeFeedClient(Date.now(), 45 * 60_000);
   const c2 = await render({ latest: () => mock.latest(), history: () => mock.history(), market: () => mock.market() });
@@ -230,14 +239,15 @@ test("marks a stale market feed and a stale settlement price", async () => {
 test("staleness follows data_ms, not when the file was written", async () => {
   const now = Date.now();
   let container = await render(liveFeed(now, m => ({ ...m, generated_ms: now, data_ms: now - 45 * 60_000 })));
-  expect(container.querySelector(".cx-hero .compute-stale")).not.toBeNull();
+  expect(container.querySelector(".cx-hero .cx-updated.is-stale")).not.toBeNull();
   expect(container.querySelector(".cx-updated")?.textContent).toContain("Updated 45 min ago");
   await cleanup?.();
   container = await render(liveFeed(now, m => ({ ...m, generated_ms: now - 45 * 60_000, data_ms: now - 60_000 })));
-  expect(container.querySelector(".cx-hero .compute-stale")).toBeNull();
+  expect(container.querySelector(".cx-hero .cx-updated")).not.toBeNull();
+  expect(container.querySelector(".cx-hero .cx-updated.is-stale")).toBeNull();
   await cleanup?.();
   container = await render(liveFeed(now, m => ({ ...m, data_ms: null })));
-  expect(container.querySelector(".cx-hero .compute-stale")?.getAttribute("title")).toBe("The market feed has no recent read.");
+  expect(container.querySelector(".cx-hero .cx-updated.is-stale")?.textContent).toMatch(/^No recent update \(stale: /);
 });
 
 test("a stale model shows no green up dots", async () => {
@@ -297,12 +307,12 @@ test("latest.json from the future or a stopped feed is stale", async () => {
   expect(container.querySelector('.compute-stale[title="The latest price has a time in the future."]')).not.toBeNull();
 });
 
-test("an index with 12 or more points draws its line with a since date", async () => {
+test("the hero shows no index line or index change, however long the series", async () => {
   const now = Date.now();
   const container = await render(liveFeed(now, m => ({ ...m, index: { ...m.index, change_24h_pct: 1.234, change_7d_pct: -0.5, series: Array.from({ length: 24 }, (_, i) => [now - (24 - i) * 3_600_000, 100 + i / 10] as [number, number]) } })));
-  expect(container.querySelector(".cx-index-line svg")).not.toBeNull();
-  expect(container.querySelector(".cx-index-line figcaption")).toBeNull();
-  expect(container.querySelector(".cx-indexstat")?.textContent).toMatch(/· 24 h \+1\.2% · 7 d \u22120\.5%$/);
+  expect(container.querySelector(".cx-index-line")).toBeNull();
+  expect(container.querySelector(".cx-indexstat")).toBeNull();
+  expect(container.querySelector(".cx-hero")?.textContent).not.toMatch(/24 h|7 d/);
 });
 
 test("a flop_standin price still shows the FLOP panel without the removed explainer", async () => {
@@ -432,23 +442,27 @@ const stripRouted = (m: ComputeMarket): ComputeMarket => {
 };
 const panel = (container: HTMLElement, id: string) => container.querySelector(`[aria-labelledby="${id}"]`)!;
 
-test("hero: three labelled numbers for the benchmark model, each hidden when absent", async () => {
+test("hero: labelled numbers for the benchmark model, each hidden when absent", async () => {
   const now = Date.now(), market = marketFixture(now);
   const bench = market.models.find(m => m.id === "qwen/qwen3.8-27b")!;
   let container = await render(liveFeed(now));
   const block = container.querySelector(".cx-bench")!;
   expect(block.querySelector(".cx-k")?.textContent).toBe("Qwen3.8-27B · per 1M tokens");
-  expect(Array.from(block.querySelectorAll("dt"), d => d.textContent)).toEqual(["What a request pays now", "Median list price", "Perp mark"]);
+  expect(Array.from(block.querySelectorAll("dt"), d => d.textContent)).toEqual(["What a request pays now", "Perp mark"]);
   const dds = Array.from(block.querySelectorAll("dd"), d => d.querySelector("strong")?.textContent);
-  expect(dds).toEqual([usd(bench.routed!.price), usd(bench.median), "$0.3036"]);
+  expect(dds).toEqual([usd(bench.routed!.price), "$0.3036"]);
   expect(block.querySelector(".is-main dd")?.textContent).toContain("1 h ");
   expect(block.querySelector(".is-main svg.spark")).not.toBeNull();
   expect(block.textContent).not.toContain("List prices are what sellers post");
+  expect(block.textContent).not.toContain("Median list price");
+  const go = block.querySelector("a.cx-bench-go");
+  expect(go?.getAttribute("href")).toBe("/trade");
+  expect(go?.textContent).toContain("Trade COMPUTE-PERP");
   // The headline above it stays the cross-model median, under its own label.
   expect(container.querySelector(".cx-label")?.textContent).toBe("Median price to run an open model");
   await cleanup?.();
   container = await render(liveFeed(now, stripRouted));
-  expect(Array.from(container.querySelectorAll(".cx-bench dt"), d => d.textContent)).toEqual(["Median list price", "Perp mark"]);
+  expect(Array.from(container.querySelectorAll(".cx-bench dt"), d => d.textContent)).toEqual(["Perp mark"]);
   expect(container.querySelector(".cx-bench .spark")).toBeNull();
   await cleanup?.();
   container = await render(liveFeed(now, m => ({ ...stripRouted(m), models: [] })));
@@ -457,7 +471,7 @@ test("hero: three labelled numbers for the benchmark model, each hidden when abs
   const feed = liveFeed(now, m => m);
   vi.spyOn(feed, "latest").mockRejectedValue(new Error("down"));
   container = await render(feed);
-  expect(Array.from(container.querySelectorAll(".cx-bench dt"), d => d.textContent)).toEqual(["What a request pays now", "Median list price"]);
+  expect(Array.from(container.querySelectorAll(".cx-bench dt"), d => d.textContent)).toEqual(["What a request pays now"]);
   // A null 1 h change is not shown.
   await cleanup?.();
   container = await render(liveFeed(now, m => ({ ...m, models: m.models.map(x => x.routed ? { ...x, routed: { ...x.routed, change_1h_pct: null } } : x) })));
@@ -578,4 +592,20 @@ test("FLOP parity without the routed figure labels everything as list-based", as
   expect(flop.textContent).not.toContain("from what requests pay");
   expect(Array.from(flop.querySelectorAll(".flop-parity .flop-facts dt"), d => d.textContent)).not.toContain("At list prices");
   expect(flop.querySelector(".flop-parity .flop-facts small")?.textContent).toMatch(/, from list prices$/);
+});
+
+test("SpreadRanks orders by dearest/cheapest, skips thin and stale models, and caps at six", async () => {
+  const market = marketFixture(Date.now());
+  const base = market.models[0];
+  const mk = (id: string, min: number, max: number, extra: object = {}) => ({ ...base, id, name: id, min, max, median: (min + max) / 2, thin: false, stale: false, ...extra });
+  const models = [mk("a", 1, 2), mk("b", 1, 9), mk("c", 1, 5), mk("thin", 1, 100, { thin: true }), mk("stale", 1, 90, { stale: true }), mk("flat", 1, 1), ...["d", "e", "f", "g"].map((id, i) => mk(id, 1, 3 + i / 10))];
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  cleanup = async () => { await act(async () => { root.unmount(); }); };
+  await act(async () => { root.render(<SpreadRanks market={{ ...market, models }} />); });
+  const names = Array.from(container.querySelectorAll(".ranks li .rk-name"), n => n.textContent);
+  expect(names).toEqual(["b", "c", "g", "f", "e", "d"]);
+  expect(container.querySelector(".ranks li")?.classList.contains("is-top")).toBe(true);
+  expect(container.querySelectorAll(".ranks li.is-top")).toHaveLength(1);
+  expect(container.querySelector(".ranks li .rk-x")?.textContent).toBe(times(1, 9));
 });

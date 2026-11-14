@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket, MarketModel, MixKey } from "../compute/client";
-import { Axis, DEFAULT_MIX, benchmarkRouted, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadSwarm, computeSpread, hasMixes, marketScale, medianAt, sinceLabel, typicalPrice, upPriced, widest, type LogScale } from "../compute/charts";
+import { Axis, DEFAULT_MIX, benchmarkRouted, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadRanks, computeSpread, hasMixes, marketScale, medianAt, sinceLabel, typicalPrice, widest, type LogScale } from "../compute/charts";
 import { addressUrl, ago, clock, count, direction, pct, short, times, txUrl, usd, usd4, usdSmall, when } from "../compute/format";
 import { latestStale, marketDataTime, marketStale, modelStale, useComputeFeed } from "../compute/useFeed";
 import FeedBoundary from "../compute/FeedBoundary";
@@ -41,11 +41,11 @@ function Skeleton() {
   </div>;
 }
 
-/** The benchmark model's three numbers side by side, each under its own label: what a request pays, the median list price, the perp mark. */
+/** The benchmark model: what a request pays now and the perp mark. */
 function Benchmark({ market, latest }: { market: ComputeMarket; latest: ComputeLatest | null }) {
   const b = benchmarkRouted(market);
   const mark = typeof latest?.mark_usd === "number" && Number.isFinite(latest.mark_usd) ? latest.mark_usd : null;
-  if (b.price === null && b.median === null && mark === null) return null;
+  if (b.price === null && mark === null) return null;
   return <section className="cx-bench" aria-label={`${b.name} prices`}>
     <p className="cx-k">{b.name} · per 1M tokens</p>
     <dl className="cx-bench-nums">
@@ -54,9 +54,9 @@ function Benchmark({ market, latest }: { market: ComputeMarket; latest: ComputeL
         <dd><strong>{usd(b.price)}</strong>{b.change1h !== null && <span className="cx-bench-chg">1 h <Change value={b.change1h} /></span>}</dd>
         <Sparkline series={b.series} label={`${b.name} routed price ${sinceLabel(b.series)}.`} className="spark spark-sm" />
       </div>}
-      {b.median !== null && <div><dt>Median list price</dt><dd><strong>{usd(b.median)}</strong></dd></div>}
       {mark !== null && <div><dt>Perp mark</dt><dd><strong>{usd4(mark)}</strong></dd></div>}
     </dl>
+    {site.computeTrade?.startsWith("/") && <Link className="button-link cx-bench-go" to={site.computeTrade}>Trade {PERP.name} <Arrow /></Link>}
   </section>;
 }
 
@@ -65,8 +65,6 @@ function Hero({ market, latest, now, error, mix, onMix }: { market: ComputeMarke
   const stale = marketStale(market, now);
   const wide = widest(market);
   const typical = typicalPrice(market, mix);
-  const level = index.level;
-  const hasSeries = level !== null && index.series.length >= MIN_SERIES_POINTS;
   const read = marketDataTime(market);
   return <header className="cx-hero" aria-labelledby="compute-title">
     <div className="cx-hero-main">
@@ -74,30 +72,22 @@ function Hero({ market, latest, now, error, mix, onMix }: { market: ComputeMarke
       {typical ? <>
         <p className="cx-label">Median price to run an open model</p>
         <div className="cx-price"><strong>{usd(typical.median)}</strong><span>per 1M tokens</span></div>
-        <p className="cx-range">Cheapest model <b>{typical.cheapest.name} {usd(typical.at(typical.cheapest))}</b> · dearest <b>{typical.dearest.name} {usd(typical.at(typical.dearest))}</b></p>
         {hasMixes(market) && <MixSwitch mix={mix} onMix={onMix} />}
       </> : <p className="cx-label">{market.models.length ? "No model has enough sellers for a price right now." : "No prices right now."}</p>}
-      {typical && <ul className="cx-proof">
-        <li><b>{count(index.n_quotes_up)}</b> live quotes</li>
-        <li><b>{count(index.n_providers)}</b> providers</li>
-        <li><b>{count(market.models.length)}</b> models</li>
-      </ul>}
-      {hasSeries && <figure className="cx-index-line"><Sparkline series={index.series} label={`Index level ${sinceLabel(index.series)}: from ${index.series[0][1].toFixed(2)} to ${level?.toFixed(2)}.`} className="spark" /></figure>}
-      <p className="cx-updated">
-        {level !== null && <span className="cx-indexstat">Index {level.toFixed(2)}{index.change_24h_pct !== null && <> · 24 h <Change value={index.change_24h_pct} /></>}{index.change_7d_pct !== null && <> · 7 d <Change value={index.change_7d_pct} /></>}</span>}
-        {read !== null && <span>Updated {ago(read, now)} · {clock(read)} UTC</span>}
-        {stale && <Stale why={stale} />}
-      </p>
+      <div className="cx-foot">
+        {typical && <ul className="cx-proof">
+          <li><b>{count(index.n_quotes_up)}</b> live quotes</li>
+          <li><b>{count(index.n_providers)}</b> providers</li>
+          <li><b>{count(market.models.length)}</b> models</li>
+        </ul>}
+        {(read !== null || stale) && <p className={`cx-updated${stale ? " is-stale" : ""}`}>{read !== null ? <>Updated {ago(read, now)} · {clock(read)} UTC</> : "No recent update"}{stale && <span className="sr-only"> (stale: {stale})</span>}</p>}
+      </div>
       {error && <p className="note" role="status">Could not refresh ({error}). Showing the last data received.</p>}
     </div>
-    <div className="cx-hero-side">
-      {wide && <div className="cx-widest">
-        <p className="cx-spread-line">The same model costs up to <strong>{times(wide.min, wide.max)}</strong> more depending on the seller.</p>
-        <p className="cx-spread-eg">{wide.name}: {usd(wide.min)} to {usd(wide.max)} per 1M tokens across {upPriced(wide).length} sellers up.</p>
-      </div>}
-      <p className="cx-k">Every live quote against its model's median</p>
-      <SpreadSwarm market={market} />
-    </div>
+    {wide && <div className="cx-hero-side">
+      <p className="cx-spread-line">The same model costs up to <strong>{times(wide.min, wide.max)}</strong> more depending on the seller.</p>
+      <SpreadRanks market={market} />
+    </div>}
     <Benchmark market={market} latest={latest} />
   </header>;
 }
