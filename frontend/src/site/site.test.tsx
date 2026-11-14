@@ -408,13 +408,13 @@ test("home leads with the compute index, then the perp", async () => {
   const card = container.querySelector(".compute-card")!;
   const routed = market.models.find(m => m.id === "qwen/qwen3.8-27b")!.routed!;
   expect(card.querySelector(".cc-level")?.textContent).toBe(`What a request pays now, Qwen3.8-27B${usd(routed.price)}per 1M tokens1 h ${pct(routed.change_1h_pct)}`);
-  expect(card.querySelector(".cc-meta")?.textContent).toBe(`Median across open models ${usd(typicalPrice(market)!.median)} · ${market.index.n_quotes_up} quotes up · ${market.index.n_providers} providers · ${typicalPrice(market)!.models} models`);
+  expect(card.querySelector(".cc-meta")?.textContent).toBe(`Median across open models ${usd(typicalPrice(market)!.median)} · ${market.index.n_quotes_up} quotes up · ${market.index.n_providers} providers · ${market.models.length} models`);
   expect(card.querySelector(".cc-index")).toBeNull();
   expect(container.querySelector(".announcement")).toBeNull();
   expect(card.querySelectorAll(".cc-models .strip")).toHaveLength(4);
   expect(card.querySelector(".cc-perp .market-price")?.textContent).toBe("$0.3036 / 1M tokens");
   expect(card.textContent).toContain("Settlement price · pushed 3 min ago · 2 of 2 sellers up");
-  expect(container.querySelector(".hero-description")?.textContent).toContain(`What open-model inference costs right now: ${market.index.n_quotes_up} quotes up from ${market.index.n_providers} providers on ${typicalPrice(market)!.models} models.`);
+  expect(container.querySelector(".hero-description")?.textContent).toContain(`What open-model inference costs right now: ${market.index.n_quotes_up} quotes up from ${market.index.n_providers} providers on ${market.models.length} models.`);
   expect(container.querySelector('.home-hero .hero-primary')?.getAttribute("href")).toBe("/compute");
   expect(container.querySelector(".hero-credit")?.textContent).toBe("Built for perp traders and for agents on FLOP Network.");
   const sections = Array.from(container.querySelectorAll("main > section")).map(s => s.className);

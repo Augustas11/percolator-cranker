@@ -31,7 +31,7 @@ const Up = ({ up, stale = false }: { up: boolean; stale?: boolean }) => {
   return <span className={`state is-${state}`}><i aria-hidden="true" /><span className="state-t">{state}</span></span>;
 };
 const Change = ({ value }: { value: number | null }) => <span className={`chg is-${direction(value)}`}>{pct(value)}</span>;
-const Stale = ({ why }: { why: string }) => <span className="badge compute-stale" title={why}>stale</span>;
+const Stale = ({ why }: { why: string }) => <span className="badge compute-stale" title={why}>stale<span className="sr-only">: {why}</span></span>;
 
 function Skeleton() {
   return <div className="cx-skeleton" aria-busy="true">
@@ -80,7 +80,7 @@ function Hero({ market, latest, now, error, mix, onMix }: { market: ComputeMarke
       {typical && <ul className="cx-proof">
         <li><b>{count(index.n_quotes_up)}</b> live quotes</li>
         <li><b>{count(index.n_providers)}</b> providers</li>
-        <li><b>{count(typical.models)}</b> models</li>
+        <li><b>{count(market.models.length)}</b> models</li>
       </ul>}
       {hasSeries && <figure className="cx-index-line"><Sparkline series={index.series} label={`Index level ${sinceLabel(index.series)}: from ${index.series[0][1].toFixed(2)} to ${level?.toFixed(2)}.`} className="spark" /></figure>}
       <p className="cx-updated">
@@ -209,7 +209,7 @@ function Board({ market, now, mix }: { market: ComputeMarket; now: number; mix: 
     <div className="cx-section-head">
       <div>
         <h2 id="compute-board-heading">Price by model</h2>
-        <p className="cx-sub">USD per 1M tokens · {mixed ? ratioOf(mix) : "15:1"} input:output</p>
+        <p className="cx-sub">USD per 1M tokens</p>
       </div>
       <div className="cx-sort" role="group" aria-label="Sort models">{sorts.filter(([key]) => (key !== "gn" || showGn) && (key !== "paid" || showPaid)).map(([key, label]) => <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>{label}</button>)}</div>
     </div>
@@ -219,7 +219,7 @@ function Board({ market, now, mix }: { market: ComputeMarket; now: number; mix: 
     </div>
     <div className={`board${market.models.some(m => m.change_24h_pct !== null) ? "" : " no-chg"}${showGn ? " has-gn" : ""}${showPaid ? " has-paid" : ""}`}>
       <div className="board-cols" aria-hidden="true">
-        <span className="c-model">Model</span><span className="c-sellers">Up</span><span className="c-strip"><Axis scale={scale} /></span><span className="c-median">Median</span>{showPaid && <span className="c-paid" title="What a request pays now, spread across the sellers that are up">Paid now</span>}<span className="c-spread">Spread</span>{showGn && <span className="c-gn" title={GN_FORMULA}>Per unit of compute<small>$ per bn G_n (FLOP's unit)</small></span>}<span className="c-cheap">Cheapest</span><span className="c-chg">24 h</span><span className="c-chev" />
+        <span className="c-model">Model</span><span className="c-sellers">Up</span><span className="c-strip"><Axis scale={scale} /></span><span className="c-median">Median{mixed && mix !== DEFAULT_MIX ? ` ${ratioOf(mix)}` : ""}</span>{showPaid && <span className="c-paid" title="What a request pays now, spread across the sellers that are up">Paid now</span>}<span className="c-spread">Spread</span>{showGn && <span className="c-gn" title={GN_FORMULA}>Per unit of compute<small>$ per bn G_n (FLOP's unit)</small></span>}<span className="c-cheap">Cheapest</span><span className="c-chg">24 h</span><span className="c-chev" />
       </div>
       <ul className="board-list">{(all ? models : models.slice(0, MODELS_SHOWN)).map(m => <ModelRow key={m.id} model={m} scale={scale} now={now} mix={mix} spread={showGn ? spread : false} showPaid={showPaid} open={open.has(m.id)} onToggle={() => toggle(m.id)} />)}</ul>
     </div>
@@ -348,7 +348,7 @@ function Flop({ latest, market, now }: { latest: ComputeLatest; market: ComputeM
   const headline = ok(routed) ? routed : list;
   return <article className="cx-panel" aria-labelledby="compute-flop-heading">
     <p className="cx-k">FLOP Network · on-chain</p>
-    <h2 id="compute-flop-heading">{live ? "FLOP parity" : "FLOP price per unit of compute"}</h2>
+    <h2 id="compute-flop-heading">{live ? "FLOP parity" : "FLOP price per unit of compute"}{latest.source !== "openrouter" && <> <span className="badge compute-stale" title="The perp settles on this rate right now, converted to USD at a fixed rate.">perp source<span className="sr-only">: the perp settles on this rate right now, converted to USD at a fixed rate.</span></span></>}</h2>
     {live ? <div className="flop-parity">
       <div className="perp-price"><strong>{perMFlop(headline)}</strong><span>per 1M FLOP, {ok(routed) ? "from what requests pay" : "from list prices"}</span></div>
       {ok(routed) && ok(list) && <p className="flop-list"><b>{perMFlop(list)}</b> per 1M FLOP, from list prices</p>}

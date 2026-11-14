@@ -43,7 +43,7 @@ test("renders the index, its scale and every section from the fixture", async ()
   expect(container.querySelector(".cx-label")?.textContent).toBe("Median price to run an open model");
   expect(container.querySelector(".cx-price")?.textContent).toBe(`${usd(typical.median)}per 1M tokens`);
   expect(container.querySelector(".cx-range")?.textContent).toBe(`Cheapest model ${typical.cheapest.name} ${usd(typical.cheapest.median)} · dearest ${typical.dearest.name} ${usd(typical.dearest.median)}`);
-  expect(Array.from(container.querySelectorAll(".cx-proof li"), li => li.textContent)).toEqual([`${count(market.index.n_quotes_up)} live quotes`, `${count(market.index.n_providers)} providers`, `${count(typical.models)} models`]);
+  expect(Array.from(container.querySelectorAll(".cx-proof li"), li => li.textContent)).toEqual([`${count(market.index.n_quotes_up)} live quotes`, `${count(market.index.n_providers)} providers`, `${count(market.models.length)} models`]);
   expect(typical.quotes).toBe(market.models.filter(m => !m.thin).reduce((n, m) => n + upPriced(m).length, 0));
   expect(container.querySelector(".cx-indexstat")?.textContent).toBe(`Index ${market.index.level!.toFixed(2)}`);
   expect(container.querySelector(".cx-spread-line")?.textContent).toBe("The same model costs up to 21\u00d7 more depending on the seller.");
@@ -217,13 +217,13 @@ test("a failed market.json still shows the perp panel", async () => {
 test("marks a stale market feed and a stale settlement price", async () => {
   const now = Date.now();
   const container = await render(liveFeed(now, m => ({ ...m, generated_ms: now - 45 * 60_000 })));
-  expect(container.querySelector(".cx-hero .compute-stale")?.textContent).toBe("stale");
+  expect(container.querySelector(".cx-hero .compute-stale")?.textContent).toMatch(/^stale: /);
   expect(container.querySelector('.cx-hero .compute-stale')?.getAttribute("title")).toBe("No new prices read for over 30 minutes.");
   expect(container.textContent).not.toContain("No new prices read for over 30 minutes.");
   await cleanup?.();
   const mock = new MockComputeFeedClient(Date.now(), 45 * 60_000);
   const c2 = await render({ latest: () => mock.latest(), history: () => mock.history(), market: () => mock.market() });
-  expect(c2.querySelector(".cx-panel .compute-stale")?.textContent).toBe("stale");
+  expect(c2.querySelector(".cx-panel .compute-stale")?.textContent).toMatch(/^stale: /);
   expect(c2.querySelector(".cx-panel .compute-stale")?.getAttribute("title")).toBe("No new price for over 30 minutes.");
 });
 
@@ -381,10 +381,11 @@ test("mix switch: hidden without per-mix data, then moves the headline, the medi
   expect(buttons[1].getAttribute("aria-pressed")).toBe("true");
   expect(container.querySelector(".cx-price strong")?.textContent).toBe(usd(typicalPrice(market)!.median));
   expect(container.querySelector(".cx-mix-why")).toBeNull();
-  expect(container.querySelector("#board .cx-sub")?.textContent).toBe("USD per 1M tokens · 15:1 input:output");
+  expect(container.querySelector("#board .cx-sub")?.textContent).toBe("USD per 1M tokens");
+  expect(container.querySelector(".board-cols .c-median")?.textContent).toBe("Median");
   await click(buttons[0]);
   expect(container.querySelector(".cx-price strong")?.textContent).toBe("$0.987");
-  expect(container.querySelector("#board .cx-sub")?.textContent).toBe("USD per 1M tokens · 3:1 input:output");
+  expect(container.querySelector(".board-cols .c-median")?.textContent).toBe("Median 3:1");
   const glm = Array.from(container.querySelectorAll(".board-row")).find(r => r.querySelector(".m-name")?.textContent === "GLM 5.3")!;
   expect(glm.querySelector(".c-median")?.textContent).toBe(`median ${usd(market.models.find(m => m.name === "GLM 5.3")!.median * 2)}`);
   await click(Array.from(container.querySelectorAll("#board .cx-sort button")).find(b => b.textContent === "Highest median")!);
