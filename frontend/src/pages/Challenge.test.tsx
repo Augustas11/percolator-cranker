@@ -66,7 +66,7 @@ test("flag on with every value: nav, footer, the full page and the rules in Docs
   const bench = (await new MockComputeFeedClient().market()).models.find(m => m.id === "qwen/qwen3.8-27b")!;
   expect(container.querySelector(".ch-pitch")?.textContent).toMatch(new RegExp(`^${bench.sellers_up} sellers list the same AI model at prices up to [\\d.]+× apart\\. Your code turns their quotes into one price\\.$`));
   expect(container.querySelector(".ch-score-line")?.textContent).toBe("Follow real price changes, ignore fake ones. Tested on next week's market and attacked with fake listings.");
-  expect(container.querySelector('[aria-labelledby="ch-win"] p')?.textContent).toBe("The best oracle runs the live market, with your name on it.");
+  expect(container.querySelector('[aria-labelledby="ch-win"] p')?.textContent).toBe("The best oracle runs the live market after an independent review, with your name on it.");
   expect(Array.from(container.querySelectorAll('[aria-labelledby="ch-why"] li'), l => l.textContent)).toEqual([
     "On-chain markets settle on whatever their oracle reports.",
     "An oracle that can be faked or that lags gets traders liquidated.",
@@ -98,13 +98,14 @@ test("flag on with every value: nav, footer, the full page and the rules in Docs
 });
 
 test("flag on with partial config renders only the configured blocks", async () => {
-  Object.assign(site.challenge, { enabled: true, opensAt: null, firstCloseAt: null, practiceCmd: null, repoPath: null, apiBase: null, prizes: null });
+  Object.assign(site.challenge, { enabled: true, opensAt: null, firstCloseAt: null, practiceCmd: null, repoPath: null, apiBase: null, prizes: null, entryRepo: null });
   const container = await render("/challenge");
   expect(container.querySelector("h1")?.textContent).toBe("Build the compute price oracle.");
   expect(container.querySelector(".ch-dates")).toBeNull();
   expect(container.querySelector(".ch-prizes")).toBeNull();
   expect(container.querySelector("#ch-board")).toBeNull();
   expect(container.querySelector('[aria-labelledby="ch-try"]')).toBeNull();
+  expect(container.querySelector(".ch-enter")).toBeNull();
   expect(container.textContent).not.toContain("challenge_submit");
   expect(container.textContent).not.toContain("Get the template");
   expect(container.textContent).not.toMatch(/TBD|coming soon|Prizes/i);
