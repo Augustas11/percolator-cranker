@@ -51,3 +51,10 @@
 }
 
 .site .ch-score-line { margin: 0; max-width: 680px; font-size: 17px; line-height: 1.45; color: var(--site-secondary); }
+.site .challenge { gap: 20px; }
+.site .ch-grid { gap: 20px 24px; }
+.site .challenge .code-block { position: relative; }
+.site .challenge .code-block pre { margin: 0; padding-right: 110px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.site .challenge .code-block button { position: absolute; top: 12px; right: 12px; min-height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--site-accent-40); background: transparent; color: var(--site-accent); font-size: 13px; }
+@media (max-width: 900px) { .site .challenge .code-block pre { padding-right: 22px; padding-top: 52px; } }
+.site .ch-enter a { color: var(--site-accent); }

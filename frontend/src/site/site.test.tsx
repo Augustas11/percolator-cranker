@@ -419,7 +419,7 @@ test("home leads with the compute index, then the perp", async () => {
   expect(container.querySelector(".hero-credit")?.textContent).toBe("Built for perp traders and for agents on FLOP Network.");
   const sections = Array.from(container.querySelectorAll("main > section")).map(s => s.className);
   expect(sections.indexOf("home-sol home-container")).toBe(1);
-  expect(Array.from(container.querySelectorAll(".nav-links a")).map(a => [a.textContent, a.getAttribute("href")])).toEqual([["Index", "/compute"], ["Arena", "/arena"], ["Agents", "/agents"], ["Docs", "/docs"]]);
+  expect(Array.from(container.querySelectorAll(".nav-links a")).map(a => [a.textContent, a.getAttribute("href")])).toEqual([["Index", "/compute"], ["Arena", "/arena"], ["Challenge", "/challenge"], ["Agents", "/agents"], ["Docs", "/docs"]]);
   expect(Array.from(container.querySelectorAll(".nav-actions a"), a => [a.textContent, a.getAttribute("href")])).toEqual([["Trade", "/trade"]]);
   expect(container.querySelector(".nav-links")?.textContent).not.toContain("SOL-PERP");
   expect(card.querySelector(".cc-perp .market-name")?.textContent).toBe("COMPUTE-PERP");
@@ -452,7 +452,7 @@ test("no page says TBD or SOL-PERP, and SOL only means fee SOL", async () => {
   for (const path of Object.values(site.paths)) {
     const container = await render(path, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient());
     const text = container.textContent!;
-    expect(text, path).not.toMatch(/TBD|SOL-PERP|not configured|coming soon|challenge/i);
+    expect(text, path).not.toMatch(/TBD|SOL-PERP|not configured|coming soon/i);
     for (const m of text.matchAll(/\bSOL\b/g)) expect(text.slice(m.index! - 20, m.index! + 12), path).toMatch(/devnet SOL for fees/);
     await cleanup?.(); cleanup = undefined;
   }
