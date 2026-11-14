@@ -219,7 +219,7 @@ test("marks a stale market feed and a stale settlement price", async () => {
   const container = await render(liveFeed(now, m => ({ ...m, generated_ms: now - 45 * 60_000 })));
   expect(container.querySelector(".cx-hero .compute-stale")?.textContent).toMatch(/^stale: /);
   expect(container.querySelector('.cx-hero .compute-stale')?.getAttribute("title")).toBe("No new prices read for over 30 minutes.");
-  expect(container.textContent).not.toContain("No new prices read for over 30 minutes.");
+  expect(container.querySelector(".cx-hero .compute-stale .sr-only")?.textContent).toBe(": No new prices read for over 30 minutes.");
   await cleanup?.();
   const mock = new MockComputeFeedClient(Date.now(), 45 * 60_000);
   const c2 = await render({ latest: () => mock.latest(), history: () => mock.history(), market: () => mock.market() });
