@@ -54,7 +54,7 @@ test("renders the index, its scale and every section from the fixture", async ()
   expect(ranks.map(li => li.querySelector(".rk-name")?.textContent)).toEqual(wide.map(m => m.name));
   expect(ranks[0].classList.contains("is-top")).toBe(true);
   expect(ranks[0].querySelector(".rk-name")?.textContent).toBe("GLM 5.3");
-  expect(ranks[0].querySelector(".rk-range")?.textContent).toBe(`${usd(wide[0].min)}\u2013${usd(wide[0].max)}`);
+  expect(ranks[0].querySelector(".rk-range")?.textContent).toBe(`${usd(wide[0].min)}\u2013${usd(wide[0].max)}, median ${usd(wide[0].median)}`);
   expect(ranks[0].querySelector(".rk-x")?.textContent).toBe(times(wide[0].min, wide[0].max));
   expect(container.querySelector(".cx-hero-side .cx-spread-line strong")?.textContent).toBe(ranks[0].querySelector(".rk-x")?.textContent);
   // Who it is for: each entry jumps to a section that exists.

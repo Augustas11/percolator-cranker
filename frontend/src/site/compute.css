@@ -304,7 +304,7 @@
 .site .cx-bench-nums dd { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0; text-align: left; }
 .site .cx-bench-nums strong { font: 700 clamp(26px, 3vw, 36px)/1 var(--site-display); letter-spacing: -0.03em; color: var(--site-text); }
 .site .cx-bench-nums .is-main strong { font-weight: 800; }
-.site .cx-bench-nums .is-main { grid-template-columns: auto 180px; align-items: end; column-gap: 20px; }
+.site .cx-bench-nums .is-main { grid-template-columns: auto auto; align-items: end; column-gap: 20px; }
 .site .cx-bench-nums .is-main dt { grid-column: 1 / -1; }
 .site .cx-bench-nums .is-main .spark { width: 180px; height: 34px; }
 .site .cx-bench-chg { font: 13px var(--site-mono); color: var(--site-muted); }

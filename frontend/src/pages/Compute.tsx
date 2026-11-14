@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket, MarketModel, MixKey } from "../compute/client";
-import { Axis, DEFAULT_MIX, benchmarkRouted, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadRanks, computeSpread, hasMixes, marketScale, medianAt, sinceLabel, typicalPrice, widest, type LogScale } from "../compute/charts";
+import { Axis, DEFAULT_MIX, benchmarkRouted, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadRanks, computeSpread, hasMixes, marketScale, medianAt, sinceLabel, typicalPrice, widestModels, type LogScale } from "../compute/charts";
 import { addressUrl, ago, clock, count, direction, pct, short, times, txUrl, usd, usd4, usdSmall, when } from "../compute/format";
 import { latestStale, marketDataTime, marketStale, modelStale, useComputeFeed } from "../compute/useFeed";
 import FeedBoundary from "../compute/FeedBoundary";
@@ -63,10 +63,10 @@ function Benchmark({ market, latest }: { market: ComputeMarket; latest: ComputeL
 function Hero({ market, latest, now, error, mix, onMix }: { market: ComputeMarket; latest: ComputeLatest | null; now: number; error: string; mix: MixKey; onMix: (m: MixKey) => void }) {
   const { index } = market;
   const stale = marketStale(market, now);
-  const wide = widest(market);
+  const wide = widestModels(market)[0] ?? null;
   const typical = typicalPrice(market, mix);
   const read = marketDataTime(market);
-  return <header className="cx-hero" aria-labelledby="compute-title">
+  return <header className={`cx-hero${wide ? "" : " is-empty"}`} aria-labelledby="compute-title">
     <div className="cx-hero-main">
       <h1 id="compute-title" className="cx-title">Compute index</h1>
       {typical ? <>

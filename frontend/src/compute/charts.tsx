@@ -86,7 +86,7 @@ export function SpreadRanks({ market }: { market: ComputeMarket }) {
     return <li key={m.id} className={i === 0 ? "is-top" : undefined}>
       <span className="rk-name">{m.name}</span>
       <span className="rk-bar" aria-hidden="true"><i style={{ width: `${w}%` }}><b style={{ left: `${med}%` }} /></i></span>
-      <span className="rk-range">{usd(m.min)}–{usd(m.max)}</span>
+      <span className="rk-range">{usd(m.min)}–{usd(m.max)}<span className="sr-only">, median {usd(m.median)}</span></span>
       <strong className="rk-x">{times(m.min, m.max)}</strong>
     </li>;
   })}</ol>;
