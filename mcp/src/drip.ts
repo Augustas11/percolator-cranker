@@ -97,7 +97,7 @@ export const computeMarket = {
   mint: new PublicKey("4NS7ozkPTEisCTSeigw33vjjWkWZ7NechuPddhXnA5Zf"),
   lpPortfolio: new PublicKey("6T48gQiBPQsYnyf1C5eBkwJ3G7N8Mkxt5Aau3sNrntUu"),
   matcherProgram: new PublicKey("8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE"),
-  matcherContext: new PublicKey("4XZtvznVHA7AdYTiq9jdi8PhL9pXuJEjyaiqQwTTPYfN"),
+  matcherContext: new PublicKey("4XZtzvnVHA7AdYTiq9jdi8PhL9pXuJEjyaiqQwTTPYfN"),
 };
 export const marketDefaults = { ...devnetConfig, ...computeMarket };
 

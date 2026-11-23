@@ -342,9 +342,9 @@ describe("marketOverrides", () => {
     expect(cfg.mint.toBase58()).toBe("4NS7ozkPTEisCTSeigw33vjjWkWZ7NechuPddhXnA5Zf");
     expect(cfg.lpPortfolio.toBase58()).toBe("6T48gQiBPQsYnyf1C5eBkwJ3G7N8Mkxt5Aau3sNrntUu");
     expect(cfg.matcherProgram?.toBase58()).toBe("8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE");
-    expect(cfg.matcherContext?.toBase58()).toBe("4XZtvznVHA7AdYTiq9jdi8PhL9pXuJEjyaiqQwTTPYfN");
+    expect(cfg.matcherContext?.toBase58()).toBe("4XZtzvnVHA7AdYTiq9jdi8PhL9pXuJEjyaiqQwTTPYfN");
     expect(new Drip({ DRIP_MATCHER_PROGRAM: "8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE" }).cfg.matcherContext?.toBase58())
-      .toBe("4XZtvznVHA7AdYTiq9jdi8PhL9pXuJEjyaiqQwTTPYfN");
+      .toBe("4XZtzvnVHA7AdYTiq9jdi8PhL9pXuJEjyaiqQwTTPYfN");
   });
 
   it("points the MCP at another market from env", () => {

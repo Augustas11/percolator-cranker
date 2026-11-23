@@ -25,5 +25,5 @@ export const devnetConfig: DevnetConfig = {
   // Our LP's devnet matcher (matcher/). Trading stays disabled until both are set;
   // "none" disables it explicitly.
   ...matcher(env.VITE_MATCHER_PROGRAM || "8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE",
-    env.VITE_MATCHER_CONTEXT || "4XZtvznVHA7AdYTiq9jdi8PhL9pXuJEjyaiqQwTTPYfN"),
+    env.VITE_MATCHER_CONTEXT || "4XZtzvnVHA7AdYTiq9jdi8PhL9pXuJEjyaiqQwTTPYfN"),
 };
