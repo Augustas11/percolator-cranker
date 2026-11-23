@@ -100,7 +100,6 @@ flop-index/testdata/wasm/hostile/too-many-functions.wasm flop-index/testdata/was
 flop-index/testdata/wasm/hostile/too-many-globals.wasm flop-index/testdata/wasm/hostile/too-many-globals.wasm
 flop-index/testdata/wasm/live.wasm flop-index/testdata/wasm/live.wasm
 flop-index/testdata/wasm/median.wasm flop-index/testdata/wasm/median.wasm
-skip: docs/flop-compute/PREMISE.md   # owner premise: private
 
 # --- bots: mark pusher, OpenRouter recorder, launch steps, verify-push-log ---
 launch/flop-compute.toml launch/flop-compute.toml
