@@ -156,16 +156,17 @@ it.each(["missing leg", "zero size", "expired epoch"])("rejects a close without 
   if (flat === "missing leg") postCrank[leg + layout["leg.active"]] = 0;
   else if (flat === "zero size") postCrank.fill(0, leg + layout["leg.basis_pos_q"], leg + layout["leg.basis_pos_q"] + 16);
   else postCrank.writeBigUInt64LE(999n, leg + layout["leg.epoch_snap"]);
+  // The close alone fails its simulation, so the builder cranks and reads the post-crank state.
   vi.mocked(Connection.prototype.simulateTransaction).mockResolvedValue({ context: { slot: 123 }, value: {
     err: null, logs: [], accounts: [postCrank, lp, market].map(data => ({
       ...account(data), owner: devnetConfig.programId.toBase58(), data: [data.toString("base64"), "base64"],
     })),
-  } });
+  } }).mockResolvedValueOnce({ context: { slot: 123 }, value: { err: { InstructionError: [2, { Custom: 19 }] }, logs: [] } });
   const reads = vi.mocked(Connection.prototype.getMultipleAccountsInfo);
   reads.mockClear();
   await expect(client.closePosition()).rejects.toThrow("no open position");
   expect(Connection.prototype.sendRawTransaction).not.toHaveBeenCalled();
-  expect(reads).not.toHaveBeenCalled();
+  expect(reads).toHaveBeenCalledOnce();
 });
 
 it("keeps flat health margins at zero and free collateral available", async () => {
