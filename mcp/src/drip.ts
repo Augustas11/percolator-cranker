@@ -93,11 +93,11 @@ export function checkMatcher(state: ReturnType<typeof parseMatcher>, signedSize:
 /// The built-in market is the devnet compute perp (FLOP oracle). The frontend
 /// config still defaults to the retired SOL-PERP market, so override it here.
 export const computeMarket = {
-  market: new PublicKey("uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J"),
+  market: new PublicKey("c2niKk33fXp5E8a7ZYzQXdqjEXizrSBb55VEuBQiNUU"),
   mint: new PublicKey("4NS7ozkPTEisCTSeigw33vjjWkWZ7NechuPddhXnA5Zf"),
-  lpPortfolio: new PublicKey("GcS4f5uCiYozfEtHzmttMKkHab2ympTasA9MvHashhSZ"),
+  lpPortfolio: new PublicKey("6T48gQiBPQsYnyf1C5eBkwJ3G7N8Mkxt5Aau3sNrntUu"),
   matcherProgram: new PublicKey("8era4GFKLUu24TLr1H2Gjqt5csiYj4jhPwoxCXfEDvKE"),
-  matcherContext: new PublicKey("C2uacd9rM16jMBJuseqLByDeVorD6eacaJQKR4seHczq"),
+  matcherContext: new PublicKey("4XZtvznVHA7AdYTiq9jdi8PhL9pXuJEjyaiqQwTTPYfN"),
 };
 export const marketDefaults = { ...devnetConfig, ...computeMarket };
 

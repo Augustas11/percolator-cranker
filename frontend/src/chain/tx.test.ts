@@ -82,13 +82,25 @@ it("cranks a third positioned portfolio once when building a trade", async () =>
     .toEqual([portfolio, cfg.lpPortfolio, third]);
 });
 
-it("rejects a trade needing nine cranks before simulation", async () => {
-  const simulate = mockCranks();
-  const portfolios = [portfolio, cfg.lpPortfolio, ...Array.from({ length: 7 }, (_, i) => new PublicKey(new Uint8Array(32).fill(i + 5)))];
-  vi.mocked(conn.getProgramAccounts).mockResolvedValue(portfolios.map(pubkey => ({ pubkey, account: account(data) })));
+const nine = [portfolio, cfg.lpPortfolio, ...Array.from({ length: 7 }, (_, i) => new PublicKey(new Uint8Array(32).fill(i + 5)))];
+
+it("rejects a trade only when a ninth crank is needed", async () => {
+  mockCranks();
+  vi.mocked(conn.getProgramAccounts).mockResolvedValue(nine.map(pubkey => ({ pubkey, account: account(data) })));
   await expect(buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n))
-    .rejects.toThrow("9 portfolios need a market refresh; more than 8 fit in one transaction");
-  expect(simulate).not.toHaveBeenCalled();
+    .rejects.toThrow("More than 8 portfolios need a market refresh; they do not fit in one transaction");
+});
+
+it("builds a trade with nine positioned portfolios when a crank is a no-op", async () => {
+  const simulate = mockCranks();
+  const ok = { context: { slot: 123 }, value: { err: null, logs: [], accounts: simulatedAccounts([data, lp, market]) } };
+  // The fifth candidate is already fresh, so its crank fails in simulation and is dropped.
+  for (let i = 0; i < 4; i++) simulate.mockResolvedValueOnce(ok);
+  simulate.mockResolvedValueOnce({ context: { slot: 123 }, value: { err: { InstructionError: [2, { Custom: 22 }] }, logs: [], accounts: null } });
+  vi.mocked(conn.getProgramAccounts).mockResolvedValue(nine.map(pubkey => ({ pubkey, account: account(data) })));
+  const ixs = await buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n);
+  expect(ixs.filter(ix => ix.programId.equals(cfg.programId) && ix.data[0] === 5).map(ix => ix.keys[2].pubkey))
+    .toEqual(nine.filter((_, i) => i !== 4));
 });
 
 it("cranks other positioned portfolios once when building a withdraw", async () => {
@@ -127,7 +139,7 @@ it("builds a fresh TradeCpi binding with the LP's runtime owner and no LP signer
   expect(u64(trade.data, 1)).toBe(2n);
   expect(u64(trade.data, 9)).toBe(16n);
   expect(u64(trade.data, 17)).toBe(1n);
-  expect(u64(trade.data, 25)).toBe(15n);
+  expect(u64(trade.data, 25)).toBe(parsePortfolio(lp).positionEpoch);
   expect(u64(trade.data, 33)).toBe(1n);
   expect(i128(trade.data, 51)).toBe(-123n);
   expect(trade.keys.filter(key => key.isSigner).map(key => key.pubkey)).toEqual([owner]);

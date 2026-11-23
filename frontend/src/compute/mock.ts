@@ -12,7 +12,7 @@ export class MockComputeFeedClient implements ComputeFeedClient {
     const landed = this.now - this.ageMs;
     return {
       v: 1, generated_ms: this.now, mark_usd: 0.303551, landed_ms: landed, source_ms: landed - 140_000,
-      sig: "4w4fnVJdCzYevzVWKzQakgnKQAbhpSmNMG4ugg", slot: 1000, market: "uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J", oracle: "FLMpxq4EYV727uLVNw9Z14fL4ZDzTVtmvibVrLRgWRW4",
+      sig: "4w4fnVJdCzYevzVWKzQakgnKQAbhpSmNMG4ugg", slot: 1000, market: "c2niKk33fXp5E8a7ZYzQXdqjEXizrSBb55VEuBQiNUU", oracle: "FLMpxq4EYV727uLVNw9Z14fL4ZDzTVtmvibVrLRgWRW4",
       source: "openrouter", set: "preferred", clamp: "off (n<3)", blend_in_out: 15,
       pricing_set: [
         { provider: "DeepInfra", quantization: "bf16", listed: 0.2578125, priced: 0.2578125, up: true },
