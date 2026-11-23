@@ -43,7 +43,10 @@ export async function withFreshCrank(
       payerKey: payer, recentBlockhash: blockhash, instructions: [...budget, ...kept, crank],
     }).compileToV0Message());
     const result = await conn.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true });
-    if (!result.value.err) kept.push(crank);
+    if (result.value.err) continue;
+    // Only the refreshes that are kept have to fit, not every positioned portfolio.
+    if (kept.length === MAX_CRANKS) throw new Error(`More than ${MAX_CRANKS} portfolios need a market refresh; they do not fit in one transaction`);
+    kept.push(crank);
   }
   const ixs = [...budget, ...kept];
   if (!kept.length) {
@@ -79,9 +82,7 @@ async function crankSet(conn: Connection, cfg: DevnetConfig, first: PublicKey[])
   const marketAccount = await conn.getAccountInfo(cfg.market);
   if (!marketAccount) throw new Error("Market account not found");
   const positioned = await positionedPortfolios(conn, cfg.programId, parseMarket(marketAccount.data));
-  const portfolios = [...new Set([...first, ...positioned].map(key => key.toBase58()))].map(key => new PublicKey(key));
-  if (portfolios.length > MAX_CRANKS) throw new Error(`${portfolios.length} portfolios need a market refresh; more than ${MAX_CRANKS} fit in one transaction`);
-  return portfolios;
+  return [...new Set([...first, ...positioned].map(key => key.toBase58()))].map(key => new PublicKey(key));
 }
 
 export async function buildDeposit(conn: Connection, cfg: DevnetConfig, owner: PublicKey, portfolio: PublicKey, amountAtoms: bigint) {

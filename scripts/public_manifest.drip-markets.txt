@@ -277,9 +277,9 @@ scripts/pins.env scripts/pins.env
 # sha256 (public path). A changed or new binary fails the export until its
 # pin is updated on purpose. ---
 sha256: 8fde22cfb73b2b9a44f859182ce8e89cb515290d5dd029a791b8c3a4c8f18ad8 frontend/public/og.png
-sha256: ba3a73bc308b49e903b7e720fe4e4833b977ed8a5005bd054e5170d42524c335 frontend/src/chain/fixtures/lp_portfolio.bin
-sha256: 4ad8ef1cddd8c0afc5c84f37e5683bed5a5ecef80c5e1f869bb6018a42cc9c52 frontend/src/chain/fixtures/market.bin
-sha256: 1a189d637d9c68c0e54089f5c0d17a7d64a28a2ab4903d5d0eedfd9c48f9c59e frontend/src/chain/fixtures/portfolio.bin
+sha256: bbf81a163026ac4dff9695baf4123c50f7f4425e7e6739b0e99297fe3af61f7a frontend/src/chain/fixtures/lp_portfolio.bin
+sha256: 412f1fa23c7d7a0f94fe957ebda0cab2b7d0e935c4e1cfb5d5047d3b61bca299 frontend/src/chain/fixtures/market.bin
+sha256: f2202bd44a88725f77ab06f3a4ce355d55b8372cb15b09c7ceeea057af12b9c1 frontend/src/chain/fixtures/portfolio.bin
 sha256: 08a5ed48b554a9e02f3b9f3c768b4842765d05014d527c1381f1b5c25fa254d9 flop-index/testdata/wasm/hold.wasm
 sha256: 8d3c4f1dd4b38dbf2aa8c63201b15a66793e684d747b87df167dff06f2db1e8b flop-index/testdata/wasm/hostile/abi-2.wasm
 sha256: cf475cccc36047790813ab722ee0f8f9dff13dc0e84ed7e3e914b05be3acc317 flop-index/testdata/wasm/hostile/alloc-loops.wasm

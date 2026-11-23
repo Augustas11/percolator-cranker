@@ -43,9 +43,9 @@ it("polls engine values and leaves entry price and unrealized PnL unknown", asyn
   const s = client.getSnapshot();
   expect(client.tradingReady).toBe(false);
   expect(s.market.maxLeverage).toBe(5);
-  expect(s.mark.price).toBe(99.938164);
-  expect(s.portfolio.collateral).toBe(29982.010738);
-  expect(s.portfolio.legs[0]).toEqual({ side: "long", size: 10, entryPrice: NaN, unrealizedPnl: NaN });
+  expect(s.mark.price).toBe(100.528318);
+  expect(s.portfolio.collateral).toBe(29990.783682);
+  expect(s.portfolio.legs[0]).toEqual({ side: "short", size: 10, entryPrice: NaN, unrealizedPnl: NaN });
   expect(s.portfolio.health).toEqual({
     equity: s.portfolio.collateral, initialMarginUsed: NaN, maintenanceMargin: NaN, freeCollateral: NaN, ratio: NaN, status: "unknown",
   });
@@ -113,7 +113,7 @@ it("ignores positive PnL when computing health", async () => {
   data.writeBigInt64LE(1_000_000n, layout.HEADER_LEN + layout["pf.pnl"]);
   client = new DevnetMarketClient(devnetConfig);
   await client.connect();
-  expect(client.getSnapshot().portfolio.health.equity).toBe(29982.010738);
+  expect(client.getSnapshot().portfolio.health.equity).toBe(29990.783682);
 });
 
 it("keeps a confirmed new portfolio and resolves deposits when refresh fails", async () => {
@@ -140,7 +140,7 @@ it("waits for a slow poll to finish before scheduling another", async () => {
   expect(reads).toHaveBeenCalledTimes(1);
   finish([account(market)]);
   await vi.advanceTimersByTimeAsync(0);
-  expect(client.getSnapshot().mark.price).toBe(99.938164);
+  expect(client.getSnapshot().mark.price).toBe(100.528318);
   await vi.advanceTimersByTimeAsync(1999);
   expect(reads).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(1);

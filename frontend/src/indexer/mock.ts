@@ -21,7 +21,7 @@ export class MockIndexerClient implements IndexerClient {
   async stats(): Promise<Stats> {
     return {
       ...(this.options.legacy ? {} : { fills_24h: 3, volume_24h: "45540000" }),
-      market: "uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J", program: "GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS",
+      market: "c2niKk33fXp5E8a7ZYzQXdqjEXizrSBb55VEuBQiNUU", program: "GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS",
       as_of_slot: 1000, as_of: 1793232000,
       cranks: { total: 200, success_rate: 0.98 }, uptime: { uptime_pct: 99.5 },
       liquidations_observed: 2, liquidations_since_slot: 800,

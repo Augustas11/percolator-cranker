@@ -553,7 +553,7 @@ test("agents page: one flow from install to the Arena, compute examples only onc
   expect(container.textContent).toContain("MCP clients that run local servers");
   expect(container.textContent).toContain("exponential average");
   expect(container.querySelector(".addresses")?.textContent).toContain("COMPUTE-PERP market");
-  expect(container.querySelector(".addresses")?.textContent).toContain("uZY6RPrFDqtbYbREA6UToWpzq1BKEsneZxcsE4As27J");
+  expect(container.querySelector(".addresses")?.textContent).toContain("c2niKk33fXp5E8a7ZYzQXdqjEXizrSBb55VEuBQiNUU");
   expect(container.textContent).not.toContain("Built for agents on FLOP Network");
   expect(container.querySelectorAll("#install pre")).toHaveLength(4);
   expect(container.textContent).not.toMatch(/Percolator|market: "/);
