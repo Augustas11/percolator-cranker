@@ -85,6 +85,29 @@ async function crankSet(conn: Connection, cfg: DevnetConfig, first: PublicKey[])
   return [...new Set([...first, ...positioned].map(key => key.toBase58()))].map(key => new PublicKey(key));
 }
 
+// A refresh crank with nothing to do fails its whole transaction (EngineNonProgress), and
+// what it has to do changes between this build and landing: bots accrue the market and every
+// fill refreshes the LP. Trade and withdraw refresh their own portfolios inline, so send the
+// instruction alone whenever it simulates alone; add the cranks only when it does not.
+async function withCranksIfNeeded(
+  conn: Connection, cfg: DevnetConfig, payer: PublicKey, first: PublicKey[], readAccounts: PublicKey[],
+  build: (accounts: Uint8Array[]) => TransactionInstruction,
+) {
+  const budget = computeBudgetIxs();
+  const ix = build((await conn.getMultipleAccountsInfo(readAccounts)).map(account => {
+    if (!account) throw new Error("Account not found");
+    return account.data;
+  }));
+  const { blockhash } = await conn.getLatestBlockhash();
+  const alone = new VersionedTransaction(new TransactionMessage({
+    payerKey: payer, recentBlockhash: blockhash, instructions: [...budget, ix],
+  }).compileToV0Message());
+  if (!(await conn.simulateTransaction(alone, { sigVerify: false, replaceRecentBlockhash: true })).value.err) return [...budget, ix];
+  const portfolios = await crankSet(conn, cfg, first);
+  const { ixs, accounts } = await withFreshCrank(conn, payer, cfg.programId, cfg.market, portfolios, readAccounts);
+  return [...ixs, build(accounts)];
+}
+
 export async function buildDeposit(conn: Connection, cfg: DevnetConfig, owner: PublicKey, portfolio: PublicKey, amountAtoms: bigint) {
   const pf = await readPortfolio(conn, portfolio);
   return [...computeBudgetIxs(), depositIx(cfg.programId, owner, cfg.market, portfolio,
@@ -93,12 +116,12 @@ export async function buildDeposit(conn: Connection, cfg: DevnetConfig, owner: P
 }
 
 export async function buildWithdraw(conn: Connection, cfg: DevnetConfig, owner: PublicKey, portfolio: PublicKey, amountAtoms: bigint) {
-  const portfolios = await crankSet(conn, cfg, [portfolio]);
-  const { ixs, accounts } = await withFreshCrank(conn, owner, cfg.programId, cfg.market, portfolios, [portfolio]);
-  const pf = parsePortfolio(accounts[0]);
-  return [...ixs, withdrawIx(cfg.programId, owner, cfg.market, portfolio,
-    ata(owner, cfg.mint), vault(cfg.programId, cfg.market, cfg.mint), vaultAuthority(cfg.programId, cfg.market),
-    { portfolioId: pf.portfolioId, expectedSequence: pf.sequence, amount: amountAtoms })];
+  return withCranksIfNeeded(conn, cfg, owner, [portfolio], [portfolio], ([data]) => {
+    const pf = parsePortfolio(data);
+    return withdrawIx(cfg.programId, owner, cfg.market, portfolio,
+      ata(owner, cfg.mint), vault(cfg.programId, cfg.market, cfg.mint), vaultAuthority(cfg.programId, cfg.market),
+      { portfolioId: pf.portfolioId, expectedSequence: pf.sequence, amount: amountAtoms });
+  });
 }
 
 export async function buildTrade(
@@ -128,23 +151,22 @@ async function buildTradeIxs(
   order: (pf: ReturnType<typeof parsePortfolio>, market: ReturnType<typeof parseMarket>) => { sizeQ: bigint; limitPrice: bigint },
   feeBps: bigint,
 ) {
-  if (!cfg.matcherProgram || !cfg.matcherContext) throw new Error("Trading is waiting on the matcher program (devnet PoC)");
-  const portfolios = await crankSet(conn, cfg, [portfolio, cfg.lpPortfolio]);
-  const { ixs, accounts } = await withFreshCrank(conn, owner, cfg.programId, cfg.market,
-    portfolios, [portfolio, cfg.lpPortfolio, cfg.market]);
-  const a = parsePortfolio(accounts[0]), b = parsePortfolio(accounts[1]);
-  const market = parseMarket(accounts[2]);
-  const { sizeQ, limitPrice } = order(a, market);
-  // The wrapper refuses a TradeCpi fee under the market's trade_fee_base_bps (docs/LAUNCH.md), and markets
-  // differ (12 bps on the first SOL-PERP market, 15 on COMPUTE-PERP), so never send less than the market's own.
-  const fee = feeBps < market.config.tradeFeeBaseBps ? market.config.tradeFeeBaseBps : feeBps;
-  const delegate = matcherDelegate(cfg.programId, cfg.market, cfg.lpPortfolio, b.owner, cfg.matcherProgram, cfg.matcherContext);
-  return [...ixs, tradeCpiIx(cfg.programId, owner, cfg.market, portfolio, cfg.lpPortfolio,
-    cfg.matcherProgram, cfg.matcherContext, delegate, {
+  const { matcherProgram, matcherContext } = cfg;
+  if (!matcherProgram || !matcherContext) throw new Error("Trading is waiting on the matcher program (devnet PoC)");
+  return withCranksIfNeeded(conn, cfg, owner, [portfolio, cfg.lpPortfolio], [portfolio, cfg.lpPortfolio, cfg.market], accounts => {
+    const a = parsePortfolio(accounts[0]), b = parsePortfolio(accounts[1]);
+    const market = parseMarket(accounts[2]);
+    const { sizeQ, limitPrice } = order(a, market);
+    // The wrapper refuses a TradeCpi fee under the market's trade_fee_base_bps (docs/LAUNCH.md), and markets
+    // differ (12 bps on the first SOL-PERP market, 15 on COMPUTE-PERP), so never send less than the market's own.
+    const fee = feeBps < market.config.tradeFeeBaseBps ? market.config.tradeFeeBaseBps : feeBps;
+    const delegate = matcherDelegate(cfg.programId, cfg.market, cfg.lpPortfolio, b.owner, matcherProgram, matcherContext);
+    return tradeCpiIx(cfg.programId, owner, cfg.market, portfolio, cfg.lpPortfolio, matcherProgram, matcherContext, delegate, {
       accountAPortfolioId: a.portfolioId, accountAPositionEpoch: a.positionEpoch,
       accountBPortfolioId: b.portfolioId, accountBPositionEpoch: b.positionEpoch, accountBMatcherSequence: b.sequence,
       assetIndex: 0, marketId: market.asset0.marketId, sizeQ, feeBps: fee, limitPrice, backingFeeCapBps: 0,
-    })];
+    });
+  });
 }
 
 export async function buildCreatePortfolio(cfg: DevnetConfig, owner: PublicKey) {
